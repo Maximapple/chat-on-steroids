@@ -9,6 +9,24 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [2.0.3] — 2026-08-28
+
+2.0.3 opens the next version line on top of the published 2.0.2 release. The local tree was reset
+to the tagged 2.0.2 source — the one the six-runner release matrix actually built and published —
+so subsequent work starts from the state CI validates rather than from a diverged local branch.
+
+### Changed
+- **The working baseline is the published release tree.** Local-only experiments that were never
+  part of a published build no longer sit between the tag and ongoing work, so the packaging,
+  release-gate and platform test suites run here exactly as they run on the GitHub runners.
+- **Version identity moves to 2.0.3** across `package.json`, the lockfile, the companion
+  extension manifest and `APP_VERSION`, keeping the app and `extension/` versioned together.
+
+### Notes
+- No runtime, packaging or protocol behavior changes from 2.0.2. The bridge protocol and every
+  published artifact name are unchanged; 2.0.3 is a baseline marker, not a feature release.
+- The macOS artifacts carry the same publisher-unsigned/unnotarized caveat as 2.0.2.
+
 ## [2.0.2] — 2026-08-26
 
 2.0.2 is the native cross-platform release port. The already-published 2.0.1 release remains the
