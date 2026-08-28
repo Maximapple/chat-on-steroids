@@ -183,3 +183,15 @@ export function extensionDir(): string | null {
   }
   return null;
 }
+
+/** Whether this build actually contains the extension source it claims can refresh Chrome. */
+export function bundledExtensionAvailable(): boolean {
+  try {
+    if (app.isPackaged) return validExtension(path.join(process.resourcesPath, 'extension'));
+    return extensionDir() !== null;
+  } catch {
+    // Narrow tests and damaged Electron adapters may not expose app paths. Unknown is not
+    // evidence that the bundled resource exists, so the status fails closed.
+    return false;
+  }
+}

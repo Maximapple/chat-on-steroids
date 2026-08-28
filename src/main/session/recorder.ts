@@ -212,9 +212,21 @@ export async function restoreRecordedConversation(conversationId: string): Promi
 }
 
 /**
- * How long to let a resume's commit land before recording a conversation it may be about to
- * claim. Generous next to the milliseconds a commit actually takes, and bounded because a
- * commit that never lands must not stop the chat being recorded at all.
+ * How long an in-process caller pauses to let a resume's commit land, before recording a
+ * conversation that commit may be about to claim.
+ *
+ * A fast path, not the guarantee. It was once both, and that was wrong: a commit does take
+ * milliseconds, but it cannot start until the replacement chat exists, and the chain in front of
+ * it is not fast — Chrome start, ChatGPT load, content-script boot, redeem, composer readiness,
+ * insertion, send, then the page reporting which conversation it landed in. A live 2.0.3 run
+ * measured 10.27 s from opening the replacement tab to its commit, so this wait expired, the
+ * recorder invented the very shadow session it exists to prevent, and the commit 10 ms later
+ * found its own destination owned by a session it had never heard of and abandoned the
+ * compaction. Waiting longer only moves that cliff. The observation path therefore does not rely
+ * on this at all: {@link deferForResumeCommit} makes `/events` fail closed and retry while the
+ * gate is still up, so the batch is neither recorded into a shadow nor retired from the browser
+ * journal. This stays a short courtesy pause for the few callers that have no retry to fall back
+ * on, and stays bounded because a commit that never lands must not stop chats being recorded.
  */
 const RESUME_COMMIT_SETTLE_MS = 5_000;
 
@@ -226,6 +238,33 @@ async function settleResumeCommit(): Promise<void> {
       timer.unref?.();
     });
   }
+}
+
+/**
+ * Whether an observation batch for this chat must wait for an in-flight resume commit.
+ *
+ * The caller that can retry is the one that should wait. A browser batch for a conversation this
+ * app has never recorded, arriving while a resume is still opening its replacement chat, is
+ * exactly the batch that might be that replacement — and recording it is irreversible in the way
+ * that matters: it creates a local session for B, after which the commit refuses to rebind A→B
+ * and the compaction is lost. Answering the batch as retryable instead costs a round trip and
+ * nothing else. The browser keeps the observations in its durable journal (only a 2xx retires a
+ * row), the gate clears the moment the continuation commits or aborts, and the retry then lands
+ * in the session that was moved onto B — or, if this was an unrelated new chat all along, in an
+ * ordinary new session for it.
+ *
+ * The gate self-expires (`RESUME_CLAIM_WINDOW_MS`), so a resume that never resolves costs a
+ * bounded stall rather than a chat that is never recorded.
+ */
+export async function deferForResumeCommit(conversationId: string): Promise<boolean> {
+  if (!recordingEnabled() || !conversationId) return false;
+  if (!resumeOpeningChat() || conversations.has(conversationId)) return false;
+  // An already-recorded chat cannot become a shadow: the commit's uniqueness check resolves it
+  // to a real session either way, so there is nothing to protect and no reason to stall it.
+  if (await findSessionByConversation(conversationId).catch(() => null)) return false;
+  await settleResumeCommit();
+  if (conversations.has(conversationId) || !resumeOpeningChat()) return false;
+  return !(await findSessionByConversation(conversationId).catch(() => null));
 }
 
 async function initializeSessionForConversation(

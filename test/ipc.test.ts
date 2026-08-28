@@ -30,7 +30,10 @@ vi.mock('electron', () => ({
 }));
 
 // This suite owns IPC behavior, not Electron's packaged-vs-checkout path discovery.
-vi.mock('../src/main/extension-path.js', () => ({ extensionDir: () => process.cwd() }));
+vi.mock('../src/main/extension-path.js', () => ({
+  extensionDir: () => process.cwd(),
+  bundledExtensionAvailable: () => true
+}));
 
 const { defaultConfig, getConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
 const { initSecretsPath, resetSecretsCacheForTests } = await import('../src/main/secrets.js');
@@ -89,6 +92,7 @@ function settings(over: { record: boolean; multiAgent: boolean }) {
     sessions: { ...base.sessions, record: over.record },
     compaction: base.compaction,
     multiAgent: { ...base.multiAgent, enabled: over.multiAgent },
+    uncapturedCaller: base.uncapturedCaller,
     goal: base.goal
   };
 }
@@ -471,9 +475,9 @@ describe('the goal model id', () => {
   const withModel = (model: string) => ({ ...settings({ record: false, multiAgent: false }), goal: { ...defaultConfig().goal, model } });
 
   it('accepts the family aliases OpenRouter marks with a tilde', async () => {
-    const reply = await save(withModel('~deepseek/deepseek-v4-flash-latest'));
+    const reply = await save(withModel('~openai/gpt-5.2'));
     expect(reply.ok, reply.error).toBe(true);
-    expect(getConfig().goal.model).toBe('~deepseek/deepseek-v4-flash-latest');
+    expect(getConfig().goal.model).toBe('~openai/gpt-5.2');
   });
 
   it('still accepts an ordinary pinned id, with or without a variant suffix', async () => {

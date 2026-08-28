@@ -11,21 +11,92 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## [2.0.3] — 2026-08-28
 
-2.0.3 opens the next version line on top of the published 2.0.2 release. The local tree was reset
-to the tagged 2.0.2 source — the one the six-runner release matrix actually built and published —
-so subsequent work starts from the state CI validates rather than from a diverged local branch.
+2.0.3 is the Goal, continuation and release-lifecycle hardening pass on top of the published 2.0.2
+cross-platform port. It keeps the six native package targets and adds explicit recovery boundaries
+for provider calls, unattributed callers, tunnel helpers, the companion extension and application
+updates.
+
+### Added
+- **Windows and Linux application updates use official GitHub release metadata.** Installed NSIS,
+  AppImage and DEB packages check non-blockingly after startup and at a six-hour maximum cadence,
+  expose bounded state through named preload/IPC methods, download automatically, and install only
+  after the user chooses the top-bar action. Architecture-specific metadata prevents a Windows ARM
+  install from accepting x64; drafts/prereleases and downgrades are excluded. macOS stays explicit
+  manual-download while the release is unsigned/unnotarized.
+- **Uncaptured chat access is an explicit opt-in principal.** An extension-unobserved request can
+  use the normal enabled Core/Desktop capabilities only while the setting is on. It has a separate
+  workspace and terminal owner, and cannot impersonate a captured conversation or worker. Turning
+  it off revokes immediately rather than prospectively: sessions that principal started are
+  terminated and forgotten, its workspace is dropped, and a command still inside its initial yield
+  is refused rather than published — including across an off/on flap, because a call is fenced by
+  the grant it was admitted under and not by what the setting reads later. Exact captured evidence
+  always wins.
+- **App/extension compatibility is visible.** The bridge reports exact connected and bundled
+  versions/protocols; the top bar distinguishes absent, current, older, newer, incompatible and
+  bundled-missing states. The app refreshes and reveals the stable unpacked-extension directory,
+  while truthfully requiring Chrome's Reload/Load unpacked action.
+- **Goal provider failure is durable and retryable.** One originating turn uses at most three
+  same-model attempts with bounded backoff, and retries only what retrying can fix: transient HTTP
+  (408/425/429/5xx), transport failures and timeouts. A non-transient HTTP status and deterministic
+  model output — malformed completion or stream records, and replies over the reply/record/body
+  bounds — spend exactly one attempt, because the same request would produce the same answer. The
+  opening message a saved Goal sends into a brand-new chat runs the same policy on a shorter
+  per-attempt timeout, so it self-heals from provider trouble instead of failing on the first
+  hiccup. Timeout, cancellation and generation fencing suppress stale completions; pending/final
+  draft state and spent receipts survive app, content-script and MV3 worker restarts. A terminal
+  failure offers manual Retry and never types internal error text.
 
 ### Changed
-- **The working baseline is the published release tree.** Local-only experiments that were never
-  part of a published build no longer sit between the tag and ongoing work, so the packaging,
-  release-gate and platform test suites run here exactly as they run on the GitHub runners.
-- **Version identity moves to 2.0.3** across `package.json`, the lockfile, the companion
-  extension manifest and `APP_VERSION`, keeping the app and `extension/` versioned together.
+- **Goal's stock model is now GLM 5.3 Flash** (`z-ai/glm-5.3-flash`). Only the exact retired stock
+  model migrates; user-selected model ids remain untouched.
+- **Compact & Resume reports its own latency.** The completion log now states the milliseconds
+  between opening the browser and the page's receipt, which spans the whole user-visible window:
+  Chrome start, ChatGPT load, content-script boot, redeem, composer readiness, insertion and Send.
+  The composer-driven bootstrap itself is unchanged in 2.0.3 — an already-mounted editor proceeds
+  immediately, otherwise a MutationObserver wakes on the React mount, with no `document.readyState`
+  sampling or wall-clock hydration sleep — but until now a slow resume could only be described,
+  never measured. The first timed live run also found a real defect and is the reason for the fix
+  below.
+- **A resume no longer loses its session to its own replacement chat.** The new chat becomes
+  visible to the app several seconds before the page reports which conversation it landed in — a
+  live run measured 10.27 s — and whichever half records it first wins. Recording it first used to
+  create a second local session, after which the move refused to overwrite it and the compaction
+  was abandoned with the replacement chat left holding no continued history. Observations for an
+  unknown chat are now answered as retryable while a resume might still claim it: the browser keeps
+  them, the move completes, and the retry is filed under the session that was carried across.
+- **Cloudflare quick tunnels are supervised.** Helper exit or startup timeout retires the exact
+  process tree and reconnects with bounded exponential backoff. Stale generations cannot publish
+  a URL, and Disconnect cancels every pending restart.
+- **Session continuation handles are short and durable.** Model-visible paging cursors are bounded
+  references backed by a durable LRU map, while older self-contained cursors remain readable.
+  Identical state reuses one handle instead of growing the map or forcing the model to transcribe
+  hundreds of opaque characters.
+- **Command guidance and recovery are evidence-shaped.** Windows PowerShell 5.1 simple `&&`/`||`
+  chains can be normalized to `$?` guards; UTF-8 `Get-Content` has an explicit read default; bundled
+  ripgrep and partial-search exit notes avoid unnecessary reruns. The model-facing output budget is
+  fixed at the transport-safe default instead of advertising a larger value ChatGPT discards;
+  `max_output_tokens` is still accepted and ignored, because these schemas reject unknown keys and
+  ChatGPT caches tool definitions, so removing it outright failed calls from older conversations.
 
-### Notes
-- No runtime, packaging or protocol behavior changes from 2.0.2. The bridge protocol and every
-  published artifact name are unchanged; 2.0.3 is a baseline marker, not a feature release.
-- The macOS artifacts carry the same publisher-unsigned/unnotarized caveat as 2.0.2.
+### Fixed
+- Ordinary completed user turns no longer flash a speculative Goal loading panel; only actionable
+  output, failure or a manually opened editor occupies composer UI.
+- Goal editor DOM, focus, selection and both editor/menu scroll positions survive unrelated
+  transcript/activity repaints instead of jumping to the top.
+- The settings gear stays present through ChatGPT SPA navigation and composer replacement without
+  duplicates or stale A→B→A results. This includes the current settled voice-only New Chat
+  composer (`data-composer-transition-slot="trailing"`), not only its transient send-button shape.
+  New Chat keeps the gear for Goal setup but no longer paints a meaningless **Compact** pill before
+  a conversation exists.
+- Compact & Resume remains exactly-once or safely retryable through durable-write failure, duplicate
+  capture/ACK, missing destination identity, tab/bridge/app restart and late competing delivery.
+- Updater initialization/network failures remain a recoverable top-bar state and cannot break app
+  startup or expose release URLs/local cache paths to the renderer.
+
+### Release notes
+- The release candidate now contains checksum-bearing `latest.yml`, `latest-arm64.yml`,
+  `latest-linux.yml` and `latest-linux-arm64.yml` updater metadata beside the existing packages and
+  standalone extension ZIP. macOS retains the 2.0.2 publisher-unsigned/unnotarized caveat.
 
 ## [2.0.2] — 2026-08-26
 

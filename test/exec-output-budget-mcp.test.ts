@@ -3,12 +3,14 @@
  *
  * `exec-output-budget.test.ts` pins the formatter, but it builds its own `ExecCommandToolOutput`
  * and therefore chooses the policy itself. That cannot see which constant `tools-core` actually
- * hands the process manager: passing `DEFAULT_TRUNCATION_POLICY` at the handler would restore the
- * 10_000-token ceiling, make every `max_output_tokens` above the default inert again, and leave
- * every unit test passing.
+ * hands the process manager: a different policy at the handler would change how much output the
+ * model really gets and leave every unit test passing.
  *
- * So this goes through the server the connector really serves: one `exec_command` request with
- * `max_output_tokens: 30000`, one without, against a command that emits ~200 KB.
+ * `max_output_tokens` no longer does anything — ChatGPT drops a tool result over roughly 10_000
+ * tokens before the model reads it, so a larger budget could never be spent — so this pins both
+ * halves of that decision through the server the connector really serves: the fixed default budget
+ * is what a plain call gets, and a call still sending the retired parameter still runs, gets that
+ * same budget, and is told the parameter was ignored.
  */
 
 import { promises as fs } from 'node:fs';
@@ -84,8 +86,13 @@ function sseJson(body: string): unknown {
   return JSON.parse(data === '' ? body : data);
 }
 
-/** The model-visible text of one `exec_command` call. */
-async function execOutput(url: string, maxOutputTokens: number | undefined): Promise<string> {
+interface ExecReply {
+  text: string;
+  isError: boolean;
+}
+
+/** One `exec_command` call, with whatever `extra` arguments the case is probing. */
+async function execCall(url: string, extra: Record<string, unknown> = {}): Promise<ExecReply> {
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
@@ -95,38 +102,53 @@ async function execOutput(url: string, maxOutputTokens: number | undefined): Pro
       method: 'tools/call',
       params: {
         name: 'exec_command',
-        arguments: {
-          cmd: PROBE_CMD,
-          workdir: '/probe',
-          ...(maxOutputTokens === undefined ? {} : { max_output_tokens: maxOutputTokens })
-        }
+        arguments: { cmd: PROBE_CMD, workdir: '/probe', ...extra }
       }
     })
   });
   expect(response.status).toBe(200);
   const body = sseJson(await response.text()) as {
+    error?: { message?: string };
     result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean };
   };
-  const text = body.result?.content?.find((part) => part.type === 'text')?.text ?? '';
-  expect(body.result?.isError ?? false, text).toBe(false);
-  return text;
+  // A schema rejection can surface as a JSON-RPC error or as an isError result depending on
+  // where validation runs, and this test cares that it is refused, not which layer refused it.
+  if (body.error) return { text: body.error.message ?? '', isError: true };
+  return {
+    text: body.result?.content?.find((part) => part.type === 'text')?.text ?? '',
+    isError: body.result?.isError ?? false
+  };
 }
 
-it('honours max_output_tokens above the default through the real exec_command handler', async () => {
+it('gives a plain exec_command call the fixed default output budget', async () => {
   endpoint = await serve();
 
-  const requested = await execOutput(endpoint.url, 30_000);
-  const omitted = await execOutput(endpoint.url, undefined);
+  const reply = await execCall(endpoint.url);
 
-  // The command really ran and really overflowed both budgets.
-  expect(requested).toContain('Process exited with code 0');
-  expect(requested).toContain('Warning: truncated output');
-  expect(omitted).toContain('Warning: truncated output');
+  // The command really ran and really overflowed the budget.
+  expect(reply.isError, reply.text).toBe(false);
+  expect(reply.text).toContain('Process exited with code 0');
+  expect(reply.text).toContain('Warning: truncated output');
 
-  // 30_000 tokens is ~120 KB of retained output. Under a 10_000-token ceiling this is ~40 KB,
-  // and under the original bytes:10_000 policy it is ~10 KB.
-  expect(requested.length).toBeGreaterThan(100_000);
-  // And the default is still the default: asking for nothing must not get the ceiling.
-  expect(omitted.length).toBeLessThan(60_000);
-  expect(requested.length).toBeGreaterThan(omitted.length);
+  // DEFAULT_MAX_OUTPUT_TOKENS is 10_000, which is ~40 KB of retained output. Under the older
+  // bytes:10_000 policy this would be ~10 KB, and under a 30_000-token budget ~120 KB, so the
+  // window below fails if either the policy or the fixed default is changed by accident.
+  expect(reply.text.length).toBeGreaterThan(30_000);
+  expect(reply.text.length).toBeLessThan(60_000);
+}, 30_000);
+
+it('accepts a retired max_output_tokens, ignores its value, and says so', async () => {
+  endpoint = await serve();
+
+  // ChatGPT caches connector schemas, so conversations opened before the parameter was retired
+  // keep sending it. Under `.strict()` that made the whole command fail with `Unrecognized key`
+  // and produce no output at all. The key is taken and ignored instead, and the model is told in
+  // the notes — it learns the parameter is gone without losing the command it actually ran.
+  const reply = await execCall(endpoint.url, { max_output_tokens: 30_000 });
+
+  expect(reply.isError, reply.text).toBe(false);
+  expect(reply.text).toContain('max_output_tokens is retired and was ignored');
+  // The budget really is unmoved: 30_000 tokens would retain ~120 KB, the fixed default ~40 KB.
+  expect(reply.text.length).toBeGreaterThan(30_000);
+  expect(reply.text.length).toBeLessThan(60_000);
 }, 30_000);

@@ -1799,10 +1799,15 @@ describe('extension observation journal', () => {
         seen.push({ route: url.pathname, client: url.searchParams.get('goalClient') });
         return response(200, { sessionId: 'session', entries: [], stream: [], nextSince: 0 });
       }
-      if (url.pathname === '/goal/draft' || url.pathname === '/goal/ack') {
+      if (url.pathname === '/goal/draft' || url.pathname === '/goal/ack' || url.pathname === '/goal/retry') {
         const body = JSON.parse(String(init.body || '{}'));
         seen.push({ route: url.pathname, client: typeof body.clientId === 'string' ? body.clientId : null });
-        return response(200, url.pathname.endsWith('/draft') ? { goal: { stage: 'drafting' } } : { acknowledged: true });
+        return response(
+          200,
+          url.pathname.endsWith('/draft') || url.pathname.endsWith('/retry')
+            ? { goal: { stage: 'drafting' } }
+            : { acknowledged: true }
+        );
       }
       return response(404, {});
     });
@@ -1810,11 +1815,13 @@ describe('extension observation journal', () => {
 
     await worker.send({ type: 'activity', conversationId, since: 0 }, 73);
     await worker.send({ type: 'goal_draft', conversationId, turnId: 'generation-owned' }, 73);
+    await worker.send({ type: 'goal_retry', conversationId, token: 'goal-token' }, 73);
     await worker.send({ type: 'goal_ack', conversationId, token: 'goal-token' }, 73);
 
     expect(seen).toEqual([
       { route: '/activity', client: '73' },
       { route: '/goal/draft', client: '73' },
+      { route: '/goal/retry', client: '73' },
       { route: '/goal/ack', client: '73' }
     ]);
   });

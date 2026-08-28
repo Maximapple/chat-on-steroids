@@ -50,6 +50,29 @@ const CONSOLE_UTF8 =
   '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ' +
   '$OutputEncoding = [System.Text.UTF8Encoding]::new($false); ';
 
+/**
+ * Makes `Get-Content` *read* UTF-8, which is a different default from the one above.
+ *
+ * CONSOLE_UTF8 fixes the way the child encodes what it prints, and it is why printing a
+ * literal `§` from a script is correct. It cannot fix a string that was already wrong before
+ * it reached stdout, and that is what `Get-Content` produces: in Windows PowerShell 5.1 its
+ * default is the machine's ANSI code page, so a UTF-8 source file decodes as cp1252 and
+ * `— §` arrives as `â€" Â§` — faithfully re-encoded as UTF-8 on the way out, which is what
+ * made this look like the same bug and stay open after that one was fixed. Measured on the
+ * last 20 recorded sessions: 41 of 966 exec_command calls returned file text corrupted this
+ * way, 39 of them recorded as successful, because nothing about the call fails.
+ *
+ * Only the reading cmdlet is defaulted. `Select-String` already detects UTF-8 on its own
+ * (verified on 5.1), and defaulting a *writing* cmdlet such as `Set-Content` or `Out-File`
+ * would mean 5.1's `UTF8` — which emits a BOM — silently changing files the model writes.
+ * An explicit `-Encoding` on the call still wins, so `-Encoding Byte` keeps working.
+ *
+ * The tradeoff is deliberate: a genuinely cp1252-encoded file now decodes wrongly where it
+ * used to decode correctly. This repository, the files it edits and the `read` tool are all
+ * UTF-8, so this trades a rare wrong answer for the common one being right.
+ */
+const GET_CONTENT_UTF8 = "$PSDefaultParameterValues['Get-Content:Encoding'] = 'UTF8'; ";
+
 export class ExecError extends Error {}
 export type CommandEnvironment = Record<string, string>;
 
@@ -438,7 +461,7 @@ export function prepareShellCommand(
   }
   const shell = findPowerShell();
   if (!shell) throw new ExecError('PowerShell was not found on this system');
-  const cleanScript = `${CONSOLE_UTF8}$ProgressPreference='SilentlyContinue'; ${script}`;
+  const cleanScript = `${CONSOLE_UTF8}${GET_CONTENT_UTF8}$ProgressPreference='SilentlyContinue'; ${script}`;
   const encoded = Buffer.from(cleanScript, 'utf16le').toString('base64');
   return {
     file: shell,
@@ -466,7 +489,7 @@ export async function runPowerShell(
   // command line as a place where model-supplied text could be misparsed. The encoding
   // preamble is the other half: what goes *in* has been unambiguous all along, and this is
   // what makes what comes back out unambiguous too. See CONSOLE_UTF8.
-  const cleanScript = `${CONSOLE_UTF8}$ProgressPreference='SilentlyContinue'; ${script}`;
+  const cleanScript = `${CONSOLE_UTF8}${GET_CONTENT_UTF8}$ProgressPreference='SilentlyContinue'; ${script}`;
   const encoded = Buffer.from(cleanScript, 'utf16le').toString('base64');
   const result = await run({
     file: shell,

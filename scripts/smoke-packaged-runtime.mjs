@@ -39,6 +39,7 @@ if (!packageRoot) throw new Error(`Could not find unpacked ${targetPlatform}-${t
 const sourcePackage = JSON.parse(readFileSync(path.join(repository, 'package.json'), 'utf8'));
 const expectedVersion = sourcePackage.version;
 const expectedElectronVersion = sourcePackage.devDependencies?.electron;
+const expectedUpdaterVersion = sourcePackage.dependencies?.['electron-updater'];
 if (!/^\d+\.\d+\.\d+$/.test(expectedElectronVersion ?? '')) {
   throw new Error(`Electron must be pinned to an exact release version, got ${JSON.stringify(expectedElectronVersion)}`);
 }
@@ -100,6 +101,10 @@ for (const relative of [
   `app.asar.unpacked/node_modules/tree-sitter/prebuilds/${nativeDir}/tree-sitter.node`,
   `app.asar.unpacked/node_modules/tree-sitter-bash/prebuilds/${nativeDir}/tree-sitter-bash.node`
 ]) required(relative);
+
+// electron-updater reads this provider descriptor from the installed resources. Its presence
+// proves the runtime will use official release metadata instead of a source-tree assumption.
+if (targetPlatform === 'win32' || targetPlatform === 'linux') required('app-update.yml');
 
 if (targetPlatform === 'win32') {
   required(`THIRD-PARTY-NOTICES-sharp-win32-${targetArch}.md`);
@@ -180,6 +185,10 @@ const probe = String.raw`
   const pty = require(base + '/app.asar/node_modules/node-pty');
   const Parser = require(base + '/app.asar/node_modules/tree-sitter');
   const Bash = require(base + '/app.asar/node_modules/tree-sitter-bash');
+  // ELECTRON_RUN_AS_NODE deliberately does not expose require('electron'), so instantiating
+  // autoUpdater here would test an impossible Node-only environment. Verify the exact packaged
+  // dependency/version in this native probe; the normal GUI launch exercises Electron import.
+  const updater = require(base + '/app.asar/node_modules/electron-updater/package.json');
   const manifest = require(base + '/app.asar/package.json');
   const png = await sharp({ create: { width: 2, height: 2, channels: 4, background: { r: 1, g: 2, b: 3, alpha: 1 } } }).png().toBuffer();
   const parser = new Parser();
@@ -195,7 +204,7 @@ const probe = String.raw`
     terminal.onData((data) => { output += data; });
     terminal.onExit(({ exitCode }) => { clearTimeout(timer); exitCode === 0 ? resolve() : reject(new Error('node-pty child exited ' + exitCode)); });
   });
-  process.stdout.write(JSON.stringify({ version: manifest.version, electron: process.versions.electron, sharp: sharp.versions.sharp, vips: sharp.versions.vips, png: png.length, pty: output.includes('packaged-pty'), tree: tree.rootNode.type }) + '\n');
+  process.stdout.write(JSON.stringify({ version: manifest.version, electron: process.versions.electron, sharp: sharp.versions.sharp, vips: sharp.versions.vips, png: png.length, pty: output.includes('packaged-pty'), tree: tree.rootNode.type, updater: updater.version }) + '\n');
   process.exit(0);
 })().catch((error) => process.stderr.write(String(error?.stack || error) + '\n', () => process.exit(1)));`;
 
@@ -210,7 +219,7 @@ if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
 if (result.status !== 0) process.exit(result.status ?? 1);
 const runtime = JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
-if (runtime.version !== expectedVersion || runtime.electron !== expectedElectronVersion || !runtime.sharp || !runtime.vips || runtime.png <= 0 || !runtime.pty || runtime.tree !== 'program') {
+if (runtime.version !== expectedVersion || runtime.electron !== expectedElectronVersion || !runtime.sharp || !runtime.vips || runtime.png <= 0 || !runtime.pty || runtime.tree !== 'program' || runtime.updater !== expectedUpdaterVersion) {
   throw new Error(`Packaged native runtime probe failed: ${JSON.stringify(runtime)}`);
 }
 process.stdout.write(`Packaged ${targetPlatform}-${targetArch} resources and native runtimes verified for ${expectedVersion}.\n`);

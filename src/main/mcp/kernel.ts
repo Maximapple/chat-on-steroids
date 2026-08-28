@@ -37,6 +37,7 @@ import { currentWorkspace, learnWorkspace } from '../workspace.js';
 import { ExecError } from '../exec.js';
 import { ComputerError } from '../computer/index.js';
 import { getConfig } from '../config.js';
+import { browserPresent } from '../bridge.js';
 import {
   AgentError,
   acknowledgeOffers,
@@ -67,6 +68,7 @@ import {
   runInCallContext,
   trackInFlight,
   trackMcpRequest,
+  uncapturedAuthorizationEpoch,
   type CallContext
 } from './call-context.js';
 import {
@@ -411,14 +413,17 @@ async function dispatchTracked(
   // mate while a swarm is active. Use the full exact-id window, not the shorter prime window:
   // the live worker failure that motivated IDENTITY_EVIDENCE_MS arrived ~8 seconds late.
   const identitySensitive = needsWorkspaceIdentity(name, args);
+  let waitedForIdentity = false;
   if (!context.caller.conversationId && identitySensitive && swarmRunning() && requestId) {
     context.caller.conversationId = await awaitFreshCallOrigin(name, startedAt, IDENTITY_EVIDENCE_MS, { requestId });
+    waitedForIdentity = true;
   }
   // A run that ended leaves an explicit short-lived lease tombstone for each open worker
   // chat. Resolve exact request identity before ordinary tools too while such leases exist;
   // otherwise an explicit-workdir exec could keep mutating after its worker was retired.
   if (!context.caller.conversationId && hasRetiredWorkerLeases() && requestId) {
     context.caller.conversationId = await awaitFreshCallOrigin(name, startedAt, IDENTITY_EVIDENCE_MS, { requestId });
+    waitedForIdentity = true;
   }
   // Dormant histories are long-lived identity fences, not active slot claims. An old worker tab
   // may still issue a stale server-side call after its run parked, and without exact request-id
@@ -427,6 +432,19 @@ async function dispatchTracked(
   // exist, just as we do for short-lived retired worker leases.
   if (!context.caller.conversationId && hasDormantWorkerLeases() && requestId) {
     context.caller.conversationId = await awaitFreshCallOrigin(name, startedAt, IDENTITY_EVIDENCE_MS, { requestId });
+    waitedForIdentity = true;
+  }
+  // This setting deliberately creates one non-conversation principal. When the browser is
+  // present, spend the exact evidence window before adopting it so a captured conversation
+  // always wins. When the extension is absent there is no evidence producer to wait for.
+  if (!context.caller.conversationId && getConfig().uncapturedCaller.enabled) {
+    if (requestId && browserPresent() && !waitedForIdentity) {
+      context.caller.conversationId = await awaitFreshCallOrigin(name, startedAt, IDENTITY_EVIDENCE_MS, { requestId });
+    }
+    context.caller.authorizedUncaptured = !context.caller.conversationId;
+    // Stamp the grant this call is being admitted under, so a revocation that lands while it is
+    // still running can be told apart from the setting merely being on again by the time it ends.
+    if (context.caller.authorizedUncaptured) context.caller.uncapturedEpoch = uncapturedAuthorizationEpoch();
   }
   // Two things about liveness, both before the agent is resolved so that the answer this
   // call gets is the state this call itself established.
@@ -482,8 +500,10 @@ async function dispatchTracked(
   // inbox that rode on the missing result. Every other tool call from the same chat is refused
   // by endedWorkerNotice as before.
   const endedWorker = isFinish ? null : endedWorkerNotice(context.caller.conversationId);
-  const retiredLeaseAmbiguous = hasRetiredWorkerLeases() && !context.caller.conversationId;
-  const dormantLeaseAmbiguous = hasDormantWorkerLeases() && !context.caller.conversationId;
+  const retiredLeaseAmbiguous =
+    hasRetiredWorkerLeases() && !context.caller.conversationId && !context.caller.authorizedUncaptured;
+  const dormantLeaseAmbiguous =
+    hasDormantWorkerLeases() && !context.caller.conversationId && !context.caller.authorizedUncaptured;
   // In a swarm, a relative/defaulted filesystem operation is not safe to execute after the
   // exact caller lookup timed out: its workspace is part of the requested operation. Falling
   // back to the first approved root turns an attribution outage into wrong-project mutation.
@@ -511,7 +531,7 @@ async function dispatchTracked(
               'CALLER_IDENTITY_REQUIRED: a dormant worker chat still belongs to its prime history, and the connector could not prove this call belongs to a different conversation. No local tool was run. Restore the browser-extension identity path and retry.'
             )
           )
-        : swarmRunning() && identitySensitive && !context.caller.conversationId
+        : swarmRunning() && identitySensitive && !context.caller.conversationId && !context.caller.authorizedUncaptured
         ? Promise.resolve(
             fail(
               'CALLER_IDENTITY_REQUIRED: this operation needs this chat’s exact workspace, but the connector could not prove which ChatGPT conversation made the call. Retry after the extension reconnects; no file or command was changed.'
@@ -524,7 +544,10 @@ async function dispatchTracked(
   // only be able to disagree with the stronger answer it waited for.
   if (!context.caller.conversationId) {
     const resolved = callerConversation(name, startedAt, requestId);
-    if (resolved) context.caller.conversationId = resolved;
+    if (resolved) {
+      context.caller.conversationId = resolved;
+      context.caller.authorizedUncaptured = false;
+    }
   }
   // Never erase an identity a handler proved more strongly (agents::callerNow). The old
   // post-handler pass could fail to rediscover evidence that callerNow had already reserved

@@ -113,11 +113,13 @@ describe('cross-platform packaging targets', () => {
     expect(matrix).toEqual([
       {
         name: 'Windows x64', platform: 'win32', arch: 'x64', runner: 'windows-2025',
-        script: 'dist:x64', artifact: 'package-windows-x64', files: 'release/Chat-On-Steroids-Setup-x64.exe'
+        script: 'dist:x64', artifact: 'package-windows-x64',
+        files: 'release/Chat-On-Steroids-Setup-x64.exe\nrelease/latest.yml\n'
       },
       {
         name: 'Windows arm64', platform: 'win32', arch: 'arm64', runner: 'windows-11-arm',
-        script: 'dist:arm64', artifact: 'package-windows-arm64', files: 'release/Chat-On-Steroids-Setup-arm64.exe'
+        script: 'dist:arm64', artifact: 'package-windows-arm64',
+        files: 'release/Chat-On-Steroids-Setup-arm64.exe\nrelease/latest-arm64.yml\n'
       },
       {
         name: 'macOS x64', platform: 'darwin', arch: 'x64', runner: 'macos-15-intel',
@@ -132,12 +134,12 @@ describe('cross-platform packaging targets', () => {
       {
         name: 'Linux x64', platform: 'linux', arch: 'x64', runner: 'ubuntu-24.04',
         script: 'dist:linux:x64', artifact: 'package-linux-x64',
-        files: 'release/Chat-On-Steroids-Linux-x64.AppImage\nrelease/Chat-On-Steroids-Linux-x64.deb\n'
+        files: 'release/Chat-On-Steroids-Linux-x64.AppImage\nrelease/Chat-On-Steroids-Linux-x64.deb\nrelease/latest-linux.yml\n'
       },
       {
         name: 'Linux arm64', platform: 'linux', arch: 'arm64', runner: 'ubuntu-24.04-arm',
         script: 'dist:linux:arm64', artifact: 'package-linux-arm64',
-        files: 'release/Chat-On-Steroids-Linux-arm64.AppImage\nrelease/Chat-On-Steroids-Linux-arm64.deb\n'
+        files: 'release/Chat-On-Steroids-Linux-arm64.AppImage\nrelease/Chat-On-Steroids-Linux-arm64.deb\nrelease/latest-linux-arm64.yml\n'
       }
     ]);
     expect(parsed.jobs.package['runs-on']).toBe('${{ matrix.runner }}');
@@ -412,6 +414,8 @@ describe('cross-platform packaging targets', () => {
 
     const packagedRuntime = readFileSync(path.join(root, 'scripts', 'smoke-packaged-runtime.mjs'), 'utf8');
     expect(packagedRuntime).toContain("for (const dependency of ['node-pty', 'tree-sitter', 'tree-sitter-bash'])");
+    expect(packagedRuntime).toContain("require(base + '/app.asar/node_modules/electron-updater/package.json')");
+    expect(packagedRuntime).toContain("required('app-update.yml')");
     expect(packagedRuntime).toContain('directories.length !== 1 || directories[0] !== nativeDir');
 
     const readme = readFileSync(path.join(root, 'README.md'), 'utf8');
@@ -588,6 +592,10 @@ Load command 11
       'Chat-On-Steroids-Linux-arm64.AppImage',
       'Chat-On-Steroids-Linux-arm64.deb',
       'Chat-On-Steroids-Extension.zip',
+      'latest.yml',
+      'latest-arm64.yml',
+      'latest-linux.yml',
+      'latest-linux-arm64.yml',
       'SHA256SUMS.txt'
     ];
     const checksumStep = release.slice(

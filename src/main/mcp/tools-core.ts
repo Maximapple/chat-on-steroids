@@ -46,9 +46,12 @@ import { DEFAULT_APPLY_PATCH_FILE_UPDATE_MODE } from '../codex/apply-patch/mode.
 import { maybeParseApplyPatchForExec } from '../codex/apply-patch/invocation.js';
 import { composeCommandBatch, parseCommandBatchSections } from '../codex/command-batch.js';
 import { formatExecOutputForModel, newStreamOutput } from '../codex/exec-output.js';
+import { getConfig } from '../config.js';
 import { DEFAULT_TRUNCATION_POLICY, EXEC_OUTPUT_CEILING_POLICY, unifiedExecManager } from '../codex/manager.js';
 import {
+  AUTHORIZED_UNCAPTURED_OWNER,
   execOwnershipDenied,
+  execCallerOwner,
   forgetExecOwner,
   noteExecOwner,
   provenConversation
@@ -78,6 +81,7 @@ import {
   EXEC_COMMAND_WORKDIR_DESCRIPTION,
   EXEC_COMMAND_YIELD_TIME_DESCRIPTION,
   MAX_OUTPUT_TOKENS_DESCRIPTION,
+  MAX_OUTPUT_TOKENS_RETIRED_NOTE,
   WRITE_STDIN_CHARS_DESCRIPTION,
   WRITE_STDIN_DESCRIPTION,
   WRITE_STDIN_SESSION_ID_DESCRIPTION,
@@ -89,9 +93,11 @@ import {
   bindBundledRipgrep,
   execRecoveryHints,
   nonZeroExitIsBenign,
+  normalizePowerShellOperators,
   normalizeShellCommand,
   repairPowerShellQuoting,
-  withExecNotes
+  withExecNotes,
+  writeStdinExitIsBenign
 } from '../exec-hints.js';
 import { childEnv } from '../exec.js';
 import { locateRipgrep } from '../ripgrep.js';
@@ -118,7 +124,8 @@ import {
   noteChanges,
   noteCount,
   noteDetail,
-  noteExec
+  noteExec,
+  uncapturedAuthorityCurrent
 } from './call-context.js';
 import {
   awaitFreshCallOrigin,
@@ -610,6 +617,8 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             workdir: z.string().optional().describe(EXEC_COMMAND_WORKDIR_DESCRIPTION),
             tty: z.boolean().optional().describe(EXEC_COMMAND_TTY_DESCRIPTION),
             yield_time_ms: unsignedIntegerNumber.optional().describe(EXEC_COMMAND_YIELD_TIME_DESCRIPTION),
+            // Accepted and ignored on purpose. See MAX_OUTPUT_TOKENS_DESCRIPTION: this object is
+            // `.strict()`, and a conversation holding an older cached schema still sends the key.
             max_output_tokens: unsignedIntegerNumber.optional().describe(MAX_OUTPUT_TOKENS_DESCRIPTION),
             shell: z.string().optional().describe(EXEC_COMMAND_SHELL_DESCRIPTION),
             login: z.boolean().optional().describe(EXEC_COMMAND_LOGIN_DESCRIPTION)
@@ -672,12 +681,23 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               nodeFs.readdirSync(nodePath.resolve(dir.real, relativeDirectory))
             );
             const prefix = (note: string): string => (isBatch ? `Command ${index + 1}: ${note}` : note);
-            commandNotes.push(...repaired.notes.map(prefix), ...normalized.notes.map(prefix));
-            return bindBundledRipgrep(
+            const bound = bindBundledRipgrep(
               normalized.cmd,
               shell.shellType,
               shell.shellType === 'cmd' ? null : locateRipgrep()
             );
+            // Operators last, and for the same reason binding runs after normalising: this turns
+            // one statement into several, and every reader above it — glob expansion's
+            // first-statement rule, ripgrep binding's per-statement head token — would then be
+            // reading a line the model did not write. Chained commands each get bound on their
+            // own before they are joined, because binding splits on these operators too.
+            const chained = normalizePowerShellOperators(bound, shell.shellType, shell.shellPath);
+            commandNotes.push(
+              ...repaired.notes.map(prefix),
+              ...normalized.notes.map(prefix),
+              ...chained.notes.map(prefix)
+            );
+            return chained.cmd;
           });
           // Shell functions/aliases can resolve before applications on PATH. The app deliberately
           // ships ripgrep, parses rg's flags against that exact version, and puts it first on child
@@ -726,7 +746,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
                     wallTimeMs: 0,
                     rawOutput: Buffer.from(patchRun.content, 'utf8'),
                     truncationPolicy: EXEC_OUTPUT_CEILING_POLICY,
-                    maxOutputTokens: input.max_output_tokens,
+                    maxOutputTokens: undefined,
                     processId: null,
                     exitCode: null,
                     originalTokenCount: null,
@@ -750,7 +770,9 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               hookCommand: commandDetail,
               processId,
               yieldTimeMs: input.yield_time_ms ?? DEFAULT_EXEC_YIELD_TIME_MS,
-              maxOutputTokens: input.max_output_tokens,
+              // Always the default budget: the model-facing parameter is retired because ChatGPT
+              // discards a result over its own ~10k-token limit before the model reads it.
+              maxOutputTokens: undefined,
               truncationPolicy: EXEC_OUTPUT_CEILING_POLICY,
               cwd: dir.real,
               displayCwd: dir.virtual,
@@ -764,13 +786,48 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             } else {
               let owner = provenConversation(currentCaller().requestId, currentCaller().conversationId);
               const call = currentCall();
-              if (!owner && call?.caller.requestId) {
+              if (!owner && call?.caller.requestId && !call.caller.authorizedUncaptured) {
                 owner = await awaitFreshCallOrigin('exec_command', call.startedAt, IDENTITY_EVIDENCE_MS, {
                   requestId: call.caller.requestId
                 });
-                if (owner) call.caller.conversationId = owner;
+                if (owner) {
+                  call.caller.conversationId = owner;
+                  call.caller.authorizedUncaptured = false;
+                }
               }
-              noteExecOwner(output.processId, owner);
+              const resolvedOwner = execCallerOwner(
+                call?.caller.requestId ?? null,
+                owner,
+                call?.caller.authorizedUncaptured === true
+              );
+              // The revocation fence, and it has to be here rather than only in the revoke.
+              //
+              // `authorizedUncaptured` was decided when this call started, but a session becomes
+              // revocable only once it is published — and publication happens after the initial
+              // yield above, which can be ten seconds of running command. Turning the switch off
+              // inside that window found nothing in the registry to kill, and then this line
+              // published a live terminal owned by the principal the user had just withdrawn.
+              // The switch is therefore read again here, at the moment authority is actually
+              // granted, and a session that lost its authority mid-flight is killed rather than
+              // recorded. The command's output is not returned: it ran under an authorisation
+              // that no longer exists, and handing it back would be the leak the switch exists to
+              // prevent.
+              // Both halves are needed. The epoch catches a revocation — including a true→false→true
+              // flap, where the setting reads enabled again but the grant this call was admitted
+              // under has been retired. The live setting catches the narrow window inside
+              // `settings:save` where the config has already been written and the revoke that
+              // advances the epoch has not run yet.
+              const stillAuthorized =
+                call !== null && uncapturedAuthorityCurrent(call.caller) && getConfig().uncapturedCaller.enabled;
+              if (resolvedOwner === AUTHORIZED_UNCAPTURED_OWNER && !stillAuthorized) {
+                await unifiedExecManager.terminateProcess(output.processId);
+                forgetExecOwner(output.processId);
+                unifiedExecManager.releaseProcessId(output.processId);
+                return fail(
+                  'exec_command was refused: uncaptured-caller access was turned off while this command was starting, so its session was terminated. Re-enable it in the app, or run the command from a chat this app can identify.'
+                );
+              }
+              noteExecOwner(output.processId, resolvedOwner);
             }
             const responseText = execCommandResponseText(output);
             // A search that found nothing exits 1 and has not failed. Recording it as an
@@ -807,14 +864,15 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             // `Process exited with code 1` under an empty body and re-run a search that had
             // already answered. It is the same classification, now also said out loud.
             const notes = [
+              ...(input.max_output_tokens === undefined ? [] : [MAX_OUTPUT_TOKENS_RETIRED_NOTE]),
               ...commandNotes,
               ...(benign
                 ? isBatch
                   ? nonZeroSections.map(
                       (section) =>
-                        `Command ${section.index}: ${benignExitNote(boundCommands[section.index - 1] ?? '', shell.shellType)}`
+                        `Command ${section.index}: ${benignExitNote(boundCommands[section.index - 1] ?? '', shell.shellType, section.exitCode, section.text)}`
                     )
-                  : [benignExitNote(boundCommand, shell.shellType)]
+                  : [benignExitNote(boundCommand, shell.shellType, output.exitCode, responseText)]
                 : []),
               ...execRecoveryHints(rawCommands.join('\n'), responseText, shell.shellType)
             ];
@@ -850,13 +908,21 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           // belong elsewhere; an unproven caller keeps working exactly as before.
           let asking = provenConversation(currentCaller().requestId, currentCaller().conversationId);
           const call = currentCall();
-          if (!asking && call?.caller.requestId) {
+          if (!asking && call?.caller.requestId && !call.caller.authorizedUncaptured) {
             asking = await awaitFreshCallOrigin('write_stdin', call.startedAt, IDENTITY_EVIDENCE_MS, {
               requestId: call.caller.requestId
             });
-            if (asking) call.caller.conversationId = asking;
+            if (asking) {
+              call.caller.conversationId = asking;
+              call.caller.authorizedUncaptured = false;
+            }
           }
-          if (execOwnershipDenied(input.session_id, asking)) {
+          const owner = execCallerOwner(
+            call?.caller.requestId ?? null,
+            asking,
+            call?.caller.authorizedUncaptured === true
+          );
+          if (execOwnershipDenied(input.session_id, owner)) {
             return fail(
               `write_stdin failed: session ${input.session_id} is not proven to belong to this ChatGPT conversation. Start your own with exec_command or retry after the extension reconnects.`
             );
@@ -866,7 +932,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               processId: input.session_id,
               input: input.chars ?? '',
               yieldTimeMs: input.yield_time_ms ?? DEFAULT_WRITE_STDIN_YIELD_TIME_MS,
-              maxOutputTokens: input.max_output_tokens,
+              maxOutputTokens: undefined,
               truncationPolicy: EXEC_OUTPUT_CEILING_POLICY
             });
             if (output.processId === null) forgetExecOwner(input.session_id);
@@ -875,7 +941,11 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               running: output.processId !== null,
               exitCode: output.exitCode,
               timedOut: false,
-              durationMs: output.wallTimeMs
+              durationMs: output.wallTimeMs,
+              // The exit belongs to the command exec_command started, not to this call. See
+              // writeStdinExitIsBenign for why draining and interrupting are proof and typed
+              // input is not, and why a timeout is still never exempt.
+              benignExit: writeStdinExitIsBenign(input.chars ?? '')
             });
             logInfo(`tool write_stdin ${input.session_id} (${(input.chars ?? '').length} chars)`);
             return {
@@ -1377,6 +1447,47 @@ function applyPatchErrorText(error: unknown): string {
   return error instanceof PatchParseError || error instanceof ApplyPatchError ? error.message : friendlyError(error);
 }
 
+/** `Failed to find context 'X' in <path>` — the context line is everything between the quotes. */
+const PATCH_CONTEXT_FAILURE = /^Failed to find context '([\s\S]*)' in [^\n]*$/;
+/** `Failed to find expected lines in <path>:` followed by the lines that did not match. */
+const PATCH_LINES_FAILURE = /^Failed to find expected lines in [^\n]*:\n([\s\S]*)$/;
+/** A line still carrying `read`'s `12<tab>` display prefix. */
+const READ_LINE_PREFIX = /^\s*\d+\t/m;
+
+/**
+ * Why an apply_patch anchor did not match, when the message itself can only say that it did not.
+ *
+ * `Failed to find context '…'` and `Failed to find expected lines in …` come from the Codex port
+ * and are parity-locked, so the explanation is appended rather than folded in. It is worth the
+ * two lines: this was the single largest apply_patch failure in the recorded sessions, and the
+ * message names neither cause, so the model's usual next move was to send the same patch again.
+ *
+ * Both causes are visible in the failed anchor itself. The first is mechanical — the lines were
+ * copied out of a `read` result with its line-number prefixes still attached, which no file
+ * contains. The second is the search rule: `seekSequence` scans forward from where the previous
+ * chunk matched, so chunks given out of file order fail on a file that does contain them.
+ *
+ * What the fallback deliberately does *not* say is "check your whitespace". `seekSequence` already
+ * retries an rstrip comparison and then a full trim before giving up, so indentation is not what
+ * failed, and sending the model looking at it would cost a round trip to learn nothing.
+ */
+function applyPatchAnchorHint(message: string): string | null {
+  const anchor = (PATCH_CONTEXT_FAILURE.exec(message) ?? PATCH_LINES_FAILURE.exec(message))?.[1];
+  if (anchor === undefined) return null;
+  if (READ_LINE_PREFIX.test(anchor)) {
+    return (
+      'Those lines still carry read’s line-number prefixes (`12<tab>text`). They are display ' +
+      'metadata, not file content: strip the number and the tab from every context line and send ' +
+      'the file’s own bytes.'
+    );
+  }
+  return (
+    'Leading and trailing whitespace are already tolerated here, so this is the text itself or ' +
+    'the order: each chunk is searched forward from where the previous one matched. Read the ' +
+    'region again, copy the lines from that result unchanged, and put the chunks in file order.'
+  );
+}
+
 interface ParsedPatchRun {
   result: ToolResult;
   content: string | null;
@@ -1571,8 +1682,15 @@ async function runParsedPatch(
       resolution.resolve
     );
   } catch (error) {
+    // The hint is appended after path rewriting, not before: it carries no paths of its own and
+    // must not be searched for spellings to replace.
+    const message = applyPatchErrorText(error);
+    const hint = applyPatchAnchorHint(message);
     return {
-      result: fail(`apply_patch verification failed: ${safePatchOutput(applyPatchErrorText(error), resolution)}`),
+      result: fail(
+        `apply_patch verification failed: ${safePatchOutput(message, resolution)}` +
+          (hint === null ? '' : `\n\n${hint}`)
+      ),
       content: null,
       exitCode: null
     };

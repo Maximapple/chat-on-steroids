@@ -622,6 +622,77 @@ describe('the reply', () => {
 });
 
 describe('one draft per generation', () => {
+  it('resumes one interrupted provider intent after app restart with the same token and turn', async () => {
+    const session = await createSession({ title: 'goal restart', conversationId: 'c-goal-restart' });
+    await appendEvent(session.id, {
+      time: 1_000,
+      source: 'extension',
+      kind: 'user_message',
+      message: { text: 'finish the restart check', truncated: false, chars: 24 }
+    });
+    let entered!: () => void;
+    const startedFetch = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let calls = 0;
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      calls += 1;
+      if (calls > 1) return decision('continue', 'resume the preserved Goal turn');
+      entered();
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+      });
+    }) as never;
+
+    const original = goal.startGoalDraft({
+      sessionId: session.id,
+      conversationId: 'c-goal-restart',
+      turnId: 'g-restart',
+      clientId: 'old-tab'
+    });
+    await startedFetch;
+    const snapshot = goal.snapshotGoalDrafts();
+    expect(snapshot.drafts).toHaveLength(1);
+
+    goal.resetGoalStateForTests();
+    goal.restoreGoalDrafts(snapshot);
+    const ready = await settled('c-goal-restart');
+    expect(ready).toMatchObject({ token: original.token, turnId: 'g-restart', stage: 'ready' });
+    expect(calls).toBe(2);
+    // Browser restart changed the tab id. The first exact-conversation page reclaims it.
+    expect(goal.goalViewFor('c-goal-restart', 'new-tab')?.token).toBe(original.token);
+    expect(goal.goalViewFor('c-goal-restart', 'duplicate-tab')).toBeNull();
+  });
+
+  it('restores a durable ready draft without asking the provider or changing its send token', async () => {
+    const session = await createSession({ title: 'goal ready restart', conversationId: 'c-goal-ready-restart' });
+    await appendEvent(session.id, {
+      time: 1_000,
+      source: 'extension',
+      kind: 'user_message',
+      message: { text: 'continue once', truncated: false, chars: 13 }
+    });
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return decision('continue', 'one durable message');
+    }) as never;
+
+    const original = goal.startGoalDraft({ sessionId: session.id, conversationId: 'c-goal-ready-restart', turnId: 'g-ready' });
+    const ready = await settled('c-goal-ready-restart');
+    const snapshot = goal.snapshotGoalDrafts();
+    goal.resetGoalStateForTests();
+    goal.restoreGoalDrafts(snapshot);
+
+    expect(goal.goalViewFor('c-goal-ready-restart')).toMatchObject({
+      token: original.token,
+      turnId: ready.turnId,
+      stage: 'ready',
+      reply: ready.reply
+    });
+    expect(calls).toBe(1);
+  });
+
   /**
    * The idempotency that keeps a retried POST, a reloaded tab or two observers of one
    * settle from putting two messages into one conversation.
@@ -915,6 +986,92 @@ describe('when OpenRouter refuses', () => {
     }
   });
 
+  it('recovers a transient provider failure with the same model and one final draft', async () => {
+    const sessionId = await seed('c-transient-recovery');
+    const bodies: Array<Record<string, unknown>> = [];
+    let calls = 0;
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      calls += 1;
+      bodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>);
+      if (calls === 1) return new Response('temporarily unavailable', { status: 503 });
+      return decision('continue', 'finish the package smoke');
+    }) as never;
+
+    goal.startGoalDraft({ sessionId, conversationId: 'c-transient-recovery', turnId: 'g-1' });
+    const ready = await settled('c-transient-recovery');
+    expect(ready).toMatchObject({ stage: 'ready', attempt: 2, reply: goal.humanReply('finish the package smoke') });
+    expect(calls).toBe(2);
+    expect(new Set(bodies.map((body) => body.model))).toEqual(new Set(['deepseek/deepseek-v4-flash']));
+  });
+
+  it('keeps a repeated failure retryable and manually retries the same frozen turn once', async () => {
+    const sessionId = await seed('c-manual-recovery');
+    let healthy = false;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return healthy
+        ? decision('continue', 'continue from the preserved turn')
+        : new Response('provider down', { status: 503 });
+    }) as never;
+
+    const started = goal.startGoalDraft({
+      sessionId,
+      conversationId: 'c-manual-recovery',
+      turnId: 'g-preserved',
+      clientId: 'tab-a'
+    });
+    const failed = await settled('c-manual-recovery');
+    expect(failed).toMatchObject({ stage: 'failed', attempt: 3, retryable: true, token: started.token });
+    expect(calls).toBe(3);
+
+    healthy = true;
+    const retried = goal.retryGoalDraft('c-manual-recovery', started.token, 'tab-a');
+    expect(retried).toMatchObject({ token: started.token, turnId: 'g-preserved', stage: 'sending' });
+    const ready = await settled('c-manual-recovery');
+    expect(ready).toMatchObject({ token: started.token, turnId: 'g-preserved', stage: 'ready' });
+    expect(calls).toBe(4);
+    expect(goal.retryGoalDraft('c-manual-recovery', started.token, 'tab-b')).toBeNull();
+  });
+
+  it('suppresses a late timed-out attempt after a newer attempt has completed', async () => {
+    vi.useFakeTimers();
+    try {
+      const sessionId = await seed('c-late-attempt');
+      let releaseFirst!: (response: Response) => void;
+      const first = new Promise<Response>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let calls = 0;
+      globalThis.fetch = (async () => {
+        calls += 1;
+        return calls === 1 ? first : decision('continue', 'the current attempt wins');
+      }) as never;
+
+      goal.startGoalDraft({ sessionId, conversationId: 'c-late-attempt', turnId: 'g-late' });
+      await vi.waitFor(() => expect(calls).toBe(1));
+      await vi.advanceTimersByTimeAsync(180_010);
+      await vi.waitFor(() => expect(calls).toBe(2));
+      expect(goal.goalViewFor('c-late-attempt')).toMatchObject({
+        stage: 'ready',
+        attempt: 2,
+        reply: goal.humanReply('the current attempt wins')
+      });
+
+      releaseFirst(decision('continue', 'stale attempt must be ignored'));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(goal.goalViewFor('c-late-attempt')).toMatchObject({
+        stage: 'ready',
+        attempt: 2,
+        reply: goal.humanReply('the current attempt wins')
+      });
+      expect(calls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not read an arbitrarily large OpenRouter error body just to produce a short status', async () => {
     const sessionId = await seed('c-huge-error');
     globalThis.fetch = (async () =>
@@ -962,13 +1119,21 @@ describe('when OpenRouter refuses', () => {
 
   it('does not promote a partial reply when a later SSE record is malformed', async () => {
     const sessionId = await seed('c-malformed-stream');
-    globalThis.fetch = (async () => stream([delta('unfinished thought'), 'data: {not-json}\n'])) as never;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return stream([delta('unfinished thought'), 'data: {not-json}\n']);
+    }) as never;
 
     goal.startGoalDraft({ sessionId, conversationId: 'c-malformed-stream', turnId: 'g-1' });
     const view = await settled('c-malformed-stream');
     expect(view.stage).toBe('failed');
-    expect(view.error).toBe('request_failed: malformed_stream_record');
+    // Reported under its own name rather than wrapped as `request_failed:`, because it is not the
+    // transport failing — it is a response this app read and refused. That distinction is the one
+    // `goalThrowFailure` makes, and it is what stops the attempt being repeated below.
+    expect(view.error).toBe('malformed_stream_record');
     expect(view.reply).toBe('');
+    expect(calls).toBe(1);
   });
 
   it('refuses an over-long generated user reply instead of streaming an unbounded composer payload', async () => {
@@ -1400,5 +1565,141 @@ describe('opening a chat on a goal', () => {
     globalThis.fetch = (async () => decision('stop')) as never;
     expect(await goal.draftOpeningMessage('finish it')).toEqual({ error: 'nothing_to_open_with' });
     expect(await goal.draftOpeningMessage('   ')).toEqual({ error: 'no_objective' });
+  });
+});
+
+/**
+ * Which failures buy a second attempt, pinned by call count.
+ *
+ * The loop used to initialise `retryable` to true and narrow it only for HTTP status codes, so a
+ * malformed decision or an over-long body quietly bought three attempts each while the release
+ * notes described a transient-only policy. Counting the calls is the only assertion that can tell
+ * the two policies apart — the draft settles as `failed` either way.
+ */
+describe('the retry policy, as attempts actually spent', () => {
+  const seed = async (conversationId: string): Promise<string> => {
+    const session = await createSession({ title: 'goal', conversationId });
+    await appendEvent(session.id, {
+      time: 1_000,
+      source: 'extension',
+      kind: 'user_message',
+      message: { text: 'go on', truncated: false, chars: 5 }
+    });
+    return session.id;
+  };
+
+  it('spends one attempt on a decision that did not parse, not three', async () => {
+    const sessionId = await seed('c-invalid-once');
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return Response.json({ choices: [{ message: { content: 'not a decision at all' } }] });
+    }) as never;
+
+    goal.startGoalDraft({ sessionId, conversationId: 'c-invalid-once', turnId: 'g-1' });
+    const view = await settled('c-invalid-once');
+
+    expect(view.stage).toBe('failed');
+    expect(view.error).toContain('invalid_goal_decision_json');
+    // The model, the prompt and the structured-output request are identical on a second pass.
+    expect(calls).toBe(1);
+    expect(view.attempt).toBe(1);
+  });
+
+  it('spends one attempt on a response that broke a byte ceiling', async () => {
+    const sessionId = await seed('c-too-long-once');
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return Response.json({ choices: [{ message: { content: 'x'.repeat(15_000) } }] });
+    }) as never;
+
+    goal.startGoalDraft({ sessionId, conversationId: 'c-too-long-once', turnId: 'g-1' });
+    const view = await settled('c-too-long-once');
+
+    expect(view.stage).toBe('failed');
+    expect(view.error).toContain('reply_too_long');
+    // A body over the cap is over it again; the ceiling is an app constant, not the weather.
+    expect(calls).toBe(1);
+  });
+
+  it('still spends three on a genuinely transient provider failure', async () => {
+    const sessionId = await seed('c-transient-thrice');
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response('gateway is unwell', { status: 502 });
+    }) as never;
+
+    goal.startGoalDraft({ sessionId, conversationId: 'c-transient-thrice', turnId: 'g-1' });
+    const view = await settled('c-transient-thrice');
+
+    expect(view.stage).toBe('failed');
+    expect(calls).toBe(3);
+  });
+});
+
+/**
+ * The opening message, which is the one Goal path that had no self-healing at all.
+ *
+ * It made a single request and returned the first 429 or dropped socket it met, so a specific
+ * goal saved on a New Chat did not survive a provider hiccup — while the release notes described
+ * transient retry as a property of Goal generally. It now runs the same bounded policy as `run`,
+ * through the same two classifiers.
+ */
+describe('drafting an opening message for a chat that has no id yet', () => {
+  it('recovers a transient provider failure with a second attempt', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) return new Response('temporarily unavailable', { status: 503 });
+      return decision('continue', 'start with the packaging smoke test');
+    }) as never;
+
+    const drafted = await goal.draftOpeningMessage('get the release out');
+
+    expect(drafted).toMatchObject({ reply: goal.humanReply('start with the packaging smoke test') });
+    expect(calls).toBe(2);
+  });
+
+  it('refuses a rejected key after exactly one attempt', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: { message: 'upstream said no' } }), { status: 401 });
+    }) as never;
+
+    const drafted = await goal.draftOpeningMessage('get the release out');
+
+    expect(drafted).toMatchObject({ error: expect.stringContaining('auth_rejected') });
+    // A refused key is refused three times. Retrying it only delays the message that helps.
+    expect(calls).toBe(1);
+    expect(JSON.stringify(drafted)).not.toContain('sk-or-test');
+  });
+
+  it('refuses a malformed decision after exactly one attempt', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return Response.json({ choices: [{ message: { content: 'not a decision at all' } }] });
+    }) as never;
+
+    const drafted = await goal.draftOpeningMessage('get the release out');
+
+    expect(drafted).toMatchObject({ error: 'invalid_goal_decision_json' });
+    expect(calls).toBe(1);
+  });
+
+  it('gives up after three transient failures rather than holding the composer forever', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response('gateway is unwell', { status: 502 });
+    }) as never;
+
+    const drafted = await goal.draftOpeningMessage('get the release out');
+
+    expect(drafted).toMatchObject({ error: expect.stringContaining('http_502') });
+    expect(calls).toBe(3);
   });
 });

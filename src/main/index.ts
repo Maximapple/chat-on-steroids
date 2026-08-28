@@ -36,8 +36,16 @@ import {
 } from './agents.js';
 import { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
 import { restoreRequestCorrelations } from './session/correlation.js';
+import { restoreSessionCursors } from './mcp/session-tool.js';
 import { stopComputerHelper } from './computer/index.js';
-import { GOAL_OBJECTIVES_STATE, restoreGoalObjectives, type GoalObjectivesSnapshot } from './goal.js';
+import {
+  GOAL_DRAFTS_STATE,
+  GOAL_OBJECTIVES_STATE,
+  restoreGoalDrafts,
+  restoreGoalObjectives,
+  type GoalDraftsSnapshot,
+  type GoalObjectivesSnapshot
+} from './goal.js';
 import {
   CONTINUATIONS_STATE,
   restoreContinuations,
@@ -57,6 +65,8 @@ import {
 } from './window-lifecycle.js';
 import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
+import { extensionDir } from './extension-path.js';
+import { setBeforeUpdateInstall, shutdownUpdater, startUpdater } from './update.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
@@ -230,12 +240,24 @@ void app.whenReady().then(async () => {
   // user choice instead of Electron's default `system` theme. On macOS this controls the window
   // frame, application menus and OS dialogs; on Linux/Windows it covers Electron-native UI.
   nativeTheme.themeSource = getConfig().ui.theme;
+  // Refresh the stable Chrome-visible folder transactionally on every packaged launch. Chrome
+  // preserves pairing/storage at that path; an already loaded unpacked extension still needs
+  // the one browser action Chrome requires: Reload on chrome://extensions.
+  if (app.isPackaged && !extensionDir()) logWarn('bundled Chrome extension could not be materialized');
   const savedGoalObjectives = await readDurable<GoalObjectivesSnapshot>(GOAL_OBJECTIVES_STATE);
   if (windowActivation.isDisabled()) return;
   restoreGoalObjectives(savedGoalObjectives);
+  const savedGoalDrafts = await readDurable<GoalDraftsSnapshot>(GOAL_DRAFTS_STATE);
+  if (windowActivation.isDisabled()) return;
+  restoreGoalDrafts(savedGoalDrafts);
   // Request ownership must exist before either side of the bridge can race in. A request id
   // that was proved yesterday remains the same workflow today even if its ChatGPT tab closed.
   await restoreRequestCorrelations();
+  if (windowActivation.isDisabled()) return;
+  // A session continuation is a reference into this process, so a chat that was paging a long
+  // recording when the app closed depends on this to keep its place. Restored before the MCP
+  // server is served, and never fatal: an unreadable snapshot costs continuations, not history.
+  await restoreSessionCursors();
   if (windowActivation.isDisabled()) return;
   setAgentConversationLookup(agentConversation);
   // The prime's chat is the user's own, so no extension report can name it. It is bound
@@ -318,6 +340,21 @@ void app.whenReady().then(async () => {
 
   // From here on a second launch may safely focus/recreate the window: renderer security policy
   // is installed and the renderer's fixed IPC methods already have handlers before it can load.
+  setBeforeUpdateInstall(
+    () => {
+      // electron-updater closes windows before it asks Electron to quit. Mark that close as an
+      // intentional update install so the ordinary close-to-tray preference cannot veto it.
+      quitting = true;
+      windowActivation.disable();
+    },
+    () => {
+      // The installer never launched, so this process is staying. Both latches above were set on
+      // the assumption it was about to end: leaving them would turn the user's next window close
+      // into a quit and keep activation disabled, for an app that is still running normally.
+      quitting = false;
+      windowActivation.enable();
+    }
+  );
   registerIpc(() => window);
   windowActivation.enable();
   windowActivation.request();
@@ -332,6 +369,9 @@ void app.whenReady().then(async () => {
   onStatusChange(refreshTray);
 
   logInfo('app started');
+  // Schedules a non-blocking check five seconds after startup. Unsupported/macOS/dev builds
+  // publish an explanatory inert state and do no network work.
+  startUpdater();
 
   // Historical Unattributed repair may legitimately scan and rewrite a large legacy bucket.
   // It is maintenance, not a prerequisite for showing the app or accepting new exact-id
@@ -384,6 +424,7 @@ app.on('will-quit', (event) => {
   shutdownStarted = true;
   stopSessionRetention?.();
   stopSessionRetention = null;
+  shutdownUpdater();
   tray?.destroy();
   tray = null;
 

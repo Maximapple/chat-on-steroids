@@ -55,6 +55,7 @@
  * rewrite is far worse than a missed one.
  */
 
+import { isWindowsPowerShell5 } from './codex/shell.js';
 import type { ShellType } from './codex/shell.js';
 
 /**
@@ -523,7 +524,8 @@ function pipelineStopCandidate(command: string): Token | null {
  */
 function cutPipelineGeneratorOnlyReports(command: string): boolean {
   const token = pipelineStopCandidate(command);
-  if (token === null || programName(token) !== 'git') return false;
+  if (token === null) return false;
+  if (programName(token) !== 'git') return cutPipelineGeneratorIsProvenSearch(token);
   const statements = splitTopLevel(command, [';', '\n']);
   const last = statements[statements.length - 1] as string;
   const generator = splitTopLevel(last, ['|'])[0] as string;
@@ -533,6 +535,82 @@ function cutPipelineGeneratorOnlyReports(command: string): boolean {
     return false;
   }
   return !tokens.some((argument) => GIT_FLAGS_THAT_MAKE_THE_EXIT_MEAN_SOMETHING.test(argument.value));
+}
+
+/**
+ * The other generator that can only report: a search whose binary the command text proves.
+ *
+ * Same shape as the git case and the same question — did this program have a second way to exit
+ * non-zero once the pipe was closed under it? For a search program the answer is no: it exits 1
+ * for "no matches" and 2 for its own errors, and both of those it *prints*, which the caller
+ * checks. What it cannot be trusted on is its name, for exactly the reason `nonZeroExitIsBenign`
+ * gives below — so the token has to be path-qualified, which is what tools-core makes true for
+ * ordinary `rg` calls by binding them to the bundled binary before they reach here.
+ *
+ * Recorded shape this covers: `rg -n "<pattern>" <files> | Select-Object -First 260`, which
+ * returned every match asked for and still came back as a failed call.
+ */
+function cutPipelineGeneratorIsProvenSearch(token: Token): boolean {
+  if (!NO_MATCH_MEANS_EXIT_1.has(programName(token))) return false;
+  return /[\\/]/.test(token.value);
+}
+
+/**
+ * Exit statuses left behind when PowerShell cuts a native program off mid-pipeline.
+ *
+ * `Select-Object -First N` closes the pipe as soon as it has N objects. What the still-running
+ * program then exits with is not one number: it depends on whether it died on the closed handle
+ * or was terminated outright. Windows PowerShell 5.1 was measured producing 1 for `git diff`
+ * and -1 for `git log`, and the recorded sessions show -1 arriving as the unsigned 4294967295 —
+ * the same event, read through a signed field, an unsigned field, and the program's own handler.
+ * All three are listed because the cut is what is being recognised, not the number.
+ */
+const CUT_PIPELINE_EXIT_CODES = new Set([1, -1, 0xff_ff_ff_ff]);
+
+/** A diagnostic line a search program printed about itself, rather than a match. */
+const SEARCH_DIAGNOSTIC = /^\s*(rg|ripgrep|grep|egrep|fgrep|findstr):/im;
+
+/**
+ * The lines the command itself printed, with this app's own framing removed.
+ *
+ * `execCommandResponseText` wraps every single-command result in `Wall time:`, `Process exited
+ * with code N` and `Output:` before any of this sees it, so "did the program print anything?"
+ * is otherwise always yes -- which would have made an exit-2 search that printed nothing but its
+ * own error look like a search that answered. The batch path hands over section bodies that carry
+ * no framing at all, so the split is conditional on the `Output:` line actually being there.
+ */
+function commandOutputBody(outputText: string): string[] {
+  const lines = outputText.split('\n').map((line) => line.replace(/\r$/, ''));
+  const start = lines.indexOf('Output:');
+  return (start < 0 ? lines : lines.slice(start + 1)).filter(
+    (line) => line.trim() !== '' && !line.startsWith('---') && !line.startsWith('Warning: truncated output')
+  );
+}
+
+/**
+ * Whether a search exited 2 after answering for every path that exists.
+ *
+ * ripgrep spends exit 2 on "something went wrong", and one unreadable path in a list is enough —
+ * the matches from the paths that were real are already on stdout above the diagnostic. Recorded
+ * five times in twenty sessions, always the same way: a plausible but wrong filename in a
+ * multi-path search, a complete answer for the rest, and the whole call discarded as failed.
+ *
+ * Both halves must be present. A diagnostic with no match line is the shape of a regex error or
+ * an unreadable *only* path, and that call really did fail; a run with no diagnostic at all never
+ * reaches here. `execRecoveryHints` separately tells the model which path to re-check, so the
+ * model is told what happened either way — this decides only whether the call is marked failed.
+ *
+ * The whole judgement rests on reading one program's stdout, so it is refused as soon as the
+ * output could have come from somewhere else. `Write-Output foo; <rg> bad/path` exits 2 from the
+ * search having matched nothing, and `foo` is sitting in the output where a match would be —
+ * which is the exact shape that would launder a failed search into a success.
+ */
+function searchAnsweredDespiteBadPath(command: string, outputText: string): boolean {
+  if (splitTopLevel(command, [';', '\n']).length !== 1) return false;
+  const token = statusDeterminingToken(command);
+  if (token === null || !NO_MATCH_MEANS_EXIT_1.has(programName(token)) || !/[\\/]/.test(token.value)) return false;
+  if (!SEARCH_DIAGNOSTIC.test(outputText)) return false;
+  return commandOutputBody(outputText).some((line) => !/^\s*(rg|ripgrep|grep|egrep|fgrep|findstr):/i.test(line));
 }
 
 /**
@@ -548,26 +626,34 @@ export function nonZeroExitIsBenign(
   exitCode: number | null,
   outputText: string
 ): boolean {
-  if (exitCode !== 1) return false;
+  if (exitCode === null) return false;
   // A shell that refused the command never reached the search at all, so reading the exit
   // code as the search's answer is a fabrication. `Write-Output hi && rg foo` is the case
   // that matters: Windows PowerShell 5.1 rejects `&&` outright, exits 1 without running a
-  // thing, and this function would otherwise call it ripgrep finding no matches.
+  // thing, and this function would otherwise call it ripgrep finding no matches. Checked
+  // before every branch below, because a refusal invalidates all of them equally.
   if (SHELL_REFUSED.test(outputText)) return false;
-  // A reporting git command that was cut short by `Select-Object -First`. Three things have to
-  // hold together before this is provable, and each one alone withholds it: the pipeline has a
-  // truncating stage and nothing that could have set the status itself, the generator is a git
-  // subcommand with no flag that spends the exit code on an answer, and the run printed
-  // something without printing a `fatal:`. Rule out the cut and there is no way left for `git
-  // diff` to have exited 1 with a diff on stdout — which is exactly the shape a worker hit while
-  // capping the output of a four-file diff, then re-ran because the status looked like a failure.
+  // A reporting command that was cut short by `Select-Object -First`. Four things have to
+  // hold together before this is provable, and each one alone withholds it: the exit status is
+  // one the cut produces, the pipeline has a truncating stage and nothing that could have set
+  // the status itself, the generator is a git subcommand with no flag that spends the exit code
+  // on an answer or a path-proven search program, and the run printed something without
+  // printing a diagnostic of its own. Rule out the cut and there is no way left for `git diff`
+  // to have exited non-zero with a diff on stdout — which is exactly the shape a worker hit
+  // while capping the output of a four-file diff, then re-ran because the status looked like a
+  // failure. Ten of ninety-one recorded exec failures were this, every one of them `-First`.
   if (
+    CUT_PIPELINE_EXIT_CODES.has(exitCode) &&
     cutPipelineGeneratorOnlyReports(command) &&
-    outputText.trim() !== '' &&
-    !/^\s*(?:fatal|error):/im.test(outputText)
+    commandOutputBody(outputText).length > 0 &&
+    !/^\s*(?:fatal|error):/im.test(outputText) &&
+    !SEARCH_DIAGNOSTIC.test(outputText)
   ) {
     return true;
   }
+  // A multi-path search that answered for the paths that exist and named the one that does not.
+  if (exitCode === 2) return searchAnsweredDespiteBadPath(command, outputText);
+  if (exitCode !== 1) return false;
   const token = statusDeterminingToken(command);
   const program = programName(token ?? undefined);
   if (!NO_MATCH_MEANS_EXIT_1.has(program)) return false;
@@ -581,6 +667,168 @@ export function nonZeroExitIsBenign(
   const pathQualified = token !== null && /[\\/]/.test(token.value);
   if (!pathQualified) return false;
   return !/^\s*(rg|ripgrep|grep|egrep|fgrep|findstr):/im.test(outputText);
+}
+
+/**
+ * Whether a `write_stdin` call can be held responsible for the exit status it observed.
+ *
+ * `exec_command` owns a command and can classify its exit. `write_stdin` does not: it attaches
+ * to a process some earlier call started, and the status it reports belongs to that command.
+ * Marking the call failed because the process it drained had failed is a category error, and a
+ * measured one — all 40 recorded `write_stdin` failures in twenty sessions were this, 37 of them
+ * a `chars: ""` poll of a vitest run with one failing test, the other three an interrupt.
+ *
+ * The exemption is deliberately narrow, and narrower than the tool's whole surface: it is proof
+ * about *this call*, not about the process. Sending nothing cannot have caused an exit, and an
+ * interrupt that is followed by a non-zero exit got exactly what it asked for. Input with real
+ * content is left alone — `npm test\r` typed into a shell session is that call's command in
+ * every sense that matters, and its exit belongs to it.
+ *
+ * As everywhere else in this file, the exemption only ever withholds the error mark. The exit
+ * code, the output and any diagnostic still reach the model unchanged.
+ */
+export function writeStdinExitIsBenign(chars: string): boolean {
+  if (chars === '') return true;
+  // Ctrl-C (ETX) or Ctrl-D (EOT), alone or with the line endings a model pairs them with.
+  // Written as escapes so the control bytes cannot be lost by an editor, diff or patch.
+  // A lone newline is deliberately not benign: at a prompt, Enter submits a command.
+  return /^[\r\n]*[\u0003\u0004][\u0003\u0004\r\n]*$/.test(chars);
+}
+
+/** One `&&`/`||` chain, split into the commands it joins and the operators joining them. */
+interface OperatorChain {
+  operands: string[];
+  operators: Array<'&&' | '||'>;
+}
+
+const MAX_CHAIN_OPERANDS = 4;
+
+/** Splits on top-level `&&`/`||`, keeping which operator was used at each join. */
+function splitOperatorChain(command: string): OperatorChain | null {
+  const operands: string[] = [];
+  const operators: Array<'&&' | '||'> = [];
+  let current = '';
+  let quote: '"' | "'" | null = null;
+  let depth = 0;
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i] as string;
+    if (quote !== null) {
+      current += char;
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === '(' || char === '{') depth++;
+    else if (char === ')' || char === '}') depth = Math.max(0, depth - 1);
+    if (depth === 0 && (command.startsWith('&&', i) || command.startsWith('||', i))) {
+      operators.push(command.startsWith('&&', i) ? '&&' : '||');
+      operands.push(current);
+      current = '';
+      i++;
+      continue;
+    }
+    current += char;
+  }
+  if (quote !== null || depth !== 0) return null;
+  operands.push(current);
+  return { operands, operators };
+}
+
+/**
+ * Whether one operand of a chain is simple enough for `$?` to be its answer.
+ *
+ * `$?` is the signal being relied on, so this refuses every shape where `$?` would be
+ * answering about something other than the command the model wrote:
+ *
+ *  - A statement list has no single status, and the operator was never meant to apply to
+ *    the last statement of one.
+ *  - A redirection is the documented Windows PowerShell 5.1 trap: sending a native
+ *    program's stderr through the pipeline wraps each line in an ErrorRecord, which leaves
+ *    `$?` false after an exit code of 0. Rewriting one of those would skip a command the
+ *    model asked for and print nothing about why, which is the one outcome worse than the
+ *    parser error being repaired. A `>` anywhere in the operand is enough to decline;
+ *    quoted ones are rare and cost only the hint.
+ *  - Reading `$?` inside the operand means the model is already doing this itself.
+ */
+function chainOperandIsSimple(operand: string): boolean {
+  const trimmed = operand.trim();
+  if (trimmed === '') return false;
+  if (trimmed.includes('>')) return false;
+  if (trimmed.includes('$?')) return false;
+  return splitTopLevel(trimmed, [';', '\n']).length === 1;
+}
+
+/**
+ * Rewrites `A && B` into the Windows PowerShell 5.1 spelling of the same thing.
+ *
+ * Windows PowerShell 5.1 has no `&&` or `||` — its parser refuses the whole line, runs
+ * nothing, and reports a token error that never says the feature is missing. It is the most
+ * repeated shell mistake in the recorded sessions, and the recorded shapes are ordinary:
+ * `git branch --show-current && git rev-parse HEAD`, `rg … src/main/config.ts && Get-Content …`,
+ * `git grep … || exit 0`. Every one of them is a chain of plain commands, which is exactly the
+ * grammar this can rewrite without guessing.
+ *
+ * `$?` is the faithful test, not `;`: it is false after a native program exits non-zero, false
+ * after a cmdlet writes an error, and false when the command was not found at all — all three
+ * measured on Windows PowerShell 5.1. What `;` does instead is run the gated half anyway, which
+ * is why this was a hint and not a rewrite until the shapes above were counted.
+ *
+ * One guard per operator is the whole rewrite, including for a longer chain, and that rests on
+ * a measured property of `$?`: an `if` does not overwrite it. A skipped branch leaves the status
+ * of the command before it, and a taken branch leaves the status of the command inside it — so
+ * `A; if ($?) { B }; if ($?) { C }` is left-associative for free, and mixed chains like
+ * `A || B && C` come out right without a status variable to carry, collide with, or explain.
+ *
+ * The exit status follows too, checked through the exact `-EncodedCommand` invocation `exec.ts`
+ * builds: a failed chain exits non-zero and a fully successful one exits 0, for a native
+ * non-zero exit, a cmdlet error and a missing command alike. The exact non-zero code is not
+ * preserved and cannot be — Windows PowerShell 5.1 collapses every failing native exit to 1 at
+ * the process boundary anyway, `cmd /c exit 7` included — so zero versus non-zero is the parity
+ * this promises.
+ *
+ * Anything this cannot read exactly — a backtick, a here-string, a comment, a redirection, an
+ * operand that is itself a statement list, more than four commands — is left byte for byte as
+ * the model wrote it, and `execRecoveryHints` explains the refusal the shell is about to give.
+ */
+export function normalizePowerShellOperators(
+  cmd: string,
+  shellType: ShellType,
+  shellPath: string
+): NormalizedCommand {
+  if (shellType !== 'powershell' || !isWindowsPowerShell5(shellPath)) return { cmd, notes: [] };
+  if (!cmd.includes('&&') && !cmd.includes('||')) return { cmd, notes: [] };
+  if (hasUnsupportedShellLexemes(cmd)) return { cmd, notes: [] };
+  const chain = splitOperatorChain(cmd);
+  if (chain === null || chain.operators.length === 0) return { cmd, notes: [] };
+  if (chain.operands.length > MAX_CHAIN_OPERANDS) return { cmd, notes: [] };
+  if (!chain.operands.every(chainOperandIsSimple)) return { cmd, notes: [] };
+
+  const operands = chain.operands.map((operand) => operand.trim());
+  const rewritten = operands
+    .map((operand, index) => {
+      if (index === 0) return operand;
+      const gate = chain.operators[index - 1] === '&&' ? 'if ($?)' : 'if (-not $?)';
+      return `${gate} { ${operand} }`;
+    })
+    .join('; ');
+
+  const used = [...new Set(chain.operators)].join(' and ');
+  return {
+    cmd: rewritten,
+    notes: [
+      `Windows PowerShell 5.1 has no ${used}, and would have refused the whole line and run ` +
+        'nothing, so the chain was rewritten as a guard on `$?` — which is false after a ' +
+        'non-zero native exit, a cmdlet error or a missing command. `;` is not the same thing: ' +
+        'it would run the gated command even after the first one failed. Write it this way ' +
+        'directly, or send the commands as exec_command `cmds` and read the per-command exit ' +
+        'codes.'
+    ]
+  };
 }
 
 /**
@@ -911,12 +1159,50 @@ function isRipgrepPatternRegion(command: string, region: QuotedRegion): boolean 
  * conclusion — the measured consequence being re-runs of searches that had already answered.
  * Both benign shapes are named, because nothing in the exit code tells them apart.
  */
-export function benignExitNote(command: string, shellType: ShellType = 'powershell'): string {
-  if (shellType === 'powershell' && cutPipelineGeneratorOnlyReports(command)) {
-    const program = programName(pipelineStopCandidate(command) ?? undefined);
+export function benignExitNote(
+  command: string,
+  shellType: ShellType = 'powershell',
+  /** The status being explained. Omitted by callers that only ever see the exit-1 shapes. */
+  exitCode?: number | null,
+  /** The section's own output, needed to tell a partial search from a total one. */
+  outputText?: string
+): string {
+  // Said before the pipeline case, because a search cut short by `-First` after hitting a bad
+  // path would otherwise be explained as a cut and never mention the path the model got wrong.
+  if (exitCode === 2 && outputText !== undefined && searchAnsweredDespiteBadPath(command, outputText)) {
+    const program = statusDeterminingProgram(command);
+    const missing = outputText
+      .split('\n')
+      .filter((line) => SEARCH_DIAGNOSTIC.test(line))
+      .slice(0, 3)
+      .map((line) => line.trim())
+      .join(' ');
     return (
-      `Exit code 1 here is \`Select-Object -First\` stopping the pipeline, not a failure: it ` +
-      `closes the pipe while \`${program}\` is still writing, and \`${program}\` has no other ` +
+      `Exit code 2 from \`${program}\` here is one path it could not read, not a failed search: ` +
+      'the matches above are a complete answer for every path that does exist. ' +
+      `${missing} Re-check that path's spelling and search it on its own — re-running the whole ` +
+      'search would return the same matches again.'
+    );
+  }
+  // Which of the two exit-1 shapes to name, when the command has both available to it.
+  //
+  // For a search generator the cut is only the better story once the run printed matches: with
+  // nothing on stdout the honest reading is "no matches", whatever stages followed, so that falls
+  // through to the general note -- which names the cut as a possibility anyway. `git diff` has no
+  // such second story, and the general note's "no matches" would be a plain lie about it, so a
+  // non-search generator takes the cut wording whether or not the caller passed the output.
+  const cutGenerator = shellType === 'powershell' && cutPipelineGeneratorOnlyReports(command)
+    ? pipelineStopCandidate(command)
+    : null;
+  const cutIsTheBetterStory =
+    cutGenerator !== null &&
+    (!cutPipelineGeneratorIsProvenSearch(cutGenerator) ||
+      (outputText !== undefined && commandOutputBody(outputText).length > 0));
+  if (cutGenerator !== null && cutIsTheBetterStory) {
+    const program = programName(cutGenerator);
+    return (
+      `Exit code ${exitCode ?? 1} here is \`Select-Object -First\` stopping the pipeline, not a ` +
+      `failure: it closes the pipe while \`${program}\` is still writing, and \`${program}\` has no other ` +
       'way to exit non-zero once it has printed. The output above is the first N objects and is ' +
       'complete for that window, so the command does not need to be run again. Add `-Wait` to ' +
       'the same stage to keep the exit code meaningful, at the cost of letting the command run ' +

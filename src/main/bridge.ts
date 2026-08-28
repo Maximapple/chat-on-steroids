@@ -27,11 +27,12 @@ import type { SessionOrigin } from '../shared/session.js';
 import { getConfig, updateConfig } from './config.js';
 import { getSecret, secureStorageStatus, setSecret } from './secrets.js';
 import {
-  ackGoalDraft,
+  ackGoalDraftNow,
   draftOpeningMessage,
   goalKeyPresent,
   goalObjectiveFor,
   goalViewFor,
+  retryGoalDraft,
   retireGoalDrafts,
   retireGoalDraftsFor,
   setGoalObjectiveNow,
@@ -40,6 +41,7 @@ import {
 import { logInfo, logWarn } from './logger.js';
 import {
   closeConversation,
+  deferForResumeCommit,
   liveConversations,
   noteChatOrigin,
   recordAgentMessage,
@@ -110,6 +112,7 @@ import {
 import { noteResumeOpening } from './session/resume-gate.js';
 import { readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
 import { APP_VERSION, BRIDGE_PROTOCOL } from './version.js';
+import { bundledExtensionAvailable } from './extension-path.js';
 import { requestCorrelation } from './session/correlation.js';
 import { bindAgentWorkspace } from './workspace.js';
 import { MAX_GOAL_OBJECTIVE_CHARS } from '../shared/goal.js';
@@ -383,6 +386,7 @@ const commandRedeems = new Map<string, Promise<void>>();
 let requestWindow = { start: Date.now(), count: 0 };
 const listeners = new Set<() => void>();
 let extensionVersion: string | null = null;
+let connectedExtensionProtocol: number | null = null;
 let versionWarned = false;
 
 export function onBridgeChange(listener: () => void): () => void {
@@ -396,13 +400,41 @@ function changed(): void {
 
 export async function bridgeStatus(): Promise<BridgeStatus> {
   const stored = await getSecret('bridgeToken');
+  const present = browserPresent();
+  const compatibility = !present
+    ? 'absent'
+    : connectedExtensionProtocol !== BRIDGE_PROTOCOL
+      ? connectedExtensionProtocol === null ? 'unknown' : 'incompatible'
+      : compareVersions(extensionVersion, APP_VERSION);
   return {
     running: server !== null,
     port,
     paired: stored !== null && stored !== BROWSER_DISCONNECTED,
-    present: browserPresent(),
-    lastSeenAt
+    present,
+    lastSeenAt,
+    bundledVersion: APP_VERSION,
+    bundledProtocol: BRIDGE_PROTOCOL,
+    bundledAvailable: bundledExtensionAvailable(),
+    connectedVersion: present ? extensionVersion : null,
+    connectedProtocol: present ? connectedExtensionProtocol : null,
+    compatibility
   };
+}
+
+function compareVersions(actual: string | null, bundled: string): BridgeStatus['compatibility'] {
+  if (!actual) return 'unknown';
+  const parse = (value: string): number[] | null => {
+    const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value);
+    return match ? match.slice(1, 4).map(Number) : null;
+  };
+  const left = parse(actual);
+  const right = parse(bundled);
+  if (!left || !right) return 'unknown';
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index]! < right[index]!) return 'extension-older';
+    if (left[index]! > right[index]!) return 'extension-newer';
+  }
+  return 'current';
 }
 
 /**
@@ -514,9 +546,15 @@ function protocolCompatible(req: http.IncomingMessage): boolean {
 function noteExtensionVersion(req: http.IncomingMessage): void {
   const version = req.headers['x-extension-version'];
   const protocol = extensionProtocol(req);
+  let didChange = false;
   if (typeof version === 'string' && version !== extensionVersion) {
     extensionVersion = version.slice(0, 32);
+    didChange = true;
     logInfo(`bridge: browser extension ${extensionVersion} connected`);
+  }
+  if (protocol !== connectedExtensionProtocol) {
+    connectedExtensionProtocol = protocol;
+    didChange = true;
   }
   if (!versionWarned && protocol !== null && protocol !== BRIDGE_PROTOCOL) {
     versionWarned = true;
@@ -525,6 +563,7 @@ function noteExtensionVersion(req: http.IncomingMessage): void {
         `Reload the extension from the folder shipped with app ${APP_VERSION}.`
     );
   }
+  if (didChange) changed();
 }
 
 async function authorised(req: http.IncomingMessage): Promise<boolean> {
@@ -979,6 +1018,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     // reads them back before ACKing. An id already proven for another conversation is refused
     // here without feeding contradictory evidence into the sticky conflict registry. No tool
     // name, clock, active-tab or nearest-turn fallback participates.
+    // Ownership evidence creates this chat's session too, so it can mint the same shadow the
+    // observation path can. Answer it as retryable for exactly as long as a resume might still
+    // be about to claim this conversation; the page re-posts the same evidence, and nothing is
+    // lost because the correlation registry has recorded nothing yet.
+    if (await deferForResumeCommit(id)) {
+      return json(res, 503, { error: 'resume_commit_pending', retryable: true }, origin);
+    }
     const requestIds = [...new Set(calls.map((call) => call.requestId).filter((value): value is string => Boolean(value)))];
     const conflicts = requestIds.filter((requestId) => {
       const held = requestCorrelation(requestId);
@@ -1040,6 +1086,16 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const revived = noteAgentAlive(id, 'page');
     if (revived?.report) await recordAgentMessage(revived.report, 'sent');
     const observations = parseObservations(body['events']);
+    // A batch for a chat this app has never recorded, arriving while a resume is still opening
+    // its replacement chat, may be that replacement. Recording it first is what breaks the move:
+    // the commit then finds its own destination owned by a session it has never heard of and
+    // abandons the compaction. The browser only retires a journal row on 2xx, so answering
+    // retryable here is free — the same batch comes back once the gate clears and lands in the
+    // session that was moved onto this chat, or in an ordinary new one if it was never the
+    // replacement at all.
+    if (await deferForResumeCommit(id)) {
+      return json(res, 503, { error: 'resume_commit_pending', retryable: true }, origin);
+    }
     observationWritesInFlight += 1;
     try {
       const agent = agentForOwnedConversation(id);
@@ -1737,7 +1793,32 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
     const token = typeof body['token'] === 'string' ? body['token'] : '';
     const clientId = typeof body['clientId'] === 'string' ? body['clientId'].slice(0, 100) : '';
-    return json(res, 200, { acknowledged: ackGoalDraft(id, token, clientId) }, origin);
+    try {
+      return json(res, 200, { acknowledged: await ackGoalDraftNow(id, token, clientId) }, origin);
+    } catch (err) {
+      logWarn(`bridge: Goal acknowledgement was not durable for ${id} — ${err instanceof Error ? err.message : String(err)}`);
+      return json(res, 503, { error: 'goal_ack_not_durable', retryable: true }, origin);
+    }
+  }
+
+  if (route === '/goal/retry' && req.method === 'POST') {
+    let body: Record<string, unknown>;
+    try {
+      body = (await readBody(req)) as Record<string, unknown>;
+    } catch (err) {
+      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
+      return json(res, 400, { error: 'bad_request' }, origin);
+    }
+    const id = conversationId(body['conversationId']);
+    if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    if (!goalActiveFor(id)) return json(res, 409, { error: 'goal_disabled' }, origin);
+    if (!(await goalKeyPresent())) return json(res, 409, { error: 'no_api_key' }, origin);
+    const token = typeof body['token'] === 'string' ? body['token'] : '';
+    const clientId = typeof body['clientId'] === 'string' ? body['clientId'].slice(0, 100) : '';
+    const draft = retryGoalDraft(id, token, clientId);
+    return draft
+      ? json(res, 200, { retried: true, goal: draft }, origin)
+      : json(res, 409, { error: 'goal_not_retryable' }, origin);
   }
 
   /**
@@ -2177,7 +2258,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           if (!(await finalizeCommand(command, receipt))) {
             return json(res, 503, { error: 'command_receipt_not_durable', retryable: true }, origin);
           }
-          logInfo(`bridge: ${specKey(command.spec)} completed with ${receipt.outcome}`);
+          logInfo(`bridge: ${specKey(command.spec)} completed with ${receipt.outcome}${commandLatency(command, receipt)}`);
           void deliver();
           return json(res, 200, receiptReply(receipt), origin);
         }
@@ -2325,7 +2406,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     // unlike an MCP call there is no dispatcher epilogue after this ACK. Settle the durable
     // command first, then release/park the quiescent active incarnation if no slot is occupied.
     releaseQuiescentRun();
-    logInfo(`bridge: ${specKey(command.spec)} completed with ${receipt.outcome}`);
+    logInfo(`bridge: ${specKey(command.spec)} completed with ${receipt.outcome}${commandLatency(command, receipt)}`);
     void deliver();
     return json(res, 200, receiptReply(receipt), origin);
   }
@@ -2790,6 +2871,21 @@ export function shutdownBridge(): Promise<void> {
 }
 
 // ------------------------------------------------------------------ commands
+
+/**
+ * How long the browser half of one command actually took, for the log.
+ *
+ * `claimedAt` is stamped in `deliverOne` immediately before the browser is opened, and the
+ * receipt is written when the page reports what it did with the bootstrap. The difference is
+ * therefore the whole user-visible "the replacement chat opened and then sat there" window:
+ * Chrome start, ChatGPT load, content-script boot, redeem, composer readiness, insertion and
+ * Send. It is the one number worth having when someone reports a slow Compact & Resume, and
+ * deriving it from second-granularity log timestamps is exactly what nobody can do afterwards.
+ */
+function commandLatency(command: Command, receipt: CommandReceipt): string {
+  if (command.claimedAt === null) return '';
+  return ` in ${receipt.completedAt - command.claimedAt} ms`;
+}
 
 function specKey(spec: CommandSpec): string {
   if (spec.type === 'worker') return `worker:${spec.agent}`;
@@ -4117,6 +4213,7 @@ export function resetBridgeForTests(): void {
   openInBrowser = null;
   lastSeenAt = null;
   extensionVersion = null;
+  connectedExtensionProtocol = null;
   versionWarned = false;
   requestWindow = { start: Date.now(), count: 0 };
 }

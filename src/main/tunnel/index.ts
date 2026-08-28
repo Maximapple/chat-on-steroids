@@ -260,6 +260,25 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
   let timer: NodeJS.Timeout | null = null;
   /** Consecutive failed attempts, which is what the backoff grows on. */
   let attempts = 0;
+  /**
+   * Which client process a callback speaks for.
+   *
+   * Cloudflared already had this fence; this path did not, and the gap was a real double-retry.
+   * `watch` answered an unready client with `await stopTree(child)` followed by `retry(...)` — but
+   * stopping the tree makes that same process emit `exit`, whose listener calls `retry` first. One
+   * failed generation therefore scheduled two replacements: `attempts` rose twice, so the backoff
+   * doubled per failure and reached MAX_BACKOFF_MS in half the failures it should have, and the
+   * second call overwrote the first's timer and its reason with the less useful exit text. The
+   * ready-timeout path had the identical shape.
+   *
+   * It is also what makes a stale callback harmless. `clearTimeout` cannot cancel a `watch` tick
+   * that has already begun, and such a tick resumes after its awaits holding `child` — which by
+   * then may be the *next* client. Comparing the generation it was started for against the current
+   * one is what stops a dead watch from killing its own replacement.
+   */
+  let generation = 0;
+  /** Whether this generation's failure has already been answered. Reset by the next launch. */
+  let finished = false;
   let lastError = '';
   /** Names this connector in the log, since core and desktop both run one of these. */
   const tag = opts.label ? `${opts.label} tunnel` : 'tunnel';
@@ -362,8 +381,21 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
     }
   };
 
-  const retry = (detail: string): void => {
-    if (stopped) return;
+  /**
+   * Answers one failed generation with exactly one replacement.
+   *
+   * `retire` exists because claiming the failure and starting the replacement are not the same
+   * moment. When the failure is "this client is broken", the old tree still has to be killed, and
+   * `stopTree` can spend up to three seconds doing it — longer than the two-second first backoff.
+   * Arming the timer up front therefore let a stuck old tree still be alive when its replacement
+   * spawned, which breaks the invariant this whole path exists to keep: one owned tunnel process
+   * at a time. The generation is claimed immediately, so the `exit` this kill provokes cannot
+   * schedule a second replacement; the timer is armed only once the tree is actually gone.
+   */
+  const retry = (detail: string, from: number, retire?: () => Promise<void>): void => {
+    // Exactly one replacement per failed generation, whichever caller notices the failure first.
+    if (stopped || finished || from !== generation) return;
+    finished = true;
     attempts += 1;
     shown = null;
     const wait = Math.min(MAX_BACKOFF_MS, 2000 * 2 ** (attempts - 1));
@@ -372,7 +404,18 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
       detail: `${detail} Reconnecting in ${Math.round(wait / 1000)}s…`
     });
     clearTimer();
-    timer = setTimeout(() => void launch(), wait);
+    if (!retire) {
+      timer = setTimeout(() => void launch(), wait);
+      return;
+    }
+    void (async () => {
+      await retire().catch(() => {});
+      // Disconnect during the kill is the case this re-check is for: `stop()` has already run
+      // `clearTimer`, and arming a fresh one afterwards would relaunch a tunnel the user stopped.
+      if (stopped || from !== generation) return;
+      clearTimer();
+      timer = setTimeout(() => void launch(), wait);
+    })();
   };
 
   /**
@@ -389,21 +432,28 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
    * OpenAI happened within the last poll cycle, which is the only honest basis for
    * saying "connected". The log lines only supply the wording for *why* it is down.
    */
-  const watch = (base: string): void => {
+  const watch = (base: string, from: number): void => {
     clearTimer();
     timer = setTimeout(
       () => {
         void (async () => {
-          if (stopped) return;
+          if (stopped || from !== generation) return;
           const ready = await probe(`${base}/readyz`);
+          // Re-checked after every await: this tick may have been overtaken by a replacement
+          // while the probe was in flight, and `child` would then be the new client.
+          if (stopped || from !== generation) return;
           if (!ready.ok) {
             logWarn(`${tag} went unready: ${ready.detail}`);
-            await stopTree(child);
-            retry(ready.detail || 'The tunnel stopped responding.');
+            // Claim the retry before stopping the tree, not after. Stopping it makes this same
+            // process emit `exit`, and whichever call arrives first is the one that decides the
+            // backoff and the reason the user is shown — so the reason worth showing goes first
+            // and the exit listener finds the generation already answered.
+            retry(ready.detail || 'The tunnel stopped responding.', from, () => stopTree(child));
             return;
           }
 
           const read = await refreshHealth(base);
+          if (stopped || from !== generation) return;
 
           // A client that has only just started may not have completed its first poll
           // yet; that is not an outage, so it gets one poll cycle of grace.
@@ -419,7 +469,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
           } else {
             showConnected();
           }
-          watch(base);
+          watch(base, from);
         })();
       },
       shown === 'offline' ? OFFLINE_RECHECK_MS : WATCH_INTERVAL_MS
@@ -429,9 +479,16 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
   const launch = async (): Promise<void> => {
     if (stopped) return;
     clearTimer();
+    // A new client is a new generation: callbacks left over from the previous one now fail their
+    // fence, and this one has not yet been answered.
+    const mine = ++generation;
+    finished = false;
     lastError = '';
     // A stale URL from the previous run would otherwise be read as this run's.
     await fs.rm(healthFile, { force: true }).catch(() => {});
+    // Disconnect can land inside that await. Without this the stop would be overtaken and a fresh
+    // client spawned after the user had already stopped the tunnel, with nothing left to kill it.
+    if (stopped || mine !== generation) return;
 
     opts.report({
       state: 'connecting-tunnel',
@@ -519,14 +576,14 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
       if (stopped || proc !== child) return;
       done = true;
       logWarn(`${tag} client exited with code ${code}`);
-      retry(lastError || `Tunnel client stopped (exit ${code}).`);
+      retry(lastError || `Tunnel client stopped (exit ${code}).`, mine);
     });
 
     proc.on('error', (err) => {
       if (stopped || proc !== child) return;
       done = true;
       logError(`${tag} client failed to start: ${err.message}`);
-      retry(`Could not start tunnel-client: ${err.message}`);
+      retry(`Could not start tunnel-client: ${err.message}`, mine);
     });
 
     // /readyz on the client's own health server is the authoritative "it works"
@@ -546,7 +603,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
           await refreshHealth(base);
           if (Date.now() - lastUnreachable < RECOVERY_QUIET_MS) showOffline();
           else showConnected();
-          watch(base);
+          watch(base, mine);
           return;
         }
         lastError = ready.detail || lastError;
@@ -554,8 +611,9 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
       await delay(1000);
     }
     if (!done && !stopped) {
-      await stopTree(proc);
-      retry(lastError || 'The tunnel did not become ready within 60 seconds.');
+      // Same order as the unready path above, and for the same reason: the timeout is the reason
+      // worth reporting, and stopping the tree would otherwise let the exit listener report first.
+      retry(lastError || 'The tunnel did not become ready within 60 seconds.', mine, () => stopTree(proc));
     }
   };
 
@@ -629,71 +687,111 @@ async function startCloudflared(opts: TunnelStartOptions): Promise<TunnelHandle>
     local.host
   ];
 
-  opts.report({ state: 'connecting-tunnel', detail: 'Starting cloudflared…' });
-
-  const child = spawn(binary, args, {
-    windowsHide: true,
-    detached: process.platform !== 'win32',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    // Tunnel providers need the ordinary OS environment, never credentials inherited
-    // from a terminal that happened to launch Electron.
-    env: childEnv()
-  });
-
-  let settled = false;
   let stopped = false;
-  let lastError = '';
+  let child: ChildProcess | null = null;
+  let timer: NodeJS.Timeout | null = null;
+  let attempts = 0;
 
-  const handleLine = (line: string): void => {
-    const match = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i.exec(line);
-    if (match && !settled) {
-      settled = true;
-      const publicUrl = `${match[0]}${local.pathname}`;
-      logInfo('quick tunnel connected');
-      opts.report({
-        state: 'connected',
-        detail: 'Connected. Paste the URL below into ChatGPT as a custom connector.',
-        publicUrl
-      });
-      return;
-    }
-    if (/\berr\b|\berror\b|\bfatal\b/i.test(line)) {
-      lastError = line.slice(0, 400);
-      logWarn(`cloudflared: ${lastError}`);
-    }
+  const clearTimer = (): void => {
+    if (timer) clearTimeout(timer);
+    timer = null;
   };
 
-  child.stdout.on('data', lineReader(handleLine));
-  child.stderr.on('data', lineReader(handleLine));
-
-  child.on('exit', (code) => {
+  const launch = (): void => {
     if (stopped) return;
-    settled = true;
+    clearTimer();
+    let connected = false;
+    let finished = false;
+    let lastError = '';
     opts.report({
-      state: 'tunnel-unavailable',
-      detail: lastError || `cloudflared stopped (exit ${code}).`
+      state: 'connecting-tunnel',
+      detail: attempts === 0 ? 'Starting cloudflared…' : 'Reconnecting cloudflared…'
     });
-  });
-  child.on('error', (err) => {
-    settled = true;
-    opts.report({ state: 'tunnel-unavailable', detail: `Could not start cloudflared: ${err.message}` });
-  });
 
-  const startupTimer = setTimeout(() => {
-    if (!settled && !stopped) {
+    const proc = spawn(binary, args, {
+      windowsHide: true,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // Tunnel providers need the ordinary OS environment, never credentials inherited
+      // from a terminal that happened to launch Electron.
+      env: childEnv()
+    });
+    child = proc;
+
+    const retry = (detail: string): void => {
+      if (stopped || finished || proc !== child) return;
+      finished = true;
+      attempts += 1;
+      const wait = Math.min(MAX_BACKOFF_MS, 2_000 * 2 ** (attempts - 1));
       opts.report({
-        state: 'tunnel-unavailable',
-        detail: lastError || 'cloudflared did not report a public URL within 45 seconds.'
+        state: 'connecting-tunnel',
+        detail: `${detail} Reconnecting in ${Math.round(wait / 1000)}s…`,
+        publicUrl: null
       });
-    }
-  }, 45_000);
-  startupTimer.unref?.();
+      clearTimer();
+      timer = setTimeout(launch, wait);
+      timer.unref?.();
+    };
+
+    const handleLine = (line: string): void => {
+      if (stopped || finished || proc !== child) return;
+      const match = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i.exec(line);
+      if (match && !connected) {
+        connected = true;
+        attempts = 0;
+        clearTimer();
+        const publicUrl = `${match[0]}${local.pathname}`;
+        logInfo('quick tunnel connected');
+        opts.report({
+          state: 'connected',
+          detail: 'Connected. Paste the URL below into ChatGPT as a custom connector.',
+          publicUrl
+        });
+        return;
+      }
+      if (/\berr\b|\berror\b|\bfatal\b/i.test(line)) {
+        lastError = line.slice(0, 400);
+        logWarn(`cloudflared: ${lastError}`);
+      }
+    };
+
+    proc.stdout.on('data', lineReader(handleLine));
+    proc.stderr.on('data', lineReader(handleLine));
+    proc.on('exit', (code) => {
+      if (stopped || finished || proc !== child) return;
+      logWarn(`cloudflared stopped with code ${code}`);
+      retry(lastError || `cloudflared stopped (exit ${code}).`);
+    });
+    proc.on('error', (err) => {
+      if (stopped || finished || proc !== child) return;
+      logWarn(`cloudflared failed to start: ${err.message}`);
+      retry(`Could not start cloudflared: ${err.message}.`);
+    });
+
+    timer = setTimeout(() => {
+      if (stopped || finished || connected || proc !== child) return;
+      const detail = lastError || 'cloudflared did not report a public URL within 45 seconds.';
+      // Fence the exit callback before killing this timed-out generation; otherwise its exit
+      // and the timeout would each schedule a replacement.
+      finished = true;
+      void stopTree(proc).finally(() => {
+        if (stopped || proc !== child) return;
+        finished = false;
+        retry(detail);
+      });
+    }, 45_000);
+    timer.unref?.();
+  };
+
+  launch();
 
   return {
     stop: async () => {
       stopped = true;
-      clearTimeout(startupTimer);
-      await stopTree(child);
+      clearTimer();
+      const owned = child;
+      child = null;
+      await stopTree(owned);
     }
   };
 }

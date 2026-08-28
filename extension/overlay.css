@@ -250,7 +250,8 @@
   opacity: 0.82;
 }
 
-.clf-stage-close {
+.clf-stage-close,
+.clf-stage-retry {
   display: inline-grid;
   flex: none;
   width: 1.65rem;
@@ -269,16 +270,27 @@
   opacity: 0.55;
 }
 
-.clf-stage-close[hidden] {
+.clf-stage-retry {
+  width: auto;
+  margin-left: auto;
+  padding: 0 0.65rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.clf-stage-close[hidden],
+.clf-stage-retry[hidden] {
   display: none;
 }
 
-.clf-stage-close:hover {
+.clf-stage-close:hover,
+.clf-stage-retry:hover {
   background: color-mix(in srgb, currentColor 9%, transparent);
   opacity: 0.9;
 }
 
-.clf-stage-close:focus-visible {
+.clf-stage-close:focus-visible,
+.clf-stage-retry:focus-visible {
   outline: 2px solid color-mix(in srgb, currentColor 45%, transparent);
   outline-offset: 1px;
   opacity: 1;

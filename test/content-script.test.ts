@@ -6288,6 +6288,48 @@ describe('the Compact & resume control', () => {
       action: 'none',
       hint: 'Nothing to compact yet — send a message, or set a goal and it writes one.'
     });
+    expect((control.querySelector('.clf-pill') as HTMLElement).hidden).toBe(true);
+    expect(control.querySelector('.clf-compact-btn')).not.toBeNull();
+  });
+
+  it('keeps exactly one gear and no stale Compact pill through SPA route changes', async () => {
+    const a = 'aaaaaaaa-1111-2222-3333-444444444444';
+    const b = 'bbbbbbbb-1111-2222-3333-444444444444';
+    live = await harness(`https://chatgpt.com/c/${a}`);
+
+    const assertControl = (mode: string, pillHidden: boolean) => {
+      live!.hook.observe();
+      live!.hook.injectControl();
+      const controls = live!.document.querySelectorAll('.clf-composer');
+      expect(controls).toHaveLength(1);
+      const control = controls.item(0);
+      if (!control) throw new Error('settings control missing after SPA navigation');
+      expect((control as HTMLElement).dataset.clfMode).toBe(mode);
+      expect(control.querySelector('.clf-compact-btn')).not.toBeNull();
+      expect((control.querySelector('.clf-pill') as HTMLElement).hidden).toBe(pillHidden);
+    };
+
+    assertControl('idle', true);
+    live.window.history.pushState({}, '', '/');
+    assertControl('off', true);
+    live.hook.toggleMenu();
+    expect((live.document.querySelector('.clf-menu-action') as HTMLButtonElement).disabled).toBe(true);
+    (live.document.querySelector('[data-clf-row="autoCompact"]') as HTMLButtonElement).click();
+    await settle();
+    const newChatWrite = live.sent.filter((message) => message.type === 'settings_set').at(-1);
+    expect(newChatWrite).toMatchObject({ type: 'settings_set' });
+    expect(newChatWrite).not.toHaveProperty('conversationId');
+    live.hook.closeMenu();
+    live.window.history.pushState({}, '', `/c/${b}`);
+    assertControl('idle', true);
+    live.window.history.back();
+    await settle();
+    assertControl('off', true);
+    live.window.history.forward();
+    await settle();
+    assertControl('idle', true);
+    live.window.history.replaceState({}, '', `/c/${a}`);
+    assertControl('idle', true);
   });
 
   it('sits in the composer, before the send button once the chat exists', async () => {
@@ -6572,6 +6614,41 @@ describe('the Compact & resume control', () => {
     live.hook.injectControl();
     expect(live.document.querySelector('.clf-compact-btn')).not.toBeNull();
     expect(live.document.querySelectorAll('.clf-compact-btn')).toHaveLength(1);
+  });
+
+  /**
+   * Live ChatGPT no longer gives its settled New Chat trailing row the older test id. During
+   * an existing-chat -> New Chat SPA transition there can briefly be a send-button shape,
+   * followed by this final voice-only shape. Anchoring only the intermediate renderer made
+   * the gear look fixed on reload while disappearing again after real sidebar navigation.
+   */
+  it('reattaches to the current voice-only New Chat composer after an SPA replacement', async () => {
+    live = await harness();
+    live.hook.injectControl();
+    expect(live.document.querySelector('.clf-compact-btn')).not.toBeNull();
+
+    live.window.history.pushState({}, '', '/');
+    const form = live.document.querySelector('#composer-form')!;
+    form.innerHTML = `
+      <div id="prompt-textarea" contenteditable="true"></div>
+      <div data-composer-transition-slot="trailing">
+        <button aria-label="Start dictation"></button>
+        <button aria-label="Start Voice"></button>
+      </div>`;
+    expect(live.document.querySelector('.clf-compact-btn')).toBeNull();
+
+    live.hook.observe();
+    live.hook.injectControl();
+    const controls = live.document.querySelectorAll('.clf-composer');
+    expect(controls).toHaveLength(1);
+    expect((controls.item(0).querySelector('.clf-pill') as HTMLElement).hidden).toBe(true);
+    const row = live.document.querySelector('[data-composer-transition-slot="trailing"]')!;
+    expect(controls.item(0).parentElement).toBe(row);
+    expect([...row.children].map((node) => node.getAttribute('aria-label') || node.className)).toEqual([
+      'clf-composer',
+      'Start dictation',
+      'Start Voice'
+    ]);
   });
 
   it('says what the job is doing at every stage', async () => {
@@ -9674,10 +9751,7 @@ describe('the goal loop', () => {
     expect(ackAttempts).toBeGreaterThanOrEqual(2);
   });
 
-  /**
-   * The loop's success condition. Nothing is typed, and the panel says so — a run that ends
-   * because the work is done must not look like a run that failed.
-   */
+  /** The expected stop decision is silent: it neither types nor flashes speculative status. */
   it('sends nothing when the model says the goal is met', async () => {
     let sends = () => 0;
     live = await harness(
@@ -9695,52 +9769,70 @@ describe('the goal loop', () => {
     expect(sends()).toBe(0);
     expect(composerText(live.document)).toBe('');
     expect(acks(live)).toHaveLength(1);
-    expect(live.hook.goalStageView({ phase: 'done', error: '', model: MODEL, draft: null })).toMatchObject({
-      stage: 'Goal reached',
-      kind: 'goal-done'
-    });
-
-    const panel = live.document.querySelector('.clf-stage') as HTMLElement;
-    const close = panel.querySelector('.clf-stage-close') as HTMLButtonElement;
-    expect(close.hidden).toBe(false);
-    expect(close.getAttribute('aria-label')).toBe('Dismiss Goal status');
-    close.click();
+    expect(live.hook.goalStageView({ phase: 'done', error: '', model: MODEL, draft: null })).toBeNull();
     expect(live.document.querySelector('.clf-stage')).toBeNull();
-
-    // Activity polling keeps repainting this terminal state. Dismissal belongs to the Goal
-    // turn rather than just its current node, so the same card must stay gone.
     live.hook.injectStage();
     expect(live.document.querySelector('.clf-stage')).toBeNull();
   });
 
-  it('removes a terminal Goal card when the user continues the same chat manually', async () => {
+  it('keeps a failed Goal turn retryable and retries it without minting a new turn', async () => {
+    const failed = {
+      ...readyDraft('', 'failed'),
+      error: 'http_503: provider unavailable',
+      retryable: true,
+      attempt: 3,
+      maxAttempts: 3
+    };
+    const recoveryFeed = liveFeed(failed);
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, {
+      ...recoveryFeed.replies,
+      goal_retry: () => {
+        const sending = { ...failed, stage: 'sending', error: null, retryable: false, attempt: 0 };
+        recoveryFeed.set(sending);
+        return { ok: true, data: { goal: sending } };
+      }
+    });
+
+    await live.hook.pullActivity();
+    await settle();
+    const retry = live.document.querySelector('.clf-stage-retry') as HTMLButtonElement;
+    expect(retry.hidden).toBe(false);
+    retry.click();
+    await settle();
+
+    expect(live.sent.filter((message) => message.type === 'goal_retry')).toEqual([
+      expect.objectContaining({ conversationId: CHAT, token: 'g-token' })
+    ]);
+    expect(acks(live)).toEqual([]);
+    expect(live.document.querySelector('.clf-stage')).toBeNull();
+  });
+
+  it('keeps the silent no-reply result absent through manual follow-up and activity repaint', async () => {
     live = await harness(
       `https://chatgpt.com/c/${CHAT}`,
       liveFeed(readyDraft('', 'no-reply')).replies
     );
     await live.hook.pullActivity();
     await settle();
-    expect(live.document.querySelector('.clf-stage')).not.toBeNull();
+    expect(live.document.querySelector('.clf-stage')).toBeNull();
 
     userTurn(live.document, 'manual-follow-up', 'I will continue from here');
     live.hook.observe();
     await settle();
 
     expect(live.document.querySelector('.clf-stage')).toBeNull();
-    // The app can keep reporting the preceding terminal phase until the next Goal run.
-    // That repaint must not put history back above the active composer.
     live.hook.injectStage();
     expect(live.document.querySelector('.clf-stage')).toBeNull();
   });
 
-  it('removes the old chat terminal Goal card on New Chat and a concrete chat switch', async () => {
+  it('does not resurrect a silent no-reply result across New Chat and concrete chat switches', async () => {
     live = await harness(
       `https://chatgpt.com/c/${CHAT}`,
       liveFeed(readyDraft('', 'no-reply')).replies
     );
     await live.hook.pullActivity();
     await settle();
-    expect(live.document.querySelector('.clf-stage')).not.toBeNull();
+    expect(live.document.querySelector('.clf-stage')).toBeNull();
 
     // New Chat has no conversation id until its first message. Recorder identity is held
     // through that ambiguous router gap, but conversation-scoped UI must leave immediately.
@@ -9750,10 +9842,10 @@ describe('the goal loop', () => {
     live.hook.injectStage();
     expect(live.document.querySelector('.clf-stage')).toBeNull();
 
-    // Recreate the old terminal card, then prove the concrete A -> B reset also removes it.
+    // Returning to A and then moving to B must not turn the old silent decision into UI.
     live.dom.reconfigure({ url: `https://chatgpt.com/c/${CHAT}` });
     live.hook.injectStage();
-    expect(live.document.querySelector('.clf-stage')).not.toBeNull();
+    expect(live.document.querySelector('.clf-stage')).toBeNull();
     live.dom.reconfigure({ url: 'https://chatgpt.com/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff' });
     live.hook.observe();
     expect(live.document.querySelector('.clf-stage')).toBeNull();
@@ -9822,15 +9914,9 @@ describe('the goal loop', () => {
     const hook = live.hook;
     const view = (goal: Record<string, unknown>) => hook.stageView({ job: null, goal });
 
-    expect(view({ phase: 'settling', error: '', model: MODEL, draft: null })).toMatchObject({
-      stage: 'Checking the answer is finished'
-    });
-    expect(view({ phase: 'requesting', error: '', model: MODEL, draft: null })).toMatchObject({
-      stage: 'Sending the answer to OpenRouter',
-      // The short name, because `deepseek/deepseek-v4-flash` is the id the API wants and not
-      // what anybody calls it.
-      detail: 'deepseek-v4-flash'
-    });
+    expect(view({ phase: 'settling', error: '', model: MODEL, draft: null })).toBeNull();
+    expect(view({ phase: 'requesting', error: '', model: MODEL, draft: null })).toBeNull();
+    expect(view({ phase: 'drafting', error: '', model: MODEL, draft: { stage: 'sending' } })).toBeNull();
     expect(
       view({ phase: 'drafting', error: '', model: MODEL, draft: { stage: 'answering', text: 'what about th' } })
     ).toMatchObject({ stage: 'deepseek-v4-flash is answering', body: 'what about th' });
@@ -9840,11 +9926,8 @@ describe('the goal loop', () => {
     expect(
       view({ phase: 'sending', error: '', model: MODEL, draft: { stage: 'ready', reply: 'what about the tests' } })
     ).toMatchObject({ stage: 'Sending it to ChatGPT', body: 'what about the tests' });
-    expect(view({ phase: 'done', error: '', model: MODEL, draft: null })).toMatchObject({
-      stage: 'Goal reached',
-      detail: 'nothing was sent',
-      kind: 'goal-done'
-    });
+    expect(view({ phase: 'done', error: '', model: MODEL, draft: null })).toBeNull();
+    expect(view({ phase: 'drafting', error: '', model: MODEL, draft: { stage: 'no-reply' } })).toBeNull();
     // The failure code is the detail, because "it failed" on its own sends the reader hunting
     // through an app they cannot see from here.
     expect(view({ phase: 'failed', error: 'out_of_credit: add credits', model: MODEL, draft: null })).toMatchObject({
@@ -9878,21 +9961,20 @@ describe('the goal loop', () => {
     const hook = live.hook;
     const view = (goal: Record<string, unknown>) => hook.stageView({ job: null, goal: { model: MODEL, error: '', ...goal } });
 
-    expect(view({ phase: 'settling', draft: null })!.steps).toEqual([
+    expect(view({ phase: 'drafting', draft: { stage: 'answering', text: 'what abo' } })!.steps).toEqual([
       'Answer settling',
       'Reading the chat',
       'Writing the reply',
       'Sending'
     ]);
 
-    expect(view({ phase: 'settling', draft: null })).toMatchObject({ at: 0, done: false });
-    expect(view({ phase: 'requesting', draft: null })).toMatchObject({ at: 1, done: false });
+    expect(view({ phase: 'settling', draft: null })).toBeNull();
+    expect(view({ phase: 'requesting', draft: null })).toBeNull();
     expect(view({ phase: 'drafting', draft: { stage: 'answering', text: 'what abo' } })).toMatchObject({ at: 2, done: false });
     // Written but not yet typed: the third segment is full and the fourth has not begun.
     expect(view({ phase: 'drafting', draft: { stage: 'ready', reply: 'what about the tests' } })).toMatchObject({ at: 2, done: true });
     expect(view({ phase: 'sending', draft: { stage: 'ready', reply: 'what about the tests' } })).toMatchObject({ at: 3, done: false });
-    // The loop's success condition sent nothing, so the last segment is never filled in.
-    expect(view({ phase: 'done', draft: null })).toMatchObject({ at: 2, done: true, kind: 'goal-done' });
+    expect(view({ phase: 'done', draft: null })).toBeNull();
 
     // Three stops, three different places.
     expect(view({ phase: 'requesting', error: 'the app did not answer', draft: null })).toMatchObject({
@@ -10530,7 +10612,7 @@ describe('the goal loop', () => {
    * was built disabled and never heard the typing, and a repaint mid-sentence put the caret
    * back at the end of it.
    */
-  it('keeps a half-written goal, its caret and its Save button through a repaint', async () => {
+  it('keeps one stable goal editor, its scroll, selection and Save button through unrelated repaints', async () => {
     live = await harness(`https://chatgpt.com/c/${CHAT}`, goalReplies());
     await live.hook.pullActivity();
     live.hook.injectControl();
@@ -10541,16 +10623,24 @@ describe('the goal loop', () => {
     box.focus();
     box.value = 'port the module';
     box.dispatchEvent(new live.window.Event('input', { bubbles: true }));
-    box.setSelectionRange(4, 4);
+    box.setSelectionRange(4, 8, 'forward');
+    box.scrollTop = 73;
+    const menu = live.document.querySelector('[data-clf-menu]') as HTMLElement;
+    menu.scrollTop = 41;
     expect((live.document.querySelector('.clf-menu-goal-save') as HTMLButtonElement).disabled).toBe(false);
 
     // What an activity poll does to this sheet, which is rebuild it from scratch.
     live.hook.renderControl();
 
     const after = live.document.querySelector('[data-clf-goal-input]') as HTMLTextAreaElement;
+    expect(after).toBe(box);
     expect(after.value).toBe('port the module');
     expect(live.document.activeElement).toBe(after);
     expect(after.selectionStart).toBe(4);
+    expect(after.selectionEnd).toBe(8);
+    expect(after.selectionDirection).toBe('forward');
+    expect(after.scrollTop).toBe(73);
+    expect(menu.scrollTop).toBe(41);
     expect((live.document.querySelector('.clf-menu-goal-save') as HTMLButtonElement).disabled).toBe(false);
   });
 

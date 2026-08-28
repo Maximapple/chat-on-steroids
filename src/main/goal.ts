@@ -76,6 +76,23 @@ const MAX_CONTEXT_CHARS = 120_000;
 const MAX_MESSAGE_CHARS = 12_000;
 /** How long one draft may take before it is abandoned as failed. */
 const REQUEST_TIMEOUT_MS = 180_000;
+/**
+ * The same ceiling for an opening message, which has somebody watching it.
+ *
+ * `REQUEST_TIMEOUT_MS` is generous because an ordinary draft answers a turn that has already
+ * finished: nothing is on screen waiting, and a slow provider costs only lateness. An opening
+ * message is the opposite — a person has just saved a goal and is looking at an empty composer,
+ * and the browser holds an HTTP request open across the bridge for the whole time. Three
+ * attempts at the full 180 s would be a nine-minute page-visible stall, so the per-attempt
+ * budget here is sized to fit a bounded retry inside a wait a person will actually tolerate:
+ * worst case is 3 x 30 s plus 2 s of backoff, and `GOAL_OPEN_TIMEOUT_MS` in the extension is
+ * set above that total so the client stops being the thing that gives up first.
+ */
+const OPENING_ATTEMPT_TIMEOUT_MS = 30_000;
+/** One original Goal turn, at most three same-model attempts. Never spin through an outage. */
+const MAX_GOAL_ATTEMPTS = 3;
+/** Backoff is short in deterministic tests and human-scale in production. */
+const GOAL_RETRY_DELAYS_MS = process.env.NODE_ENV === 'test' ? [0, 1, 2] : [0, 500, 1_500];
 /** The catalogue is UI data; a dead provider must not leave the picker request hanging forever. */
 const MODEL_LIST_TIMEOUT_MS = 30_000;
 /** A single SSE record should be tiny; this still leaves ample room around the 12k reply cap. */
@@ -176,6 +193,11 @@ export interface GoalDraftView {
   reply: string;
   /** A short machine-readable reason, shown by the page when the stage is `failed`. */
   error: string | null;
+  /** Current provider attempt for diagnostics and compact recovery UI. */
+  attempt: number;
+  maxAttempts: number;
+  /** A terminal failure whose exact frozen turn can be tried again explicitly. */
+  retryable: boolean;
 }
 
 interface GoalDraft extends GoalDraftView {
@@ -199,10 +221,109 @@ interface GoalDraft extends GoalDraftView {
   acknowledged: boolean;
   work: Promise<void> | null;
   abort: AbortController | null;
+  /** Invalidates callbacks/results from an earlier timed-out or cancelled attempt. */
+  requestGeneration: number;
+  /** Terminal state is not visible to the browser until its durable snapshot lands. */
+  publishable: boolean;
 }
 
 /** At most one draft per conversation. A new turn replaces the old chat's finished draft. */
 const drafts = new Map<string, GoalDraft>();
+
+export const GOAL_DRAFTS_STATE = 'goal-drafts';
+
+export interface GoalDraftsSnapshot {
+  version: 1;
+  savedAt: number;
+  drafts: Array<{
+    token: string;
+    conversationId: string;
+    sessionId: string;
+    turnId: string;
+    stage: GoalStage;
+    model: string;
+    text: string;
+    reply: string;
+    error: string | null;
+    systemPrompt: string;
+    objectiveSystemPrompt: string;
+    objective: string;
+    startedAt: number;
+    settledAt: number;
+    attempt: number;
+    retryable: boolean;
+  }>;
+}
+
+export function snapshotGoalDrafts(): GoalDraftsSnapshot {
+  return {
+    version: 1,
+    savedAt: Date.now(),
+    drafts: [...drafts.values()]
+      .filter((draft) => !draft.acknowledged)
+      .map((draft) => ({
+        token: draft.token,
+        conversationId: draft.conversationId,
+        sessionId: draft.sessionId,
+        turnId: draft.turnId,
+        stage: draft.stage,
+        model: draft.model,
+        text: draft.text,
+        reply: draft.reply,
+        error: draft.error,
+        systemPrompt: draft.systemPrompt,
+        objectiveSystemPrompt: draft.objectiveSystemPrompt,
+        objective: draft.objective,
+        startedAt: draft.startedAt,
+        settledAt: draft.settledAt,
+        attempt: draft.attempt,
+        retryable: draft.retryable
+      }))
+  };
+}
+
+function persistGoalDraftsSoon(): void {
+  writeDurableSoon(GOAL_DRAFTS_STATE, snapshotGoalDrafts());
+}
+
+/** Restores unspent exactly-once identities; interrupted provider work resumes from its frozen turn. */
+export function restoreGoalDrafts(snapshot: GoalDraftsSnapshot | null): void {
+  for (const draft of drafts.values()) draft.abort?.abort();
+  drafts.clear();
+  if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.drafts)) return;
+  for (const raw of snapshot.drafts) {
+    if (!raw || typeof raw !== 'object') continue;
+    if (!/^[0-9a-z-]{8,256}$/i.test(raw.conversationId) || !raw.sessionId || !raw.turnId || !raw.token) continue;
+    if (!['sending', 'answering', 'ready', 'no-reply', 'failed'].includes(raw.stage)) continue;
+    const interrupted = raw.stage === 'sending' || raw.stage === 'answering';
+    const draft: GoalDraft = {
+      ...raw,
+      stage: interrupted ? 'sending' : raw.stage,
+      text: interrupted ? '' : String(raw.text || '').slice(0, MAX_MESSAGE_CHARS),
+      reply: interrupted ? '' : String(raw.reply || '').slice(0, MAX_MESSAGE_CHARS),
+      error: interrupted ? null : typeof raw.error === 'string' ? raw.error.slice(0, 500) : null,
+      systemPrompt: String(raw.systemPrompt || '').slice(0, 20_000),
+      objectiveSystemPrompt: String(raw.objectiveSystemPrompt || '').slice(0, 20_000),
+      objective: String(raw.objective || '').slice(0, MAX_GOAL_OBJECTIVE_CHARS),
+      clientId: '',
+      attempt: interrupted ? 0 : Math.max(0, Math.min(MAX_GOAL_ATTEMPTS, Number(raw.attempt) || 0)),
+      maxAttempts: MAX_GOAL_ATTEMPTS,
+      retryable: interrupted ? false : raw.retryable === true,
+      acknowledged: false,
+      work: null,
+      abort: null,
+      requestGeneration: 0,
+      publishable: true
+    };
+    drafts.set(draft.conversationId, draft);
+    if (interrupted) {
+      draft.work = run(draft).catch((err: Error) => {
+        draft.retryable = true;
+        settle(draft, 'failed', `goal_failed: ${err.message}`);
+      });
+    }
+  }
+}
 
 /** Durable state file for per-chat Goal objectives. */
 export const GOAL_OBJECTIVES_STATE = 'goal-objectives';
@@ -322,6 +443,21 @@ export async function goalKeyPresent(): Promise<boolean> {
 }
 
 function view(draft: GoalDraft): GoalDraftView {
+  if (!draft.publishable) {
+    return {
+      token: draft.token,
+      conversationId: draft.conversationId,
+      turnId: draft.turnId,
+      stage: 'sending',
+      model: draft.model,
+      text: '',
+      reply: '',
+      error: null,
+      attempt: draft.attempt,
+      maxAttempts: draft.maxAttempts,
+      retryable: false
+    };
+  }
   return {
     token: draft.token,
     conversationId: draft.conversationId,
@@ -332,7 +468,10 @@ function view(draft: GoalDraft): GoalDraftView {
     // The reply is handed over only while it is still the thing to do. Once acknowledged it
     // is history, and a page that polls again must not find a message to type a second time.
     reply: draft.stage === 'ready' && !draft.acknowledged ? draft.reply : '',
-    error: draft.error
+    error: draft.error,
+    attempt: draft.attempt,
+    maxAttempts: draft.maxAttempts,
+    retryable: draft.retryable
   };
 }
 
@@ -353,6 +492,12 @@ export function goalViewFor(conversationId: string, clientId?: string): GoalDraf
   const draft = drafts.get(conversationId);
   if (!draft) return null;
   expireDraftPayload(draft);
+  if (clientId !== undefined && draft.clientId === '') {
+    // App/browser restart invalidates tab ids. The first exact-conversation page to poll the
+    // restored draft reclaims it; duplicate tabs remain fenced after that first claim.
+    draft.clientId = clientId;
+    persistGoalDraftsSoon();
+  }
   if (clientId !== undefined && draft.clientId !== clientId) return null;
   // An acknowledged draft has already been acted on — typed, or decided against. It is kept
   // here only so the turn it belongs to cannot be drafted a second time, and reporting it
@@ -380,6 +525,14 @@ export function ackGoalDraft(conversationId: string, token: string, clientId?: s
   // aborting the controller closes the stream immediately.
   draft.abort?.abort();
   if (draft.settledAt === 0) draft.settledAt = Date.now();
+  persistGoalDraftsSoon();
+  return true;
+}
+
+export async function ackGoalDraftNow(conversationId: string, token: string, clientId?: string): Promise<boolean> {
+  const acknowledged = ackGoalDraft(conversationId, token, clientId);
+  if (!acknowledged) return false;
+  await writeDurableNow(GOAL_DRAFTS_STATE, snapshotGoalDrafts());
   return true;
 }
 
@@ -401,6 +554,7 @@ export function retireGoalDrafts(): number {
     draft.reply = '';
     retired += 1;
   }
+  if (retired > 0) persistGoalDraftsSoon();
   return retired;
 }
 
@@ -419,6 +573,7 @@ export function retireGoalDraftsFor(conversationId: string): boolean {
   if (draft.settledAt === 0) draft.settledAt = Date.now();
   draft.text = '';
   draft.reply = '';
+  persistGoalDraftsSoon();
   return true;
 }
 
@@ -451,6 +606,10 @@ export function startGoalDraft(input: StartGoalDraftInput): GoalDraftView {
   const existing = drafts.get(input.conversationId);
   const clientId = input.clientId ?? '';
   if (existing) expireDraftPayload(existing);
+  if (existing && existing.clientId === '' && clientId !== '') {
+    existing.clientId = clientId;
+    persistGoalDraftsSoon();
+  }
   // A Goal reply is an irreversible browser-side write. Conversation identity alone is not
   // enough because two tabs can show the same ChatGPT chat and both poll /activity. Keep one
   // tab as the writer until that draft is spent/expired; a second observer must not abort it,
@@ -482,11 +641,16 @@ export function startGoalDraft(input: StartGoalDraftInput): GoalDraftView {
     text: '',
     reply: '',
     error: null,
+    attempt: 0,
+    maxAttempts: MAX_GOAL_ATTEMPTS,
+    retryable: false,
     startedAt: Date.now(),
     settledAt: 0,
     acknowledged: false,
     work: null,
-    abort: null
+    abort: null,
+    requestGeneration: 0,
+    publishable: true
   };
   drafts.set(input.conversationId, draft);
   draft.work = run(draft).catch((err: Error) => {
@@ -502,6 +666,55 @@ function settle(draft: GoalDraft, stage: GoalStage, error: string | null = null)
   draft.stage = stage;
   draft.error = error;
   draft.settledAt = Date.now();
+  draft.publishable = true;
+  persistGoalDraftsSoon();
+}
+
+async function settleDurably(
+  draft: GoalDraft,
+  stage: GoalStage,
+  error: string | null = null,
+  retryable = false
+): Promise<void> {
+  if (drafts.get(draft.conversationId) !== draft) return;
+  draft.stage = stage;
+  draft.error = error;
+  draft.retryable = retryable;
+  draft.settledAt = Date.now();
+  draft.publishable = false;
+  try {
+    await writeDurableNow(GOAL_DRAFTS_STATE, snapshotGoalDrafts());
+    draft.publishable = true;
+  } catch (err) {
+    draft.stage = 'failed';
+    draft.error = `goal_state_not_durable: ${err instanceof Error ? err.message : String(err)}`;
+    draft.retryable = true;
+    draft.publishable = true;
+    persistGoalDraftsSoon();
+  }
+}
+
+/** Retries the exact failed turn/context without minting a second browser-send identity. */
+export function retryGoalDraft(conversationId: string, token: string, clientId?: string): GoalDraftView | null {
+  const draft = drafts.get(conversationId);
+  if (!draft || draft.token !== token || draft.stage !== 'failed' || draft.acknowledged) return null;
+  if (clientId !== undefined && draft.clientId !== clientId) return null;
+  draft.abort?.abort();
+  draft.stage = 'sending';
+  draft.text = '';
+  draft.reply = '';
+  draft.error = null;
+  draft.attempt = 0;
+  draft.retryable = false;
+  draft.settledAt = 0;
+  draft.publishable = true;
+  draft.work = run(draft).catch((err: Error) => {
+    if (drafts.get(draft.conversationId) === draft && !draft.acknowledged) {
+      draft.retryable = true;
+      settle(draft, 'failed', `goal_failed: ${err.message}`);
+    }
+  });
+  return view(draft);
 }
 
 /**
@@ -533,7 +746,9 @@ interface GoalRequest {
   publish?: (text: string) => void;
 }
 
-async function requestGoalDecision(request: GoalRequest): Promise<GoalDecision | { action: 'http'; error: string }> {
+async function requestGoalDecision(
+  request: GoalRequest
+): Promise<GoalDecision | { action: 'http'; error: string; retryable: boolean }> {
   const settings = getConfig().goal;
   const body: Record<string, unknown> = {
     model: request.model,
@@ -569,15 +784,105 @@ async function requestGoalDecision(request: GoalRequest): Promise<GoalDecision |
     body: JSON.stringify(body),
     signal: request.signal
   });
-  if (!response.ok || !response.body) return { action: 'http', error: await httpFailure(response) };
+  if (!response.ok || !response.body) {
+    return {
+      action: 'http',
+      error: await httpFailure(response),
+      retryable: response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500
+    };
+  }
   const completion = await readGoalCompletion(response, request.publish);
   return normalizeGoalDecision(completion.text, completion.legacy);
 }
 
+/** What one attempt is worth repeating for, in the two words the retry loop needs. */
+interface GoalFailure {
+  /** The failure in the same vocabulary `settle` and the page already use. */
+  failure: string;
+  /** Whether running the identical request again could plausibly produce a different answer. */
+  retryable: boolean;
+}
+
+/**
+ * Whether another same-model attempt can plausibly do better.
+ *
+ * This used to be an initialiser rather than a decision. `run` set `retryable = true` and then
+ * only ever narrowed it inside the `http` branch, so two whole classes of failure quietly bought
+ * three attempts each: a response that violated the output protocol (`invalid`) and one that
+ * broke a byte ceiling (`reply_too_long`, `stream_record_too_long`). Neither is transient. The
+ * model, the prompt, the temperature-free structured-output request and the caps are identical
+ * on the next pass, so attempts two and three spend the user's OpenRouter credit reproducing the
+ * first result — while the documentation described a transient-only policy the code did not
+ * implement.
+ *
+ * Retryable means the provider or the transport had a bad moment: 408, 425, 429 and 5xx, a
+ * timeout, or a connection that never delivered a response at all. Everything else — a refused
+ * key, exhausted credit, an unknown model id, a malformed decision, an oversized body — is an
+ * answer rather than weather, and it will be the same answer three times.
+ */
+/**
+ * The thrown failures that are a property of the response rather than of the moment.
+ *
+ * Each of these is decided by comparing the bytes that arrived against an app constant or the
+ * documented completion shape, so the identical request produces the identical verdict: a body
+ * over the ceiling is over it again, and a completion whose `content` is not a string does not
+ * become one on the second read. Retrying them only spends credit to be told the same thing.
+ *
+ * `provider_completion_error` and `provider_stream_error` are deliberately absent. They are not
+ * this app failing to read a response — they are the provider reporting its own trouble in the
+ * body instead of in a status code, which is the same transient class as a 5xx and is worth the
+ * same second look. `provider_stream_error` also carries a variable detail suffix, so matching it
+ * here would be by prefix rather than by identity; letting it fall through to the transport
+ * branch is both the intended policy and the honest one.
+ */
+const DETERMINISTIC_GOAL_FAILURES = new Set([
+  'malformed_completion_response',
+  'malformed_stream_record',
+  'reply_too_long',
+  'stream_record_too_long',
+  'response_body_too_large'
+]);
+
+function goalThrowFailure(err: unknown, aborted: boolean): GoalFailure {
+  const detail = err instanceof Error ? err.message : String(err);
+  if (detail === 'goal_request_timeout' || aborted) return { failure: 'timeout_or_cancelled', retryable: true };
+  if (DETERMINISTIC_GOAL_FAILURES.has(detail)) return { failure: detail, retryable: false };
+  // Anything else that threw is the transport: DNS, a reset connection, TLS, a socket hang-up.
+  // `provider_completion_error` and `provider_stream_error` land here on purpose — see the set.
+  return { failure: `request_failed: ${detail}`, retryable: true };
+}
+
+/**
+ * The same judgement for an attempt that did return something, or null when it succeeded.
+ *
+ * `http` already carries the status classification made where the status code was read.
+ * `invalid` is the deterministic case described above and is refused after one attempt.
+ */
+function goalDecisionFailure(
+  decision: GoalDecision | { action: 'http'; error: string; retryable: boolean }
+): GoalFailure | null {
+  if (decision.action === 'http') return { failure: decision.error, retryable: decision.retryable };
+  if (decision.action === 'invalid') return { failure: decision.error, retryable: false };
+  return null;
+}
+
+/** The pause before attempt `attempt + 1`, from the one shared schedule. */
+function goalRetryDelayMs(attempt: number): number {
+  return GOAL_RETRY_DELAYS_MS[attempt] ?? GOAL_RETRY_DELAYS_MS.at(-1) ?? 0;
+}
+
 async function run(draft: GoalDraft): Promise<void> {
+  // Provider work may outlive this process. Store the exact turn/token/model/prompts before
+  // spending the key so an app restart resumes one identity instead of minting another.
+  try {
+    await writeDurableNow(GOAL_DRAFTS_STATE, snapshotGoalDrafts());
+  } catch (err) {
+    draft.retryable = true;
+    return settle(draft, 'failed', `goal_state_not_durable: ${err instanceof Error ? err.message : String(err)}`);
+  }
   const key = await getSecret('openRouterApiKey');
   if (draft.acknowledged || drafts.get(draft.conversationId) !== draft) return;
-  if (!key) return settle(draft, 'failed', 'no_api_key');
+  if (!key) return void (await settleDurably(draft, 'failed', 'no_api_key', true));
   const messages = await conversationMessages(draft.sessionId);
   if (draft.acknowledged || drafts.get(draft.conversationId) !== draft) return;
   // Goal Mode is supposed to continue *the user's objective*. A partially recovered recorder
@@ -589,56 +894,127 @@ async function run(draft: GoalDraft): Promise<void> {
   // evidence of a recovery failure: the user stated the request themselves, before the
   // conversation existed, and writing its opening message is the whole job. See setGoalObjective.
   if (!draft.objective && (messages.length === 0 || !messages.some((message) => message.role === 'user'))) {
-    return settle(draft, 'failed', 'no_conversation');
+    return void (await settleDurably(draft, 'failed', 'no_conversation', true));
   }
 
+  const request = {
+    key,
+    model: draft.model,
+    system: draft.objective
+      ? [draft.objectiveSystemPrompt, goalObjectiveMessage(draft.objective)]
+      : [draft.systemPrompt],
+    messages: messages.length > 0 ? messages : [{ role: 'user' as const, content: GOAL_OBJECTIVE_OPENING_TURN }],
+    trailer: draft.objective ? GOAL_OBJECTIVE_TRAILER : GOAL_SYSTEM_TRAILER
+  };
+
+  for (let attempt = 1; attempt <= MAX_GOAL_ATTEMPTS; attempt += 1) {
+    if (draft.acknowledged || drafts.get(draft.conversationId) !== draft) return;
+    draft.attempt = attempt;
+    draft.stage = 'sending';
+    draft.text = '';
+    draft.reply = '';
+    draft.error = null;
+    draft.retryable = false;
+    const abort = new AbortController();
+    draft.abort = abort;
+    const generation = ++draft.requestGeneration;
+    let timer: NodeJS.Timeout | null = null;
+    let failure = '';
+    // Fail closed. Every path below sets this from `goalDecisionFailure`/`goalThrowFailure`, and
+    // the previous optimistic `true` is exactly what made deterministic failures retry.
+    let retryable = false;
+    try {
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          abort.abort();
+          reject(new Error('goal_request_timeout'));
+        }, REQUEST_TIMEOUT_MS);
+      });
+      const decision = await Promise.race([
+        requestGoalDecision({
+          ...request,
+          signal: abort.signal,
+          publish: (text) => {
+            if (
+              drafts.get(draft.conversationId) !== draft ||
+              draft.acknowledged ||
+              draft.requestGeneration !== generation
+            ) return;
+            draft.stage = 'answering';
+            draft.text = text;
+          }
+        }),
+        timeout
+      ]);
+      if (
+        draft.acknowledged ||
+        drafts.get(draft.conversationId) !== draft ||
+        draft.requestGeneration !== generation
+      ) return;
+      const rejected = goalDecisionFailure(decision);
+      if (rejected) {
+        failure = rejected.failure;
+        retryable = rejected.retryable;
+      } else if (decision.action === 'stop') {
+        logInfo(`goal: ${draft.model} says the goal is met in ${draft.conversationId}; nothing was sent`);
+        draft.reply = '';
+        return void (await settleDurably(draft, 'no-reply'));
+      } else if (decision.action === 'continue') {
+        draft.reply = humanReply(decision.reply);
+        logInfo(`goal: drafted ${decision.reply.length} characters for ${draft.conversationId} with ${draft.model}`);
+        return void (await settleDurably(draft, 'ready'));
+      }
+    } catch (err) {
+      const thrown = goalThrowFailure(err, abort.signal.aborted);
+      failure = thrown.failure;
+      retryable = thrown.retryable;
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (draft.abort === abort) draft.abort = null;
+    }
+
+    if (draft.acknowledged || drafts.get(draft.conversationId) !== draft) return;
+    if (retryable && attempt < MAX_GOAL_ATTEMPTS) {
+      const delay = goalRetryDelayMs(attempt);
+      logWarn(
+        `goal: ${draft.model} attempt ${attempt}/${MAX_GOAL_ATTEMPTS} failed for ${draft.conversationId} — ${failure}; retrying`
+      );
+      await waitForGoalRetry(draft, delay);
+      continue;
+    }
+    logWarn(`goal: draft for ${draft.conversationId} failed after ${attempt} attempt(s) — ${failure}`);
+    await settleDurably(draft, 'failed', failure, true);
+    return;
+  }
+}
+
+/**
+ * The pause between two provider attempts, cancellable by the same handle as a request is.
+ *
+ * The failed attempt's controller is retired in `run()`'s `finally` before this is called, so
+ * reading `draft.abort` here would always find null and the wait would never be interruptible:
+ * an acknowledgement or a retirement arriving mid-backoff would be noticed only after the full
+ * delay had elapsed. Own a controller for the sleep as well, so `draft.abort` is the one live
+ * cancellation handle for every part of `run()` rather than only for its network calls.
+ */
+async function waitForGoalRetry(draft: GoalDraft, delayMs: number): Promise<void> {
+  if (delayMs <= 0) return;
   const abort = new AbortController();
   draft.abort = abort;
-  const timer = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const decision = await requestGoalDecision({
-      key,
-      model: draft.model,
-      system: draft.objective
-        ? [draft.objectiveSystemPrompt, goalObjectiveMessage(draft.objective)]
-        : [draft.systemPrompt],
-      messages: messages.length > 0 ? messages : [{ role: 'user', content: GOAL_OBJECTIVE_OPENING_TURN }],
-      trailer: draft.objective ? GOAL_OBJECTIVE_TRAILER : GOAL_SYSTEM_TRAILER,
-      signal: abort.signal,
-      publish: (text) => {
-        draft.stage = 'answering';
-        if (drafts.get(draft.conversationId) === draft) draft.text = text;
-      }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, delayMs);
+      abort.signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true }
+      );
     });
-    if (draft.acknowledged || drafts.get(draft.conversationId) !== draft) return;
-    if (decision.action === 'http') return settle(draft, 'failed', decision.error);
-    if (decision.action === 'invalid') return settle(draft, 'failed', decision.error);
-    if (decision.action === 'stop') {
-      logInfo(`goal: ${draft.model} says the goal is met in ${draft.conversationId}; nothing was sent`);
-      // Reaching the goal ends this Goal run, not the user's saved objective. Keeping the text
-      // lets a reopened chat show what it was pursuing and lets a later manual correction such
-      // as "that did not work" continue against the same objective. Nothing auto-restarts here:
-      // the browser still needs a genuinely new turn ending before it can request another draft.
-      draft.reply = '';
-      return settle(draft, 'no-reply');
-    }
-    // Typed rather than written. See humanReply: the em dashes go, and a couple of the
-    // mistakes a person leaves behind go in. After the NO_REPLY test above, never before it.
-    draft.reply = humanReply(decision.reply);
-    logInfo(`goal: drafted ${decision.reply.length} characters for ${draft.conversationId} with ${draft.model}`);
-    settle(draft, 'ready');
-  } catch (err) {
-    const detail = (err as Error).message;
-    const failure = abort.signal.aborted
-      ? 'timeout_or_cancelled'
-      : detail === 'reply_too_long' || detail === 'stream_record_too_long'
-        ? detail
-        : `request_failed: ${detail}`;
-    logWarn(`goal: draft for ${draft.conversationId} failed — ${failure}`);
-    settle(draft, 'failed', failure);
   } finally {
-    clearTimeout(timer);
-    draft.abort = null;
+    if (draft.abort === abort) draft.abort = null;
   }
 }
 
@@ -653,6 +1029,17 @@ async function run(draft: GoalDraft): Promise<void> {
  *
  * It is deliberately not idempotent, because there is nothing yet to key idempotency to. The
  * page holds that end: one save, one call, and the result goes into an empty composer.
+ *
+ * It does, however, self-heal exactly as an ordinary draft does. This used to make a single
+ * attempt and hand back the first transient 429 or dropped connection it met, so a specific goal
+ * saved on a New Chat was the one Goal path that did not survive a provider hiccup — while the
+ * release notes described transient retry as a property of Goal generally. It now runs the same
+ * bounded same-model policy as `run`, through the same two classifiers, so "which failures are
+ * worth another attempt" is decided in one place for both callers.
+ *
+ * Retrying needs no durable token here, unlike a draft: nothing irreversible has crossed the
+ * browser yet. The message has not been typed, the chat does not exist, and ChatGPT has issued
+ * no conversation id, so a second attempt cannot duplicate anything a first attempt did.
  */
 export async function draftOpeningMessage(
   objective: string
@@ -662,31 +1049,41 @@ export async function draftOpeningMessage(
   const key = await getSecret('openRouterApiKey');
   if (!key) return { error: 'no_api_key' };
   const model = getConfig().goal.model;
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const decision = await requestGoalDecision({
-      key,
-      model,
-      system: [getConfig().goal.objectivePrompt, goalObjectiveMessage(goal)],
-      messages: [{ role: 'user', content: GOAL_OBJECTIVE_OPENING_TURN }],
-      trailer: GOAL_OBJECTIVE_TRAILER,
-      signal: abort.signal
-    });
-    if (decision.action === 'http') return { error: decision.error };
-    if (decision.action === 'invalid') return { error: decision.error };
-    // Stopping before the first word has been said is the model refusing the goal rather
-    // than meeting it, and an empty opening message would leave somebody looking at a chat
-    // that never started with nothing on screen to say why.
-    if (decision.action === 'stop') return { error: 'nothing_to_open_with' };
-    logInfo(`goal: drafted an opening message of ${decision.reply.length} characters with ${model}`);
-    return { reply: humanReply(decision.reply), model };
-  } catch (err) {
-    const detail = (err as Error).message;
-    return { error: abort.signal.aborted ? 'timeout_or_cancelled' : `request_failed: ${detail}` };
-  } finally {
-    clearTimeout(timer);
+  let last: GoalFailure = { failure: 'no_attempt', retryable: false };
+  for (let attempt = 1; attempt <= MAX_GOAL_ATTEMPTS; attempt += 1) {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), OPENING_ATTEMPT_TIMEOUT_MS);
+    try {
+      const decision = await requestGoalDecision({
+        key,
+        model,
+        system: [getConfig().goal.objectivePrompt, goalObjectiveMessage(goal)],
+        messages: [{ role: 'user', content: GOAL_OBJECTIVE_OPENING_TURN }],
+        trailer: GOAL_OBJECTIVE_TRAILER,
+        signal: abort.signal
+      });
+      // Stopping before the first word has been said is the model refusing the goal rather
+      // than meeting it, and an empty opening message would leave somebody looking at a chat
+      // that never started with nothing on screen to say why. It is a decision, not a fault,
+      // so it is returned immediately rather than classified and retried.
+      if (decision.action === 'stop') return { error: 'nothing_to_open_with' };
+      if (decision.action === 'continue') {
+        logInfo(`goal: drafted an opening message of ${decision.reply.length} characters with ${model}`);
+        return { reply: humanReply(decision.reply), model };
+      }
+      last = goalDecisionFailure(decision) ?? last;
+    } catch (err) {
+      last = goalThrowFailure(err, abort.signal.aborted);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!last.retryable || attempt === MAX_GOAL_ATTEMPTS) break;
+    logWarn(
+      `goal: ${model} opening-message attempt ${attempt}/${MAX_GOAL_ATTEMPTS} failed — ${last.failure}; retrying`
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, goalRetryDelayMs(attempt)));
   }
+  return { error: last.failure };
 }
 
 /** The failure in words the page can put on screen, without leaking the key back out. */

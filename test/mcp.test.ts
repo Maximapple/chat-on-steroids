@@ -32,6 +32,13 @@ import {
   upsertMessageEvent,
   writeOverflowText
 } from '../src/main/session/store.js';
+import {
+  resetSessionCursorsForTests,
+  restoreSessionCursors,
+  sessionCursorRefsForTests,
+  setSessionCursorLimitForTests
+} from '../src/main/mcp/session-tool.js';
+import { flushDurable, initDurableStore, resetDurableForTests } from '../src/main/durable.js';
 import { resetWorkspaces, setWorkspaceFor } from '../src/main/workspace.js';
 import { DEFAULT_CAPABILITIES, type Capabilities, type Root } from '../src/shared/types.js';
 import { emptyEvidence, noteExec, noteOutcome, runInCallContext, type CallContext } from '../src/main/mcp/call-context.js';
@@ -1001,6 +1008,67 @@ describe('capability gating', () => {
     expect(textOf(deleted)).toContain('Delete files is disabled');
   });
 
+  it('explains an apply_patch anchor that did not match, instead of only saying it did not', async () => {
+    // The largest single apply_patch failure in the recorded sessions, and the port's message
+    // names neither cause — so the model's next move was usually the same patch again. The
+    // message itself stays byte-for-byte identical to Codex's; the explanation is appended.
+    ctx.readOnly = false;
+    ctx.caps = withCaps({ create: true, edit: true });
+    await fs.writeFile(path.join(approved, 'anchor.txt'), 'alpha\nbeta\ngamma\n', 'utf8');
+    const update = async (body: string[]): Promise<string> => {
+      const reply = await core('tools/call', {
+        name: 'apply_patch',
+        arguments: {
+          patch: ['*** Begin Patch', '*** Update File: /workspace/anchor.txt', ...body, '*** End Patch'].join('\n')
+        }
+      });
+      expect(reply.body.result?.isError).toBe(true);
+      return textOf(reply);
+    };
+
+    // Context lines copied straight out of a read result, prefixes and all.
+    const prefixed = await update(['@@', '-2\tbeta', '+2\tBETA']);
+    expect(prefixed).toContain('Failed to find expected lines');
+    expect(prefixed).toContain('line-number prefixes');
+    // The same mistake in the `@@` context line, which fails through the other message.
+    const prefixedContext = await update(['@@ 1\talpha', '-beta', '+BETA']);
+    expect(prefixedContext).toContain('Failed to find context');
+    expect(prefixedContext).toContain('line-number prefixes');
+
+    // No prefixes, so the cause is the text itself or the order chunks are searched in — and
+    // the advice must not send the model looking at whitespace, because seekSequence retries an
+    // rstrip and then a full trim before failing. Indentation is never what went wrong here.
+    const mismatched = await update(['@@', '-delta', '+DELTA']);
+    expect(mismatched).toContain('Failed to find expected lines');
+    expect(mismatched).toContain('whitespace are already tolerated');
+    expect(mismatched).toContain('file order');
+    expect(mismatched).not.toContain('line-number prefixes');
+
+    // The file is unchanged by every one of them, which is the point of verifying first.
+    expect(await fs.readFile(path.join(approved, 'anchor.txt'), 'utf8')).toBe('alpha\nbeta\ngamma\n');
+
+    // The claim the wording above rests on: indentation that does not match still applies.
+    const reindented = await core('tools/call', {
+      name: 'apply_patch',
+      arguments: {
+        patch: ['*** Begin Patch', '*** Update File: /workspace/anchor.txt', '@@', '-  beta', '+  BETA', '*** End Patch'].join('\n')
+      }
+    });
+    expect(reindented.body.result?.isError).toBeFalsy();
+    expect(await fs.readFile(path.join(approved, 'anchor.txt'), 'utf8')).toBe('alpha\n  BETA\ngamma\n');
+
+    // And a failure that is not an anchor gets no anchor advice.
+    const missing = await core('tools/call', {
+      name: 'apply_patch',
+      arguments: {
+        patch: ['*** Begin Patch', '*** Update File: /workspace/no-such-file.txt', '@@', '-x', '+y', '*** End Patch'].join('\n')
+      }
+    });
+    expect(missing.body.result?.isError).toBe(true);
+    expect(textOf(missing)).not.toContain('byte for byte');
+    expect(textOf(missing)).not.toContain('line-number prefixes');
+  });
+
   it('keeps command execution off unless it is explicitly enabled', async () => {
     ctx.readOnly = false;
     expect(toolNames(await core('tools/list'))).not.toContain('exec_command');
@@ -1282,6 +1350,207 @@ describe('capability gating', () => {
     expect(failed(empty), textOf(empty)).toBe(false);
     expect(textOf(empty)).toContain('No recorded entries match');
     expect(textOf(empty)).toMatch(/update_cursor: [A-Za-z0-9_-]+/);
+  });
+
+  /**
+   * Continuations are handed to the model and handed back, so their cost is transcription.
+   * Measured over twenty sessions: encoded payloads ran 143-944 characters, and five of six
+   * failed `session` reads were a payload with exactly one mutated character. A reference the
+   * model can copy without losing a character is the fix; these pin the properties it needs.
+   */
+  it('hands back a continuation short enough to copy without losing a character', async () => {
+    ctx.sessionTools = true;
+    const recorded = await createSession({ title: 'cursor length target', conversationId: null });
+    const reply = await core('tools/call', {
+      name: 'session',
+      arguments: { action: 'read', session_id: recorded.id }
+    });
+    const cursor = /update_cursor: (\S+)/.exec(textOf(reply))?.[1];
+    // Thirteen characters, and no character that reads as another one in a monospaced font.
+    expect(cursor).toMatch(/^c[0-9a-hjkmnp-tv-z]{12}$/);
+  });
+
+  it('still accepts a payload cursor issued before references existed', async () => {
+    // A chat mid-read across an app update holds one of these. Dropping support would make the
+    // update itself the failure the reference scheme exists to prevent.
+    ctx.sessionTools = true;
+    const recorded = await createSession({ title: 'legacy cursor holder', conversationId: null });
+    const legacy = Buffer.from(
+      JSON.stringify({
+        v: 1,
+        kind: 'update',
+        sessionId: recorded.id,
+        after: 0,
+        include: ['user', 'assistant', 'tools', 'errors', 'agents'],
+        open: []
+      }),
+      'utf8'
+    ).toString('base64url');
+    const reply = await core('tools/call', {
+      name: 'session',
+      arguments: { action: 'read', session_id: recorded.id, cursor: legacy }
+    });
+    expect(failed(reply), textOf(reply)).toBe(false);
+    expect(textOf(reply)).toMatch(/update_cursor: c[0-9a-hjkmnp-tv-z]{12}/);
+  });
+
+  it('resolves a reference issued before the app was restarted', async () => {
+    // The property a reference trades away against a self-contained payload, bought back. Without
+    // it, closing the app mid-read silently invalidates every continuation a chat is holding.
+    ctx.sessionTools = true;
+    const recorded = await createSession({ title: 'restart survivor', conversationId: null });
+    initDurableStore(path.join(base, 'cursor-durability'));
+    try {
+      const first = await core('tools/call', {
+        name: 'session',
+        arguments: { action: 'read', session_id: recorded.id }
+      });
+      const cursor = /update_cursor: (\S+)/.exec(textOf(first))?.[1];
+      expect(cursor).toBeTruthy();
+      await flushDurable();
+
+      // Everything the process was holding goes away, exactly as it does on a restart.
+      resetSessionCursorsForTests();
+      expect(sessionCursorRefsForTests()).toHaveLength(0);
+      await restoreSessionCursors();
+
+      const resumed = await core('tools/call', {
+        name: 'session',
+        arguments: { action: 'read', session_id: recorded.id, cursor }
+      });
+      expect(failed(resumed), textOf(resumed)).toBe(false);
+      expect(textOf(resumed)).toMatch(/update_cursor: c[0-9a-hjkmnp-tv-z]{12}/);
+    } finally {
+      resetDurableForTests();
+    }
+  });
+
+  it('refuses a snapshot entry that is not a cursor this app could have issued', async () => {
+    // The snapshot is a file on disk. Hydrating it unchecked would let one corrupt or hostile
+    // state file put arbitrarily large strings in memory and feed them to the decoder per call.
+    ctx.sessionTools = true;
+    const stateDir = path.join(base, 'cursor-hostile', 'state');
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(
+      path.join(stateDir, 'session-cursors.json'),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          ['c00000000000a', 'x'.repeat(9_000)],
+          ['c00000000000b', 'not-base64url-of-any-cursor'],
+          ['../escape', 'anything'],
+          ['c00000000000c', Buffer.from(JSON.stringify({ v: 1, kind: 'search', query: 'ok', offset: 0 }), 'utf8').toString('base64url')]
+        ]
+      }),
+      'utf8'
+    );
+    initDurableStore(path.join(base, 'cursor-hostile'));
+    try {
+      resetSessionCursorsForTests();
+      await restoreSessionCursors();
+      // Only the entry that is both bounded and a decodable cursor survives.
+      expect(sessionCursorRefsForTests()).toEqual(['c00000000000c']);
+    } finally {
+      resetDurableForTests();
+      resetSessionCursorsForTests();
+    }
+  });
+
+  it('evicts the least recently used reference, not the oldest one', async () => {
+    // The claim the bound rests on, checked where eviction actually happens. Insertion-order
+    // eviction would drop a chat that has been paging one long recording all morning in favour
+    // of whatever was minted most recently, so the old-but-used reference is the one that has
+    // to survive and the untouched older one is the one that has to go.
+    ctx.sessionTools = true;
+    const read = async (id: string, cursor?: string): Promise<string> => {
+      const reply = await core('tools/call', {
+        name: 'session',
+        arguments: { action: 'read', session_id: id, ...(cursor === undefined ? {} : { cursor }) }
+      });
+      expect(failed(reply), textOf(reply)).toBe(false);
+      return /update_cursor: (\S+)/.exec(textOf(reply))?.[1] ?? '';
+    };
+
+    resetSessionCursorsForTests();
+    setSessionCursorLimitForTests(3);
+    try {
+      // Four different recordings, so four genuinely different payloads rather than one reused.
+      const ids: string[] = [];
+      for (let i = 0; i < 4; i++) {
+        const made = await createSession({ title: `eviction order ${i}`, conversationId: null });
+        ids.push(made.id);
+      }
+      const held = await read(ids[0]!);
+      const untouched = await read(ids[1]!);
+      await read(ids[2]!);
+      expect(sessionCursorRefsForTests()).toHaveLength(3);
+
+      // Using the first reference makes it the most recent, leaving the second as the victim.
+      await read(ids[0]!, held);
+      await read(ids[3]!);
+
+      const refs = sessionCursorRefsForTests();
+      expect(refs).toHaveLength(3);
+      expect(refs).toContain(held);
+      expect(refs).not.toContain(untouched);
+    } finally {
+      resetSessionCursorsForTests();
+    }
+  });
+
+  it('does not mint a new reference for a poll that found nothing new', async () => {
+    // An idle watcher polls the same checkpoint indefinitely. Handing out a fresh reference per
+    // poll would spend the whole bound on one chat's duplicates and evict everyone else's place.
+    ctx.sessionTools = true;
+    const recorded = await createSession({ title: 'idle watcher', conversationId: null });
+    resetSessionCursorsForTests();
+    try {
+      const first = await core('tools/call', {
+        name: 'session',
+        arguments: { action: 'read', session_id: recorded.id }
+      });
+      const cursor = /update_cursor: (\S+)/.exec(textOf(first))?.[1];
+      expect(cursor).toBeTruthy();
+      expect(sessionCursorRefsForTests()).toHaveLength(1);
+
+      for (let poll = 0; poll < 5; poll++) {
+        const reply = await core('tools/call', {
+          name: 'session',
+          arguments: { action: 'read', session_id: recorded.id, cursor }
+        });
+        expect(failed(reply), textOf(reply)).toBe(false);
+        expect(textOf(reply)).toContain('No new recorded activity');
+        // Same state, same handle: the model keeps the cursor it already has.
+        expect(/update_cursor: (\S+)/.exec(textOf(reply))?.[1]).toBe(cursor);
+      }
+      expect(sessionCursorRefsForTests()).toHaveLength(1);
+    } finally {
+      resetSessionCursorsForTests();
+    }
+  });
+
+  it('tells the model how to resume when a reference is not one this process holds', async () => {
+    // The honest case after a restart. The old text said "start a new read", which is what the
+    // model must do and never said how, so it guessed at cursors instead of dropping the field.
+    ctx.sessionTools = true;
+    const recorded = await createSession({ title: 'expired cursor holder', conversationId: null });
+    const reply = await core('tools/call', {
+      name: 'session',
+      arguments: { action: 'read', session_id: recorded.id, cursor: 'c000000000000' }
+    });
+    expect(failed(reply)).toBe(true);
+    const text = textOf(reply);
+    expect(text).toContain(recorded.id);
+    expect(text).toContain('with no cursor');
+    // The old text blamed a restart, which persistence has since made untrue.
+    expect(text).not.toContain('restart');
+
+    const search = await core('tools/call', {
+      name: 'session',
+      arguments: { action: 'search', cursor: 'c000000000000' }
+    });
+    expect(failed(search)).toBe(true);
+    expect(textOf(search)).toContain('Repeat the search');
   });
 
   it('rejects the removed history/status contract and ambiguous read fields', async () => {
@@ -2778,12 +3047,18 @@ describe('exec_command and write_stdin', () => {
     expect(String(exec.inputSchema.properties.cmds.description)).toMatch(/exit code/i);
     expect(exec.inputSchema.properties.tty.type).toBe('boolean');
     expect(exec.inputSchema.properties.yield_time_ms.type).toBe('number');
-    expect(exec.inputSchema.properties.max_output_tokens.type).toBe('number');
     expect(exec.inputSchema.properties.shell.type).toBe('string');
     expect(exec.inputSchema.properties.login.type).toBe('boolean');
     for (const retired of ['cwd', 'env', 'cols', 'rows', 'max_lines']) {
       expect(exec.inputSchema.properties).not.toHaveProperty(retired);
     }
+    // max_output_tokens is inert, not absent, and the difference is load-bearing. Its value is
+    // ignored — ChatGPT discards a result over its own ~10k-token limit, so a larger budget could
+    // never be spent — but `additionalProperties: false` above means removing the key would make
+    // every conversation still holding the older cached schema fail outright. It stays declared,
+    // and its description tells the model to stop sending it. See tool-specs.ts.
+    expect(exec.inputSchema.properties.max_output_tokens.type).toBe('number');
+    expect(String(exec.inputSchema.properties.max_output_tokens.description)).toMatch(/ignored/i);
     expect(exec.outputSchema).toMatchObject({
       type: 'object',
       required: ['wall_time_seconds', 'output'],
@@ -2801,10 +3076,10 @@ describe('exec_command and write_stdin', () => {
     expect(stdin.inputSchema.properties.session_id.type).toBe('number');
     expect(stdin.inputSchema.properties.chars.type).toBe('string');
     expect(stdin.inputSchema.properties.yield_time_ms.type).toBe('number');
-    expect(stdin.inputSchema.properties.max_output_tokens.type).toBe('number');
     for (const retired of ['cursor', 'close', 'signal', 'env', 'max_lines']) {
       expect(stdin.inputSchema.properties).not.toHaveProperty(retired);
     }
+    expect(String(stdin.inputSchema.properties.max_output_tokens.description)).toMatch(/ignored/i);
     expect(stdin.outputSchema).toEqual(exec.outputSchema);
   });
 

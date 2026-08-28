@@ -51,7 +51,14 @@ import {
 } from './agents.js';
 import { tokenPressure } from '../shared/session.js';
 import { forgetWorkspaceRoot, renameWorkspaceRoot } from './workspace.js';
+import { revokeAuthorizedUncaptured } from './codex/ownership.js';
 import { hostPlatformInfo } from './platform.js';
+import {
+  checkForUpdates,
+  installDownloadedUpdate,
+  onUpdateChange,
+  updateStatus
+} from './update.js';
 
 /** The only URLs the renderer may ask the OS to open. */
 const ALLOWED_LINKS = new Set([
@@ -115,6 +122,7 @@ const settingsPatch = z.object({
     enabled: z.boolean(),
     maxWorkers: z.number().int().min(1).max(8)
   }),
+  uncapturedCaller: z.object({ enabled: z.boolean() }),
   goal: z.object({
     enabled: z.boolean(),
     // An OpenRouter model id, and validated only as a shape: the catalogue changes weekly,
@@ -198,6 +206,13 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
       enabled: pick(current.multiAgent.enabled, base.multiAgent.enabled, wanted.multiAgent.enabled),
       maxWorkers: pick(current.multiAgent.maxWorkers, base.multiAgent.maxWorkers, wanted.multiAgent.maxWorkers)
     },
+    uncapturedCaller: {
+      enabled: pick(
+        current.uncapturedCaller.enabled,
+        base.uncapturedCaller.enabled,
+        wanted.uncapturedCaller.enabled
+      )
+    },
     goal: {
       enabled: pick(current.goal.enabled, base.goal.enabled, wanted.goal.enabled),
       model: pick(current.goal.model, base.goal.model, wanted.goal.model),
@@ -241,7 +256,8 @@ async function buildState(): Promise<AppState> {
     hasGoalKey: await hasSecret('openRouterApiKey'),
     resolvedBinary: resolvedBinary(config),
     bundledTunnelVersion: bundledVersion(),
-    bridge: await bridgeStatus()
+    bridge: await bridgeStatus(),
+    update: updateStatus()
   };
 }
 
@@ -303,6 +319,16 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     // deliberately — and the settings screen tells them to reconnect the connector, which
     // is what makes ChatGPT read the clean schemas.
     if (wasMultiAgent && !next.multiAgent.enabled) forgetExposedSurface();
+    // Withdrawing the uncaptured-caller authorisation has to take effect now, not at the next
+    // call. Everything that principal started was started under a permission that no longer
+    // exists, so it is terminated and forgotten here rather than left running with its workspace
+    // waiting to be picked back up by a later re-enable. See revokeAuthorizedUncaptured.
+    if (before.uncapturedCaller.enabled && !next.uncapturedCaller.enabled) {
+      const revoked = await revokeAuthorizedUncaptured();
+      logInfo(
+        `settings: uncaptured-caller authority revoked; ${revoked} fallback-owned session(s) terminated`
+      );
+    }
     // Order matters, and it used to be wrong. Pausing the run and withdrawing worker browser
     // commands has to happen while the bridge can still cancel those transports; stopping the
     // bridge first left queued worker/revival commands behind for a later restart to deliver.
@@ -455,6 +481,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     await disconnect();
     return buildState();
   });
+
+  handle('update:check', async () => checkForUpdates());
+  handle('update:install', async () => installDownloadedUpdate());
 
   handle('diagnostics:run', async () => runDiagnostics());
 
@@ -657,6 +686,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   };
   onStatusChange(pushState);
   onBridgeChange(pushState);
+  onUpdateChange(pushState);
   onLog((entry) => push('log:entry', entry));
   onSessionChange(() => push('session:changed'));
   onSwarmChange(() => push('swarm:changed', swarmState()));

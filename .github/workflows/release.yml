@@ -24,14 +24,18 @@ jobs:
             runner: windows-2025
             script: dist:x64
             artifact: package-windows-x64
-            files: release/Chat-On-Steroids-Setup-x64.exe
+            files: |
+              release/Chat-On-Steroids-Setup-x64.exe
+              release/latest.yml
           - name: Windows arm64
             platform: win32
             arch: arm64
             runner: windows-11-arm
             script: dist:arm64
             artifact: package-windows-arm64
-            files: release/Chat-On-Steroids-Setup-arm64.exe
+            files: |
+              release/Chat-On-Steroids-Setup-arm64.exe
+              release/latest-arm64.yml
           - name: macOS x64
             platform: darwin
             arch: x64
@@ -59,6 +63,7 @@ jobs:
             files: |
               release/Chat-On-Steroids-Linux-x64.AppImage
               release/Chat-On-Steroids-Linux-x64.deb
+              release/latest-linux.yml
           - name: Linux arm64
             platform: linux
             arch: arm64
@@ -68,6 +73,7 @@ jobs:
             files: |
               release/Chat-On-Steroids-Linux-arm64.AppImage
               release/Chat-On-Steroids-Linux-arm64.deb
+              release/latest-linux-arm64.yml
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
 
@@ -339,6 +345,10 @@ jobs:
             release/Chat-On-Steroids-Linux-arm64.AppImage
             release/Chat-On-Steroids-Linux-arm64.deb
             release/Chat-On-Steroids-Extension.zip
+            release/latest.yml
+            release/latest-arm64.yml
+            release/latest-linux.yml
+            release/latest-linux-arm64.yml
           )
           for file in "${files[@]}"; do test -f "$file" || { echo "Missing $file" >&2; exit 1; }; done
           (cd release && sha256sum \
@@ -352,7 +362,11 @@ jobs:
             Chat-On-Steroids-Linux-x64.deb \
             Chat-On-Steroids-Linux-arm64.AppImage \
             Chat-On-Steroids-Linux-arm64.deb \
-            Chat-On-Steroids-Extension.zip > SHA256SUMS.txt)
+            Chat-On-Steroids-Extension.zip \
+            latest.yml \
+            latest-arm64.yml \
+            latest-linux.yml \
+            latest-linux-arm64.yml > SHA256SUMS.txt)
           cat release/SHA256SUMS.txt
 
       - name: Upload release candidate
@@ -373,6 +387,10 @@ jobs:
             release/Chat-On-Steroids-Linux-arm64.AppImage
             release/Chat-On-Steroids-Linux-arm64.deb
             release/Chat-On-Steroids-Extension.zip
+            release/latest.yml
+            release/latest-arm64.yml
+            release/latest-linux.yml
+            release/latest-linux-arm64.yml
             release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30

@@ -14,6 +14,12 @@
  */
 
 import { requestCorrelation } from '../session/correlation.js';
+import { advanceUncapturedAuthorization, resetUncapturedAuthorizationForTests } from '../mcp/call-context.js';
+import { clearUncapturedWorkspace } from '../workspace.js';
+import { unifiedExecManager } from './manager.js';
+
+/** A terminal owner which is explicit but is not, and can never impersonate, a conversation. */
+export const AUTHORIZED_UNCAPTURED_OWNER = '@authorized-uncaptured';
 
 /** Owners, keyed by the process id `exec_command` handed back as `session_id`. */
 const owners = new Map<number, string | null>();
@@ -28,6 +34,16 @@ const owners = new Map<number, string | null>();
 export function provenConversation(requestId: string | null, conversationId: string | null): string | null {
   if (conversationId) return conversationId;
   return requestCorrelation(requestId)?.conversationId ?? null;
+}
+
+/** Captured proof always wins; the fallback owner exists only when the user authorised it. */
+export function execCallerOwner(
+  requestId: string | null,
+  conversationId: string | null,
+  authorizedUncaptured = false
+): string | null {
+  return provenConversation(requestId, conversationId) ??
+    (authorizedUncaptured ? AUTHORIZED_UNCAPTURED_OWNER : null);
 }
 
 /** Records the conversation that opened a still-running exec session. */
@@ -82,7 +98,49 @@ export function moveExecConversationOwners(fromConversationId: string, toConvers
   return moved;
 }
 
+/** Every live session opened under one owner. Revocation is the only bulk question asked here. */
+export function execProcessesOwnedBy(owner: string): number[] {
+  const owned: number[] = [];
+  for (const [processId, held] of owners) if (held === owner) owned.push(processId);
+  return owned;
+}
+
+/**
+ * Withdraws the authorised-uncaptured principal, immediately rather than prospectively.
+ *
+ * Turning the switch off used to change only what the *next* call was allowed to do: the config
+ * flag stopped `execCallerOwner` minting the fallback owner, and that was the whole of it. Two
+ * pieces of state outlived the decision. A background `exec_command` already owned by
+ * `@authorized-uncaptured` kept running — the user had withdrawn the authority under which it was
+ * started and the process carried on regardless — and the `authorized:uncaptured` workspace stayed
+ * in the map for up to its twelve-hour TTL, so flipping the switch back on inside that window
+ * resumed with the previous authorisation's learned folder instead of a clean one.
+ *
+ * A permission that can be revoked only for future calls is not really revocable, so this is the
+ * revoke: kill what that principal started, forget that it owned it, and drop its workspace.
+ *
+ * Ownership is forgotten whether or not termination succeeded, and that direction is deliberate.
+ * `execOwnershipDenied` refuses any process id it has no entry for, so a session this failed to
+ * kill becomes unreachable rather than becoming anonymous and adoptable. Nothing here reads or
+ * writes a conversation-keyed entry, so captured owners and their workspaces are untouched.
+ */
+export async function revokeAuthorizedUncaptured(): Promise<number> {
+  // First, and before anything is enumerated. Any fallback call still inside its initial yield is
+  // holding the previous grant, so advancing here is what makes it stale — including one that
+  // returns during this very function, which the registry sweep below could never have seen.
+  advanceUncapturedAuthorization();
+  const processIds = execProcessesOwnedBy(AUTHORIZED_UNCAPTURED_OWNER);
+  // Settled, not all: one session that refuses to die must not leave the rest running, and a
+  // revocation that throws half-way through would leave the registry describing a state that is
+  // neither the old one nor the new one.
+  await Promise.allSettled(processIds.map((processId) => unifiedExecManager.terminateProcess(processId)));
+  for (const processId of processIds) forgetExecOwner(processId);
+  clearUncapturedWorkspace();
+  return processIds.length;
+}
+
 /** Test seam: the registry is process-global state with no natural lifetime boundary. */
 export function resetExecOwnershipForTests(): void {
   owners.clear();
+  resetUncapturedAuthorizationForTests();
 }

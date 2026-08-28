@@ -23,6 +23,19 @@
 const PORTS = [8765, 8766, 8767, 8768, 8769];
 const HELLO_TIMEOUT_MS = 1200;
 const REQUEST_TIMEOUT_MS = 10_000;
+/**
+ * The budget for the one route that waits on a language model rather than on the app.
+ *
+ * Every other bridge call is local bookkeeping the app answers in milliseconds, which is what
+ * the 10 s default is sized for. `/goal/open` is different in kind: it holds the connection open
+ * while the app asks OpenRouter to write the opening message for a New Chat. Under the shared
+ * budget the client aborted at 10 s, so a provider that was merely slow looked like a failure,
+ * and the app's own bounded retry could never be observed from the page at all — the browser had
+ * already given up before the second attempt started. This must stay above the app's worst case
+ * (`OPENING_ATTEMPT_TIMEOUT_MS` x `MAX_GOAL_ATTEMPTS`, plus backoff) so the app is the side that
+ * decides when to stop trying.
+ */
+const GOAL_OPEN_TIMEOUT_MS = 105_000;
 /** Bumped only when the request/response shape changes; the app compares it. */
 const BRIDGE_PROTOCOL = 8;
 
@@ -899,16 +912,19 @@ async function call(path, init = {}, retried = false) {
     const got = await provision();
     if (!got.ok) return { ok: false, status: 401, error: got.error || 'not_paired' };
   }
+  // `timeoutMs` is this function's own option, not fetch's, so it is taken out of the init before
+  // the rest is spread into the request. Callers that do not set one keep the shared default.
+  const { timeoutMs, ...request } = init;
   try {
     const response = await fetchBounded(`http://127.0.0.1:${found.port}${path}`, {
-      ...init,
+      ...request,
       cache: 'no-store',
       headers: {
         ...(init.body ? { 'content-type': 'application/json' } : {}),
         ...versionHeaders(),
         authorization: `Bearer ${token}`
       }
-    });
+    }, timeoutMs || REQUEST_TIMEOUT_MS);
     const data = await response.json().catch(() => ({}));
     if (response.status === 401) {
       if (data && data.error === 'browser_disconnected') {
@@ -2028,6 +2044,20 @@ const HANDLERS = {
     });
     return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
   },
+  /** Retry one retained failed Goal turn; the app keeps the original token/context frozen. */
+  async goal_retry(message, _sender, source) {
+    await load();
+    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+    const result = await call('/goal/retry', {
+      method: 'POST',
+      body: JSON.stringify({
+        conversationId: message.conversationId,
+        token: String(message.token || ''),
+        clientId: String(source.tab)
+      })
+    });
+    return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
+  },
   /**
    * This chat's specific goal, set or cleared from the settings sheet.
    *
@@ -2059,7 +2089,9 @@ const HANDLERS = {
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
     const result = await call('/goal/open', {
       method: 'POST',
-      body: JSON.stringify({ text: String(message.text || '') })
+      body: JSON.stringify({ text: String(message.text || '') }),
+      // The app may spend up to three provider attempts on this one; see GOAL_OPEN_TIMEOUT_MS.
+      timeoutMs: GOAL_OPEN_TIMEOUT_MS
     });
     return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
   },
@@ -2204,6 +2236,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     'goal_draft',
     'goal_focus',
     'goal_ack',
+    'goal_retry',
     'goal_objective',
     'goal_open',
     'settings_set',
