@@ -53,10 +53,11 @@ var CLF_DOM = (() => {
   /** The composer's own trailing controls, where the send and dictation buttons live. */
   const TRAILING =
     '[data-testid="composer-trailing-actions"], [data-testid="composer-footer-actions"], ' +
-    '[grid-area="trailing"]';
+    '[data-composer-transition-slot="trailing"], [grid-area="trailing"]';
   const SPEECH =
     'button[data-testid="composer-speech-button"], button[data-testid="composer-dictate-button"], ' +
-    'button[aria-label^="Dictate" i], button[aria-label^="Voice" i]';
+    'button[aria-label^="Dictate" i], button[aria-label^="Voice" i], ' +
+    'button[aria-label^="Start dictation" i], button[aria-label^="Start Voice" i]';
   /**
    * A control ChatGPT mounts for a completed assistant message, scoped to that turn.
    *

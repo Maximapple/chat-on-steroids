@@ -10,9 +10,10 @@
  * depend on browser identity recreates the 15-second identity wait this contract replaces.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import type { SessionEvent, SessionSummary, StoredText } from '../../shared/session.js';
+import { readDurable, writeDurableSoon } from '../durable.js';
 import { getSession, listAllSessions, readEvents } from '../session/store.js';
 import { noteCount, noteDetail } from './call-context.js';
 import { expandStored, fail, guard, ok, type SurfaceRegistrar, type ToolResult } from './kernel.js';
@@ -229,7 +230,13 @@ async function searchSessions(queryInput?: string, cursorInput?: string): Promis
   let offset = 0;
   if (cursorInput) {
     const cursor = decodeCursor(cursorInput);
-    if (!cursor || cursor.kind !== 'search') return fail('Invalid session search cursor. Start a new search.');
+    if (!cursor || cursor.kind !== 'search') {
+      return fail(
+        'That search continuation is not one this app can still resolve — it has been evicted, ' +
+          'or it was never a continuation this app issued. Repeat the search with query and no ' +
+          'cursor.'
+      );
+    }
     query = cursor.query;
     offset = cursor.offset;
   }
@@ -354,7 +361,13 @@ async function readSession(
 
   if (cursorInput) {
     const cursor = decodeCursor(cursorInput);
-    if (!cursor || cursor.kind === 'search') return fail('Invalid session read cursor. Start a new read.');
+    if (!cursor || cursor.kind === 'search') {
+      return fail(
+        `That continuation is not one this app can still resolve — it has been evicted, or it was ` +
+          `never a continuation this app issued. Read ${sessionId} again with no cursor to start ` +
+          'from the newest activity.'
+      );
+    }
     if (cursor.sessionId !== sessionId) return fail('This cursor belongs to another recorded session.');
     if (cursor.kind === 'detail') return readToolDetail(sessionId, cursor.seq, cursor.offset, cursor.hash);
     if (cursor.kind === 'update') return readUpdate(summary, cursor);
@@ -885,17 +898,177 @@ function shortHash(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 16);
 }
 
-function encodeCursor(cursor: SessionCursor): string {
-  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+/**
+ * Continuations are handed out as a short reference, not as their own payload.
+ *
+ * A cursor is state, and it used to be transported by making the model copy it. The encoded
+ * payload carries the session id, the mode, the sequence boundaries and one entry per partially
+ * read assistant message, which measured 143 to 944 characters of base64 across twenty recorded
+ * sessions — a median of 364. Every one of those characters had to be reproduced exactly, from
+ * a string with no redundancy and no readable structure, and the failures show precisely what
+ * that costs: of six failed `session` reads, five decoded to valid JSON with exactly one mutated
+ * key — `snappshot`, `shopshot`, `sessiolId` twice, `startSSeq` — and the sixth stopped partway
+ * through the blob. That is 8.3% of every call that carried a continuation, and the rate grows
+ * with the length of the cursor, which grows as a chat is read.
+ *
+ * A twelve-character reference removes the transcription entirely: nothing about the state has
+ * to survive a round trip through the model. The payload stays in this process, keyed by that
+ * reference.
+ *
+ * What that trades away is a self-contained cursor, and both halves of the trade are paid for
+ * here rather than assumed:
+ *
+ *  - *Restart.* An encoded payload survived the app being closed; a reference into a Map does
+ *    not. So the map is snapshotted through the durable store, which is the same mechanism the
+ *    pending-command queue uses for the same reason, and reloaded before the server serves. The
+ *    cursor a chat is holding therefore still works tomorrow morning.
+ *  - *Eviction.* The map is bounded, so some reference must eventually stop resolving, and
+ *    insertion order is the wrong thing to evict by: a chat that has been paging one long
+ *    recording for an hour would lose its place to a burst of newer chats. `recallCursor`
+ *    therefore moves an entry to the end on every use, which makes the front of the map the
+ *    least recently *used* reference — a claim the eviction test actually checks against a
+ *    lowered cap. Across a restart the snapshot restores contents but not recency, which only
+ *    costs an ordering, and at 300 live references a chat would have to sit unused through 300
+ *    other continuations.
+ *  - *Duplicates.* Identical state gets its existing reference back rather than a new one.
+ *    Without that, a chat polling `caught_up: true` mints one reference per poll for a cursor
+ *    that has not moved, and a single idle watcher would evict every other chat's place inside
+ *    a few hundred polls. It also means a model that keeps re-sending the same continuation
+ *    keeps seeing the same handle, which is what it already assumes.
+ *
+ * Base64 payloads issued before this change still decode, so a chat mid-read across an app
+ * update is not broken; and a reference that has been evicted or predates the snapshot fails the
+ * same way a corrupt payload always did, now saying which call resumes the read. Neither path
+ * can return the wrong session's state: a decoded cursor is still checked against the requested
+ * `session_id` by the caller.
+ */
+const CURSOR_MEMORY = new Map<string, string>();
+/** payload -> ref, so identical state resolves to the reference already handed out for it. */
+const CURSOR_REFS = new Map<string, string>();
+const CURSOR_MEMORY_MAX = 300;
+let cursorLimit = CURSOR_MEMORY_MAX;
+const CURSOR_REF = /^c[0-9a-hjkmnp-tv-z]{12}$/;
+const CURSOR_STATE = 'session-cursors';
+const CURSOR_STATE_VERSION = 1;
+
+interface PersistedCursors {
+  version: number;
+  entries: Array<[string, string]>;
 }
 
-function decodeCursor(value: string): SessionCursor | null {
+/**
+ * Snapshot the map. Debounced and coalescing in `durable.ts`, so a chat paging quickly writes
+ * once rather than once per page, and a lost snapshot costs continuations, never history.
+ */
+function saveCursors(): void {
+  writeDurableSoon(CURSOR_STATE, { version: CURSOR_STATE_VERSION, entries: [...CURSOR_MEMORY] });
+}
+
+let cursorsRestored = false;
+let restoringCursors: Promise<void> | null = null;
+
+/** Reloads the references handed out before the last shutdown. Idempotent; call before serving. */
+export async function restoreSessionCursors(): Promise<void> {
+  if (cursorsRestored) return;
+  if (restoringCursors) return restoringCursors;
+  restoringCursors = (async () => {
+    const saved = await readDurable<PersistedCursors>(CURSOR_STATE);
+    if (saved?.version === CURSOR_STATE_VERSION && Array.isArray(saved.entries)) {
+      for (const entry of saved.entries.slice(-CURSOR_MEMORY_MAX)) {
+        if (!Array.isArray(entry) || typeof entry[0] !== 'string' || typeof entry[1] !== 'string') continue;
+        if (!CURSOR_REF.test(entry[0]) || entry[1].length > CURSOR_MAX_CHARS) continue;
+        // Decoded here rather than on use: a payload that cannot become a cursor is not one this
+        // process ever issued, and keeping it would spend an eviction slot on garbage.
+        if (decodePayload(entry[1]) === null) continue;
+        CURSOR_MEMORY.set(entry[0], entry[1]);
+        CURSOR_REFS.set(entry[1], entry[0]);
+      }
+    }
+  })();
   try {
-    const raw = Buffer.from(value, 'base64url').toString('utf8');
+    await restoringCursors;
+    cursorsRestored = true;
+  } finally {
+    restoringCursors = null;
+  }
+}
+
+/** Crockford-style base32 without the characters that read as each other in a monospaced font. */
+function cursorRef(): string {
+  const alphabet = '0123456789abcdefghjkmnpqrstvwxyz';
+  const bytes = randomBytes(12);
+  let ref = 'c';
+  for (const byte of bytes) ref += alphabet[byte % alphabet.length];
+  return ref;
+}
+
+function encodeCursor(cursor: SessionCursor): string {
+  const payload = Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+  const existing = CURSOR_REFS.get(payload);
+  // Unchanged state keeps its handle. Only the recency order moves, which the snapshot does
+  // not carry anyway, so this deliberately does not rewrite the state file on every poll.
+  if (existing !== undefined && recallCursor(existing) !== undefined) return existing;
+  let ref = cursorRef();
+  while (CURSOR_MEMORY.has(ref)) ref = cursorRef();
+  CURSOR_MEMORY.set(ref, payload);
+  CURSOR_REFS.set(payload, ref);
+  while (CURSOR_MEMORY.size > cursorLimit) {
+    const leastRecentlyUsed = CURSOR_MEMORY.entries().next();
+    if (leastRecentlyUsed.done) break;
+    const [evictedRef, evictedPayload] = leastRecentlyUsed.value;
+    CURSOR_MEMORY.delete(evictedRef);
+    // Only if it still points at the evicted reference: a payload is one ref at a time.
+    if (CURSOR_REFS.get(evictedPayload) === evictedRef) CURSOR_REFS.delete(evictedPayload);
+  }
+  saveCursors();
+  return ref;
+}
+
+/** Looks a reference up and marks it as the most recently used, which is what bounds eviction. */
+function recallCursor(ref: string): string | undefined {
+  const payload = CURSOR_MEMORY.get(ref);
+  if (payload === undefined) return undefined;
+  CURSOR_MEMORY.delete(ref);
+  CURSOR_MEMORY.set(ref, payload);
+  return payload;
+}
+
+function decodePayload(payload: string): SessionCursor | null {
+  try {
+    const raw = Buffer.from(payload, 'base64url').toString('utf8');
     return cursorSchema.parse(JSON.parse(raw)) as SessionCursor;
   } catch {
     return null;
   }
+}
+
+function decodeCursor(value: string): SessionCursor | null {
+  const trimmed = value.trim();
+  const payload = CURSOR_REF.test(trimmed) ? recallCursor(trimmed) : trimmed;
+  if (payload === undefined) return null;
+  return decodePayload(payload);
+}
+
+/** Test-only: the map is process state, and a suite that fills it must be able to empty it. */
+export function resetSessionCursorsForTests(): void {
+  CURSOR_MEMORY.clear();
+  CURSOR_REFS.clear();
+  cursorLimit = CURSOR_MEMORY_MAX;
+  cursorsRestored = false;
+  restoringCursors = null;
+}
+
+/**
+ * Test-only: the production bound is 300, and a test that filled it would prove the bound
+ * rather than the eviction order. Lowering it is the only way to watch which entry goes.
+ */
+export function setSessionCursorLimitForTests(limit: number): void {
+  cursorLimit = limit;
+}
+
+/** Test-only: eviction and recency are properties of the map, so a test has to be able to see it. */
+export function sessionCursorRefsForTests(): string[] {
+  return [...CURSOR_MEMORY.keys()];
 }
 
 function formatDate(time: number): string {

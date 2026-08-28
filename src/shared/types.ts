@@ -213,6 +213,11 @@ export interface MultiAgentSettings {
   maxWorkers: number;
 }
 
+/** One explicit, non-conversation principal for locally authorised uncaptured requests. */
+export interface UncapturedCallerSettings {
+  enabled: boolean;
+}
+
 export interface Config {
   roots: Root[];
   capabilities: Capabilities;
@@ -222,6 +227,7 @@ export interface Config {
   sessions: SessionSettings;
   compaction: CompactionSettings;
   multiAgent: MultiAgentSettings;
+  uncapturedCaller: UncapturedCallerSettings;
   goal: GoalSettings;
 }
 
@@ -367,6 +373,35 @@ export interface BridgeStatus {
   present: boolean;
   /** Epoch ms of the last message from the extension, or null. */
   lastSeenAt: number | null;
+  bundledVersion: string;
+  bundledProtocol: number;
+  bundledAvailable: boolean;
+  connectedVersion: string | null;
+  connectedProtocol: number | null;
+  compatibility: 'absent' | 'unknown' | 'current' | 'extension-older' | 'extension-newer' | 'incompatible';
+}
+
+export type AppUpdatePhase =
+  | 'unsupported'
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'ready'
+  | 'current'
+  | 'error';
+
+/** Main-process-owned updater state. The renderer receives status and named actions only. */
+export interface AppUpdateStatus {
+  phase: AppUpdatePhase;
+  /** The package semantics actually in use, not merely the current operating system. */
+  format: 'nsis' | 'appimage' | 'deb' | 'unsupported';
+  currentVersion: string;
+  availableVersion: string | null;
+  percent: number | null;
+  detail: string;
+  canCheck: boolean;
+  canInstall: boolean;
 }
 
 /**
@@ -395,6 +430,7 @@ export interface AppState {
   /** Version of the tunnel-client copy shipped inside the app, for diagnostics. */
   bundledTunnelVersion: string | null;
   bridge: BridgeStatus;
+  update: AppUpdateStatus;
 }
 
 export const DEFAULT_CAPABILITIES: Capabilities = {

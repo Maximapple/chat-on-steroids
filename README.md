@@ -2,7 +2,7 @@
   <img src="extension/icons/icon128.png" width="88" alt="Chat On Steroids icon" />
   <h1>Chat On Steroids</h1>
   <p><strong>Give ChatGPT a controlled bridge to your computer.</strong></p>
-  <p>Local files, commands, durable session history, Compact &amp; Resume, experimental worker chats, and optional Windows desktop control over MCP.</p>
+  <p>Cross-platform local MCP capabilities, Chrome integration, Goal, Compact &amp; Resume, long-running workflows, and optional Windows desktop control.</p>
   <p>
     <a href="../../releases/latest"><strong>Download</strong></a>
     · <a href="#three-minute-setup">Setup</a>
@@ -30,6 +30,18 @@ Chat On Steroids is a Windows, macOS and Linux desktop app that exposes only the
 | **Linux** | [AppImage](../../releases/latest/download/Chat-On-Steroids-Linux-x64.AppImage) · [DEB](../../releases/latest/download/Chat-On-Steroids-Linux-x64.deb) | [AppImage](../../releases/latest/download/Chat-On-Steroids-Linux-arm64.AppImage) · [DEB](../../releases/latest/download/Chat-On-Steroids-Linux-arm64.deb) |
 
 Every package is architecture-specific and carries matching Electron/native dependencies, `tunnel-client`, ripgrep and the Chrome extension. Windows uses a per-user-capable assisted installer; macOS ships DMG/ZIP; Linux ships AppImage and Debian packages. **On Debian/Ubuntu, prefer the DEB.** The portable AppImage uses electron-builder's static launcher; if the host disables unprivileged user namespaces, that launcher can fall back to starting Chromium with `--no-sandbox` so the app can still run. On such restrictive hosts, use the DEB when you do not want that AppImage fallback. In packaged builds **Open extension folder** points at a stable per-user copy of the bundled extension, so Chrome's **Load unpacked** path survives AppImage remounts and app upgrades. A standalone [extension zip](../../releases/latest/download/Chat-On-Steroids-Extension.zip) is attached too for manual installs.
+
+Installed Windows builds and supported Linux packages check the repository's official GitHub
+release metadata five seconds after startup, then at most once every six hours. The top bar shows
+check/download progress and requires an explicit **Restart to update** or **Install update** action;
+ordinary app quit and OS shutdown never launch a pending installer. Architecture selection,
+checksums, prerelease exclusion and downgrade prevention stay inside `electron-updater`. AppImage
+and DEB installation are presented as different formats rather than pretending they share one
+installer flow. macOS remains a manual download while releases are unsigned and unnotarized.
+
+The top bar carries both status chips. The extension chip reports the connected extension against
+this app's bundled copy, and the update chip reports the release check; clicking either one is the
+recovery action for it.
 
 Every release includes [`SHA256SUMS.txt`](../../releases/latest/download/SHA256SUMS.txt). Verify an installer before running it, then compare the printed hash with the matching line in that file:
 
@@ -96,7 +108,7 @@ For OpenAI tunnels, Core and the optional **Windows-only** Desktop surface use s
 
 ### Cloudflare quick tunnel
 
-Press **Connect**, copy the URL the app shows, and use it as the MCP server URL when creating the custom app in ChatGPT. The URL is public and its random path is the capability secret, so treat the complete URL like a password. It changes when the app restarts.
+Press **Connect**, copy the URL the app shows, and use it as the MCP server URL when creating the custom app in ChatGPT. The URL is public and its random path is the capability secret, so treat the complete URL like a password. It changes when the app restarts. If the bundled `cloudflared` helper crashes or cannot publish a URL, the app retires that exact child generation and reconnects with bounded backoff; Disconnect cancels pending restarts.
 
 ### Run your own tunnel
 
@@ -121,6 +133,7 @@ The important boundaries are simple:
 - **File tools are limited to approved folders.** Paths are validated and canonicalised before access. This is application-level containment, not an OS or VM sandbox; same-user filesystem races remain possible.
 - **Commands are not folder-sandboxed.** `exec_command` starts in an approved folder but then runs with your normal logged-in user privileges and can reach anything that account can reach.
 - **Desktop control is Windows-only and not folder-scoped.** Screen capture, mouse/keyboard input and clipboard access apply to the Windows desktop when their permissions are enabled.
+- **Uncaptured chat access is a separate, explicit principal.** It is off by default. Turning it on authorises requests whose ChatGPT conversation cannot be proven by the extension, using only the ordinary capabilities you enabled. It never impersonates a captured conversation, inherits another chat's workspace, or owns/polls another caller's terminal. A proven captured identity always wins. Turning the setting off revokes immediately: anything that principal started is terminated, its remembered folder is dropped, and a command that was still starting when you flipped the switch is refused instead of being handed back.
 - **The MCP server is loopback-only.** A random secret path protects each local connector. ChatGPT reaches it through the tunnel you configure; treat any complete public tunnel URL as a secret.
 - **Secrets use Electron `safeStorage`**: DPAPI on Windows, Keychain on macOS, and a desktop secret store such as libsecret/KWallet on Linux. The app refuses Linux's unencrypted `basic_text` fallback and explains how to enable a keyring.
 - **The browser bridge is separate and loopback-only.** It exists for the companion extension and does not expose file, command or settings routes.
@@ -144,13 +157,20 @@ The public tool contract and permission mapping live in [`docs/tool-surface.md`]
 
 Session recording is **on by default for new installs** and can be disabled. It stores the local history needed for the Chat timeline and `session` lookup under the app's per-user data directory: `%APPDATA%\chat-on-steroids\sessions\` on Windows, `~/Library/Application Support/chat-on-steroids/sessions/` on macOS, and `${XDG_CONFIG_HOME:-~/.config}/chat-on-steroids/sessions/` on Linux. The small Activity log is separate, capped, redacted and memory-only. Session retention defaults to 30 days.
 
-The bundled Chrome extension adds browser-side conversation identity, page-visible transcript capture, richer tool rows, Compact & Resume, and worker-tab coordination. It runs only on `chatgpt.com` / `chat.openai.com` plus the app's loopback bridge ports. App and extension versions move together, so after updating the app, use **Reload** for the unpacked extension in `chrome://extensions`.
+The bundled Chrome extension adds browser-side conversation identity, page-visible transcript capture, richer tool rows, Compact & Resume, and worker-tab coordination. It runs only on `chatgpt.com` / `chat.openai.com` plus the app's loopback bridge ports. App and extension versions move together. The app compares the exact connected version and bridge protocol with its bundled copy and labels absent, older, newer and incompatible states in the top bar. **Open extension folder** refreshes the stable per-user copy; Chrome's unavoidable final step for an unpacked extension is **Reload** (or **Load unpacked** on first install) in `chrome://extensions`. Pairing state is preserved in the extension's own storage.
 
 ### Compact & Resume
 
 For long recorded sessions, the app estimates context pressure locally. Fresh installs warn around **400k estimated tokens**, use **533k** as the limit marker, and enable automatic compaction at 400k. These are local estimates, not ChatGPT's private context counter.
 
 Compact & Resume asks the current chat to write a handoff, stores it locally, opens a fresh ChatGPT conversation and rebinds the **same local session** to it. The original session remains intact if the handoff cannot be completed.
+
+The handoff is a durable transaction, not a best-effort tab trick. The summary, command lease,
+destination binding and terminal receipt are replayable across app/bridge/MV3-worker restarts.
+Duplicate capture or ACK returns the already-committed result; a missing destination conversation
+ID, closed replacement tab, failed durable write or interrupted bootstrap leaves the original
+session intact and the same continuation safely retryable. New Chat has no Compact action until a
+real conversation exists, though its gear remains available for Goal and Auto-compaction settings.
 
 <p align="center">
   <img src="docs/images/composer-gear-sheet.png" width="52%" alt="Gear sheet beside the ChatGPT composer; in worker chats Auto-compaction and Goal are locked off and Compact and Resume is unavailable" />
@@ -195,7 +215,9 @@ file contents and command output, and none of that belongs in a chat message.
 It needs an **OpenRouter API key**, which is stored encrypted alongside the app's other secrets
 and never reaches the browser: the request is made by the app. Set the key, model, reasoning level
 and editable system prompt under **Chat → Settings**; the prompt editor includes a one-click
-restore to the eager-but-bounded shipped default. The model picker lists OpenRouter's catalogue newest first,
+restore to the eager-but-bounded shipped default. The current default is
+[GLM 5.3 Flash](https://openrouter.ai/z-ai/glm-5.3-flash) (`z-ai/glm-5.3-flash`); an explicitly
+chosen custom model is preserved. The model picker lists OpenRouter's catalogue newest first,
 twenty at a time. The switch is also on the gear beside the ChatGPT composer, together with
 automatic compaction. A finished or failed Goal status stays visible above the composer for the
 finished turn, can be dismissed immediately with its top-right ×, and clears automatically when
@@ -207,10 +229,34 @@ validates the result again locally: wrapped `NO_REPLY`, tokenizer markers such a
 `<|begin_of_sentence|>`, reasoning tags, malformed schemas and empty normalized replies stop or
 fail closed and are never typed into ChatGPT.
 
+Provider, transport, timeout, rate-limit, empty and malformed responses are internal failures,
+never Goal messages. One original turn keeps the same model and transcript for at most three
+attempts with bounded backoff. Attempt and navigation generations suppress late results, and the
+final draft/ACK receipt is durable so a restart or lost response cannot send it twice. After the
+retry budget, the card reports an unavailable state with **Retry**; a later healthy provider can
+resume from the preserved turn without toggling Goal off and on.
+
 This spends your OpenRouter credit on every finished turn, and it sends messages to ChatGPT
 without asking each time. Turn it off when you are not watching. The terms note in
 [Experimental browser augmentation and OpenAI terms](#experimental-browser-augmentation-and-openai-terms)
 applies here too.
+
+### Long-running and overnight work
+
+For one extended workflow, enable recording, set a specific Goal, and leave Auto-compaction on.
+Goal decides whether the finished answer needs another user message. As the recorded conversation
+approaches the configured threshold, Compact & Resume asks for a handoff and moves the same local
+session, Goal, workspace and retained worker history into a fresh ChatGPT chat. The replacement can
+therefore continue the same job instead of starting a disconnected run, and repeated resumptions
+keep one durable lineage.
+
+The app and Chrome must remain available whenever a new browser message or replacement tab has to
+be delivered. Network/provider failures and process restarts are recoverable at the durable
+boundaries described above, but the project does not bypass ChatGPT availability, account limits,
+browser policies or confirmations. Use only the capabilities and folders needed for the job;
+command execution still runs as your OS user, and background Goal messages consume OpenRouter and
+ChatGPT usage. A completed Goal decision is a stop—there is no invented polish after the requested
+work is reported done.
 
 ### Multi-agent mode (experimental)
 
@@ -246,8 +292,9 @@ history stays durable across disabled app restarts and is available again after 
 
 Agent identity is deliberately fail-closed. `spawn`, worker messaging and other identity-sensitive
 operations require the companion extension to prove which ChatGPT conversation made the MCP call.
-If the same chat is being used from a client the extension cannot observe, such as a phone app,
-ordinary Core tools can still work but multi-agent control is refused rather than guessed.
+The optional **Uncaptured chat access** setting can give an unobserved client a distinct local
+principal for ordinary enabled tools, but it cannot impersonate a prime/worker conversation or
+take over its swarm.
 
 This is experimental browser automation, and parallel chats can edit the same files or spend account limits quickly. Use it only on work you can recover, keep worker ownership explicit, and turn the feature off when you do not want ChatGPT tabs opened or coordinated automatically. The terms note in [Experimental browser augmentation and OpenAI terms](#experimental-browser-augmentation-and-openai-terms) applies here.
 
@@ -255,7 +302,9 @@ This is experimental browser automation, and parallel chats can edit the same fi
 
 - **Tools missing or still visible after a permission change:** refresh/review the custom app in ChatGPT, or recreate it if needed, then start a new conversation so it discovers the current schema.
 - **Extension says app not found:** session recording or multi-agent mode must be on for the browser bridge to run; then reopen the extension popup.
-- **Extension version mismatch:** reload the unpacked extension after every app update.
+- **Extension update/incompatible indicator:** click it to refresh/reveal the app's exact bundled copy, then press **Reload** for that unpacked extension in `chrome://extensions`. If Chrome was never pointed at it, use **Load unpacked** once.
+- **Update check failed:** ordinary app use is unaffected. Restore network access and click the update indicator to retry; macOS and unsupported Linux formats use the release download page instead.
+- **Goal provider unavailable:** no error text is sent to ChatGPT. The app retries transient failures, then keeps the exact failed turn behind the Goal card's **Retry** action.
 - **`agents` says `UNIDENTIFIED_CALLER`:** open/use that same ChatGPT conversation in the paired desktop browser so the extension can observe its connector request id. The app intentionally will not infer agent identity from the active tab or timing.
 - **OS/browser warning about an unverified app:** expected for the unsigned beta. Verify `SHA256SUMS.txt` before overriding an OS trust prompt.
 - **Linux says secure credential storage is unavailable:** start/unlock GNOME Keyring, KWallet or another Secret Service provider, then restart the app. The insecure Electron `basic_text` fallback is intentionally rejected.

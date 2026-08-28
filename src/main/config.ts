@@ -19,6 +19,7 @@ import {
   type Config,
   type GoalSettings,
   type MultiAgentSettings,
+  type UncapturedCallerSettings,
   type Root,
   type SessionSettings
 } from '../shared/types.js';
@@ -115,14 +116,14 @@ const DEFAULT_COMPACTION: CompactionSettings = {
  * newest first, and whatever is chosen there is stored here verbatim.
  */
 /**
- * The `~` prefix is OpenRouter's marker for a family alias: this one always resolves to the
- * newest DeepSeek V4 Flash, so the default does not quietly rot into a snapshot from months
- * ago the way a pinned id does. `deepseek/deepseek-v4-flash` was such a pin — it reads like
- * "the flash model" but OpenRouter publishes it as V4 Flash 0423, and by August there were
- * two newer revisions the default would never have reached. The alias is also the cheaper
- * of the two: $0.04/M prompt against the pin's $0.057/M.
+ * The shipped Goal baseline. Keep the exact OpenRouter model id here rather than a provider
+ * fallback or a local alias: changing providers after one failed request would also change the
+ * protocol behaviour the Goal loop is validating. Existing user-selected models remain stored
+ * verbatim; this value is only the fresh/repair default.
  */
-export const DEFAULT_GOAL_MODEL = '~deepseek/deepseek-v4-flash-latest';
+export const DEFAULT_GOAL_MODEL = 'z-ai/glm-5.3-flash';
+/** Defaults written by older builds. Exact stock copies migrate; every other model id stays. */
+const SUPERSEDED_DEFAULT_GOAL_MODELS = ['~deepseek/deepseek-v4-flash-latest'];
 const DEFAULT_GOAL: GoalSettings = {
   enabled: false,
   model: DEFAULT_GOAL_MODEL,
@@ -133,6 +134,7 @@ const DEFAULT_GOAL: GoalSettings = {
 // Two workers, not three: three concurrent workers reproducibly trips ChatGPT's rate limit
 // ("too many requests"), which strands the run rather than making it faster.
 const DEFAULT_MULTI_AGENT: MultiAgentSettings = { enabled: false, maxWorkers: 2 };
+const DEFAULT_UNCAPTURED_CALLER: UncapturedCallerSettings = { enabled: false };
 /** Fresh-install exposure. Kept separate from migration defaults on purpose. */
 const ALL_FIRST_LAUNCH_CAPABILITIES: Capabilities = Object.fromEntries(
   CAPABILITIES.map((capability) => [capability, true])
@@ -272,6 +274,12 @@ const configSchema = z.object({
     })
     .optional()
     .default({ ...DEFAULT_MULTI_AGENT }),
+  // Missing means no consent. An upgrade must never silently authorise an unidentified
+  // remote caller merely because the setting did not exist in the older config.
+  uncapturedCaller: z
+    .object({ enabled: z.boolean().optional().default(false) })
+    .optional()
+    .default({ ...DEFAULT_UNCAPTURED_CALLER }),
   // An empty model id is repaired rather than rejected: the id is free text from a
   // provider listing that changes weekly, and a config that lost it must still load with
   // every root and permission in it intact.
@@ -283,7 +291,12 @@ const configSchema = z.object({
         .max(160)
         .optional()
         .default(DEFAULT_GOAL.model)
-        .transform((model) => (model.trim() === '' ? DEFAULT_GOAL.model : model.trim())),
+        .transform((model) => {
+          const selected = model.trim();
+          return selected === '' || SUPERSEDED_DEFAULT_GOAL_MODELS.includes(selected)
+            ? DEFAULT_GOAL.model
+            : selected;
+        }),
       // Repaired for the same reason, and one this section is specifically exposed to: the
       // set of levels is a provider's vocabulary, so a config written by a version that
       // knows one more of them than this one does is a config this app will meet. Rejecting
@@ -333,6 +346,7 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform): Con
     sessions: { ...DEFAULT_SESSIONS },
     compaction: { ...DEFAULT_COMPACTION },
     multiAgent: { ...FIRST_LAUNCH_MULTI_AGENT },
+    uncapturedCaller: { ...DEFAULT_UNCAPTURED_CALLER },
     goal: { ...DEFAULT_GOAL }
   };
 }

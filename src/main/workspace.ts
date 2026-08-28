@@ -31,7 +31,11 @@
 import path from 'node:path';
 import { rawPromises as fs } from './rawfs.js';
 import type { Root } from '../shared/types.js';
-import { currentCall } from './mcp/call-context.js';
+import {
+  AUTHORIZED_UNCAPTURED_PRINCIPAL,
+  currentCall,
+  uncapturedAuthorityCurrent
+} from './mcp/call-context.js';
 
 /** How long a learned workspace survives without being used or renewed. */
 const WORKSPACE_TTL_MS = 12 * 60 * 60 * 1000;
@@ -71,6 +75,13 @@ export function workspaceKey(): string | null {
   // the transient slot name. The agent key remains only as a bootstrap/inheritance staging key
   // before a newly opened worker has reported which conversation it became.
   if (call?.caller.conversationId) return `chat:${call.caller.conversationId}`;
+  // Not just "was this call admitted as the fallback", but "is that grant still the current one".
+  // A call still in flight when the user revokes uncaptured access must neither resolve a relative
+  // path against the fallback's learned folder nor teach it a new one — otherwise revoking, then
+  // re-enabling, would hand the next authorisation a workspace the previous one had learned. The
+  // terminal is the dangerous case and is fenced where the session is published; this is the same
+  // rule for the memo. Refusing costs a relative path one retry, which is this module's bargain.
+  if (call && uncapturedAuthorityCurrent(call.caller)) return AUTHORIZED_UNCAPTURED_PRINCIPAL;
   if (call?.agent) return `agent:${call.agent}`;
   return null;
 }
@@ -291,6 +302,20 @@ export function moveChatWorkspace(fromConversationId: string, toConversationId: 
 export function clearChatWorkspace(conversationId: string | null): boolean {
   if (!conversationId) return false;
   return workspaces.delete(`chat:${conversationId}`);
+}
+
+/**
+ * Drops the workspace learned under the authorised uncaptured principal.
+ *
+ * That principal is the one workspace key with no conversation behind it, so nothing else can
+ * clear it: `clearChatWorkspace` builds a `chat:` key, and waiting for the TTL means up to twelve
+ * hours. Twelve hours is the wrong lifetime for state whose only authorisation the user has just
+ * withdrawn — re-enabling the switch inside that window would otherwise resurrect the folder the
+ * previous authorisation had learned, so turning it off would not be a clean slate. Every
+ * captured, conversation-keyed workspace is untouched; this deletes exactly the fallback's.
+ */
+export function clearUncapturedWorkspace(): boolean {
+  return workspaces.delete(AUTHORIZED_UNCAPTURED_PRINCIPAL);
 }
 
 /** Forgets everything. Tests, and a full disconnect. */

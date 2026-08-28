@@ -86,6 +86,10 @@ jobs:
             'Chat-On-Steroids-Linux-arm64.AppImage',
             'Chat-On-Steroids-Linux-arm64.deb',
             'Chat-On-Steroids-Extension.zip',
+            'latest.yml',
+            'latest-arm64.yml',
+            'latest-linux.yml',
+            'latest-linux-arm64.yml',
             'SHA256SUMS.txt'
           ]) {
             if (!notes.includes(`\`${artifact}\``)) throw new Error(`${notesPath} is missing ${artifact}`);
@@ -181,6 +185,10 @@ jobs:
             publish/Chat-On-Steroids-Linux-arm64.AppImage \
             publish/Chat-On-Steroids-Linux-arm64.deb \
             publish/Chat-On-Steroids-Extension.zip \
+            publish/latest.yml \
+            publish/latest-arm64.yml \
+            publish/latest-linux.yml \
+            publish/latest-linux-arm64.yml \
             publish/SHA256SUMS.txt \
             --title "Chat On Steroids ${TAG#v}" \
             --notes-file "docs/release-notes/$TAG.md"

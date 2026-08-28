@@ -1,11 +1,13 @@
 /**
  * The exec output budget the model is actually given, against the budget it is promised.
  *
- * `MAX_OUTPUT_TOKENS_DESCRIPTION` tells the model `max_output_tokens` "defaults to 10000 tokens;
- * larger requests may be capped by policy". `modelOutputMaxTokens` enforces that as
+ * The MCP surface no longer offers `max_output_tokens` (see `tool-specs.ts`), so every model call
+ * now lands on the omitted branch. The runtime knob below it is unchanged and still reachable from
+ * the app's own callers: `modelOutputMaxTokens` is
  * `min(max_output_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS, policyTokenBudget(policy))`, where two
  * different limits meet: `resolveMaxTokens` supplies the default when the caller omitted a budget,
- * and the policy is the safety ceiling over whatever the caller did ask for.
+ * and the policy is the safety ceiling over whatever the caller did ask for. The omitted branch is
+ * the one the model depends on, which makes the default here load-bearing rather than a fallback.
  *
  * Collapsing those roles breaks the contract in a way nothing else catches. A
  * `{ kind: 'bytes', bytes: 10_000 }` policy is a 2_500-token ceiling, because `policyTokenBudget`

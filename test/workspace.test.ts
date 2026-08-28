@@ -13,6 +13,8 @@ import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { emptyEvidence, runInCallContext, type CallContext } from '../src/main/mcp/call-context.js';
 import {
+  AUTHORIZED_UNCAPTURED_OWNER,
+  execCallerOwner,
   execOwner,
   execOwnershipDenied,
   moveExecConversationOwners,
@@ -67,6 +69,12 @@ function asConversation(agent: string | null, conversationId: string): CallConte
 const runAsConversation = <T>(agent: string | null, conversationId: string, fn: () => T): T =>
   runInCallContext(asConversation(agent, conversationId), fn);
 
+const runAsAuthorizedUncaptured = <T>(fn: () => T): T => {
+  const context = asAgent(null);
+  context.caller.authorizedUncaptured = true;
+  return runInCallContext(context, fn);
+};
+
 beforeAll(async () => {
   base = await makeTempDir('clf-workspace-');
   approved = path.join(base, 'approved');
@@ -111,6 +119,16 @@ describe('live process ownership across chat replacement', () => {
     expect(execOwnershipDenied(102, 'chat-b')).toBe(true);
     expect(execOwner(103)).toBe('chat-other');
     expect(execOwnershipDenied(103, 'chat-other')).toBe(false);
+  });
+
+  it('keeps the authorised fallback terminal separate and lets captured proof win', () => {
+    const fallback = execCallerOwner(null, null, true);
+    expect(fallback).toBe(AUTHORIZED_UNCAPTURED_OWNER);
+    expect(execCallerOwner(null, 'captured-chat', true)).toBe('captured-chat');
+    noteExecOwner(104, fallback);
+    expect(execOwnershipDenied(104, AUTHORIZED_UNCAPTURED_OWNER)).toBe(false);
+    expect(execOwnershipDenied(104, 'captured-chat')).toBe(true);
+    expect(execOwnershipDenied(104, null), 'revoking fallback authority must revoke terminal access').toBe(true);
   });
 });
 
@@ -269,6 +287,17 @@ describe('a worker starting where the prime left off', () => {
     expect(inheritWorkspace('worker-1', 'conv-new-prime')).toBe(false);
     expect(workspaceEntries().filter((entry) => entry.key === 'agent:worker-1')).toEqual([]);
     expect(run('worker-1', currentWorkspace)).toBeNull();
+  });
+
+  it('gives the explicit uncaptured principal its own workspace without impersonating a chat', async () => {
+    await runAsAuthorizedUncaptured(() => resolveIn(roots, '/workspace/project/notes.txt'));
+    await runAsConversation(null, 'captured-chat', () => resolveIn(roots, '/workspace/other/src/index.ts'));
+    expect(runAsAuthorizedUncaptured(currentWorkspace)?.virtual).toBe('/workspace/project');
+    expect(runAsConversation(null, 'captured-chat', currentWorkspace)?.virtual).toBe('/workspace/other');
+    expect(workspaceEntries().map((entry) => entry.key).sort()).toEqual([
+      'authorized:uncaptured',
+      'chat:captured-chat'
+    ]);
   });
 });
 

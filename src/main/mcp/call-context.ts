@@ -57,6 +57,54 @@ export interface CallCaller {
    * evidence named one. Never anything the model wrote.
    */
   conversationId: string | null;
+  /**
+   * True only when the user explicitly enabled the one uncaptured-chat principal and this
+   * request still had no exact request-id -> conversation proof after its evidence window.
+   * It grants no capability by itself; live tool permissions remain authoritative.
+   */
+  authorizedUncaptured?: boolean;
+  /**
+   * Which grant of that authority this call was admitted under.
+   *
+   * A boolean cannot survive a flap. A fallback command can be admitted, spend ten seconds inside
+   * its initial yield while the user turns the setting off and back on, and find the flag true
+   * again on the way out — so re-reading the setting at publication time would happily hand a
+   * live terminal to a call whose authorisation had been withdrawn in between. Withdrawal
+   * advances this counter, so a call carries the grant it was actually admitted under and a stale
+   * one can be recognised no matter what the setting says by the time it returns.
+   */
+  uncapturedEpoch?: number;
+}
+
+/** Stable identity used for workspace ownership; deliberately cannot resemble a chat key. */
+export const AUTHORIZED_UNCAPTURED_PRINCIPAL = 'authorized:uncaptured';
+
+/** The current grant of uncaptured authority. Starts at zero; every revocation advances it. */
+let uncapturedEpoch = 0;
+
+export function uncapturedAuthorizationEpoch(): number {
+  return uncapturedEpoch;
+}
+
+/** Retires every fallback authorisation outstanding. Called by the revoke, never by a caller. */
+export function advanceUncapturedAuthorization(): number {
+  uncapturedEpoch += 1;
+  return uncapturedEpoch;
+}
+
+/**
+ * Whether the fallback grant this call was admitted under is still the current one.
+ *
+ * The single predicate both the terminal fence and the workspace key ask, so "is this fallback
+ * call still authorised" cannot drift into two subtly different answers.
+ */
+export function uncapturedAuthorityCurrent(caller: CallCaller): boolean {
+  return caller.authorizedUncaptured === true && (caller.uncapturedEpoch ?? 0) === uncapturedEpoch;
+}
+
+/** Test seam: process-global authorisation state with no natural lifetime boundary. */
+export function resetUncapturedAuthorizationForTests(): void {
+  uncapturedEpoch = 0;
 }
 
 export interface CallContext {

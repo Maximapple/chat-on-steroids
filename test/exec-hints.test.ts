@@ -14,7 +14,7 @@
  * that edge, and matters more than the positives.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,11 +27,14 @@ import {
   bindBundledRipgrep,
   execRecoveryHints,
   nonZeroExitIsBenign,
+  normalizePowerShellOperators,
   normalizeShellCommand,
   repairPowerShellQuoting,
   statusDeterminingProgram,
-  withExecNotes
+  withExecNotes,
+  writeStdinExitIsBenign
 } from '../src/main/exec-hints.js';
+import { findWindowsPowerShell, prepareShellCommand } from '../src/main/exec.js';
 import { locateRipgrep } from '../src/main/ripgrep.js';
 
 const BOUND_RG = "& 'C:\\tools\\rg.exe'";
@@ -322,9 +325,10 @@ describe('a non-zero exit that is a result rather than a failure', () => {
     expect(nonZeroExitIsBenign(`${BOUND_RG} x src | Sort-Object | Measure-Object`, 1, '')).toBe(true);
   });
 
-  it('never exempts an exit code other than 1', () => {
+  it('never exempts an exit code other than 1 on the strength of the program alone', () => {
     const clean = 'Process exited with code 2\nOutput:\n';
-    // ripgrep reserves 2 for real errors, which is what makes exempting 1 safe at all.
+    // ripgrep reserves 2 for real errors, which is what makes exempting 1 safe at all. The one
+    // exit-2 shape that is exempt has to prove itself from the output, below; nothing here does.
     expect(nonZeroExitIsBenign('rg -n foo src', 2, clean)).toBe(false);
     expect(nonZeroExitIsBenign('rg -n foo src', 0, clean)).toBe(false);
     expect(nonZeroExitIsBenign('rg -n foo src', null, clean)).toBe(false);
@@ -333,6 +337,69 @@ describe('a non-zero exit that is a result rather than a failure', () => {
   it('does not exempt a search whose exit code came from a later program', () => {
     const output = 'Process exited with code 1\nOutput:\nfatal: not a git repository\n';
     expect(nonZeroExitIsBenign('rg -n foo src; git status', 1, output)).toBe(false);
+  });
+
+  it('recognises the cut whichever status Windows left behind', () => {
+    // The recorded sessions carry -1 as the unsigned 4294967295, and PowerShell 5.1 produces
+    // plain 1 for other programs. The cut is what is being recognised, not one number, so a
+    // status list that has drifted back to `=== 1` fails here rather than silently in the field.
+    const output = 'Process exited with code -1\nOutput:\nsrc/main.ts:12:  const max = 20\n';
+    const cut = `${BOUND_RG} -n "max" src | Select-Object -First 40`;
+    for (const exitCode of [1, -1, 4_294_967_295]) {
+      expect(nonZeroExitIsBenign(cut, exitCode, output)).toBe(true);
+    }
+    // ...and a status the cut does not produce still fails, because something else set it.
+    expect(nonZeroExitIsBenign(cut, 3, output)).toBe(false);
+  });
+
+  it('does not read a cut pipeline over a search that printed a diagnostic', () => {
+    // Both shapes are present at once: `-First` closed the pipe, and ripgrep also complained.
+    // The complaint is the more specific fact, so the exemption is withheld and the model reads
+    // the diagnostic instead of being told the run was complete for its window.
+    const output =
+      'Process exited with code 1\nOutput:\nsrc/main.ts:12:  const max = 20\n' +
+      'rg: src/typo.ts: No such file or directory (os error 2)\n';
+    const cut = `${BOUND_RG} -n "max" src src/typo.ts | Select-Object -First 40`;
+    expect(nonZeroExitIsBenign(cut, 1, output)).toBe(false);
+  });
+
+  it('treats a multi-path search that answered for the real paths as a result', () => {
+    // Recorded five times in twenty sessions: one plausible but wrong filename in a path list,
+    // a complete answer for the rest already on stdout, and the whole call discarded as failed.
+    const output =
+      'Process exited with code 2\nOutput:\nsrc/main/exec.ts:41:const CONSOLE_UTF8 =\n' +
+      'rg: src/main/exex.ts: No such file or directory (os error 2)\n';
+    const search = `${BOUND_RG} -n "CONSOLE_UTF8" src/main/exec.ts src/main/exex.ts`;
+    expect(nonZeroExitIsBenign(search, 2, output)).toBe(true);
+    const note = benignExitNote(search, 'powershell', 2, output);
+    // The note has to carry the misspelled path, or the model re-runs the same search to find it.
+    expect(note).toContain('src/main/exex.ts');
+    expect(note).toMatch(/not a failed search/);
+  });
+
+  it('never reads an earlier statement\u2019s output as the search\u2019s answer', () => {
+    // The false positive this predicate is most exposed to: the exemption is entirely a claim
+    // about one program's stdout, and `;` puts somebody else's stdout in the same buffer. Here
+    // the search matched nothing at all and only printed its complaint, but `foo` is sitting
+    // exactly where a match would be.
+    const output =
+      'Process exited with code 2\nOutput:\nfoo\n' +
+      'rg: src/typo.ts: No such file or directory (os error 2)\n';
+    expect(nonZeroExitIsBenign(`Write-Output foo; ${BOUND_RG} -n "nothing" src/typo.ts`, 2, output)).toBe(false);
+    // A newline separates statements in PowerShell exactly as `;` does.
+    expect(nonZeroExitIsBenign(`Write-Output foo\n${BOUND_RG} -n "nothing" src/typo.ts`, 2, output)).toBe(false);
+  });
+
+  it('never calls an exit 2 benign when the search answered nothing', () => {
+    // A diagnostic with no match above it is a regex error or an only-path that is not there,
+    // and that call really did fail. This is the negative the exit-2 branch is bounded by.
+    const diagnosticOnly = 'Process exited with code 2\nOutput:\nrg: regex parse error: unclosed group\n';
+    expect(nonZeroExitIsBenign(`${BOUND_RG} -n "(foo" src/main/exec.ts`, 2, diagnosticOnly)).toBe(false);
+    // And a bare program name proves nothing about which binary printed either line.
+    const partial =
+      'Process exited with code 2\nOutput:\nsrc/main/exec.ts:41:const CONSOLE_UTF8 =\n' +
+      'rg: src/main/exex.ts: No such file or directory (os error 2)\n';
+    expect(nonZeroExitIsBenign('rg -n "CONSOLE_UTF8" src/main/exec.ts src/main/exex.ts', 2, partial)).toBe(false);
   });
 
   it('does not exempt a native program downstream of the search in one pipeline', () => {
@@ -955,6 +1022,159 @@ describe('saying that a benign exit was benign', () => {
   });
 });
 
+describe('the operators Windows PowerShell 5.1 does not have', () => {
+  // The rewrite is for Windows PowerShell specifically. findPowerShell() prefers PowerShell 7,
+  // which has both operators and needs no help, so the shell's path is part of the question.
+  const WIN_PS = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+  const PWSH_7 = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
+  const rewrite = (cmd: string): string => normalizePowerShellOperators(cmd, 'powershell', WIN_PS).cmd;
+
+  it('rewrites the chains the recorded sessions actually contain', () => {
+    // Every one of these is a real recorded command that PowerShell 5.1 refused outright,
+    // having run none of it, with a token error that never says the operator does not exist.
+    expect(rewrite('git branch --show-current && git rev-parse HEAD')).toBe(
+      'git branch --show-current; if ($?) { git rev-parse HEAD }'
+    );
+    expect(rewrite('git grep -n Thing -- src test || exit 0')).toBe(
+      'git grep -n Thing -- src test; if (-not $?) { exit 0 }'
+    );
+    // A native search gating a cmdlet, which is the most common recorded shape of all.
+    expect(rewrite(`${BOUND_RG} -n needle src/main/config.ts && Get-Content src/main/config.ts`)).toBe(
+      `${BOUND_RG} -n needle src/main/config.ts; if ($?) { Get-Content src/main/config.ts }`
+    );
+  });
+
+  it('needs nothing but one guard per operator, however long the chain', () => {
+    // No status variable, because `if` does not overwrite `$?` — a skipped branch leaves the
+    // status of the command before it. That is measured below, and it is what makes a longer
+    // chain left-associative without carrying anything.
+    expect(rewrite('rg -n x a.ts && Get-Content a.ts && Get-Content b.ts')).toBe(
+      'rg -n x a.ts; if ($?) { Get-Content a.ts }; if ($?) { Get-Content b.ts }'
+    );
+    expect(rewrite('a.exe || b.exe && c.exe')).toBe('a.exe; if (-not $?) { b.exe }; if ($?) { c.exe }');
+    expect(rewrite('a.exe && b.exe || c.exe')).toBe('a.exe; if ($?) { b.exe }; if (-not $?) { c.exe }');
+  });
+
+  it('says what it did, and names the thing that is not the same as a semicolon', () => {
+    const notes = normalizePowerShellOperators('a.exe && b.exe', 'powershell', WIN_PS).notes;
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain('&&');
+    expect(notes[0]).toContain('$?');
+    expect(notes[0]).toMatch(/`;` is not the same/);
+  });
+
+  // Every negative here is a line left exactly as written, for the shell to refuse and the
+  // recovery hint to explain. That is the safe direction: a missed rewrite costs one retry,
+  // a guessed parse silently runs a different command.
+  it('leaves alone every shape whose status $? would not be answering for', () => {
+    const untouched = [
+      // A redirect makes `$?` false after a native program that exited 0, so a rewrite here
+      // would skip the second command and say nothing about why.
+      'npm run build 2>&1 && npm test',
+      // An operand that is itself a statement list has no single status to gate on.
+      'cd src; npm run build && npm test',
+      // The model is already testing the status itself.
+      'a.exe && if ($?) { b.exe }',
+      // A backtick can escape a separator, so no split in this file can be trusted.
+      'a.exe `&& b.exe',
+      // Longer than this stops being a chain and starts being a script.
+      'a.exe && b.exe && c.exe && d.exe && e.exe',
+      // Not operators at all: inside quotes, and a single `&` is PowerShell's call operator.
+      `${BOUND_RG} -n "a && b" src`,
+      "& 'C:\\tools\\rg.exe' -n x src"
+    ];
+    for (const cmd of untouched) {
+      expect(normalizePowerShellOperators(cmd, 'powershell', WIN_PS)).toEqual({ cmd, notes: [] });
+    }
+  });
+
+  it('stays out of a shell that has the operators', () => {
+    const chain = 'npm run build && npm test';
+    for (const shell of ['bash', 'zsh', 'sh', 'cmd'] as const) {
+      expect(normalizePowerShellOperators(chain, shell, '/bin/sh')).toEqual({ cmd: chain, notes: [] });
+    }
+    // PowerShell 7 runs `&&` itself, and findPowerShell() prefers it when it is installed. The
+    // shell type alone would not have caught this, and the rewrite's note would have been a lie.
+    expect(normalizePowerShellOperators(chain, 'powershell', PWSH_7)).toEqual({ cmd: chain, notes: [] });
+    expect(normalizePowerShellOperators(chain, 'powershell', '')).toEqual({ cmd: chain, notes: [] });
+  });
+
+  it('runs the same commands the operators would have run, and exits the same way', () => {
+    // The rewrite is only worth anything if the shell agrees, so this asks it — through the
+    // exact `-EncodedCommand` invocation exec.ts builds, because the exit status is where a
+    // wrong rewrite does real damage. A chain that printed the right output while exiting 0
+    // after a failed command would report `A && B && C` as a *successful* call, which is worse
+    // than the parser error it replaced. Zero versus non-zero is the parity being checked;
+    // Windows PowerShell 5.1 collapses every failing native exit to 1 on its own.
+    if (process.platform !== 'win32') return;
+    const winPowerShell = findWindowsPowerShell();
+    if (winPowerShell === null) return;
+    const run = (cmd: string): { status: number | null; out: string[] } => {
+      const rewritten = normalizePowerShellOperators(cmd, 'powershell', winPowerShell);
+      expect(rewritten.notes).toHaveLength(1);
+      // Production args and environment; 5.1 by path, because that is the shell being repaired.
+      const prepared = prepareShellCommand(rewritten.cmd, 'powershell');
+      const result = spawnSync(winPowerShell, prepared.args, { encoding: 'utf8', env: prepared.env });
+      return {
+        status: result.status,
+        out: result.stdout
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line !== '')
+      };
+    };
+
+    // Two commands, in all four directions.
+    expect(run('cmd /c exit 0 && cmd /c echo B')).toEqual({ status: 0, out: ['B'] });
+    expect(run('cmd /c exit 3 && cmd /c echo B')).toEqual({ status: 1, out: [] });
+    expect(run('cmd /c exit 3 || cmd /c echo B')).toEqual({ status: 0, out: ['B'] });
+    expect(run('cmd /c exit 0 || cmd /c echo B')).toEqual({ status: 0, out: [] });
+
+    // Three commands: the failure has to reach the exit status past a guard that did not run.
+    expect(run('cmd /c exit 3 && cmd /c echo B && cmd /c echo C')).toEqual({ status: 1, out: [] });
+    expect(run('cmd /c exit 0 && cmd /c exit 5 && cmd /c echo C')).toEqual({ status: 1, out: [] });
+    expect(run('cmd /c exit 0 && cmd /c echo B && cmd /c exit 5')).toEqual({ status: 1, out: ['B'] });
+    expect(run('cmd /c exit 0 && cmd /c echo B && cmd /c echo C')).toEqual({ status: 0, out: ['B', 'C'] });
+
+    // Mixed chains, which are left-associative: `(A || B) && C`, `(A && B) || C`.
+    expect(run('cmd /c exit 0 || cmd /c echo B && cmd /c echo C')).toEqual({ status: 0, out: ['C'] });
+    expect(run('cmd /c exit 3 || cmd /c echo B && cmd /c echo C')).toEqual({ status: 0, out: ['B', 'C'] });
+    expect(run('cmd /c exit 3 && cmd /c echo B || cmd /c echo C')).toEqual({ status: 0, out: ['C'] });
+    expect(run('cmd /c exit 0 && cmd /c exit 5 || cmd /c echo C')).toEqual({ status: 0, out: ['C'] });
+    expect(run('cmd /c exit 0 && cmd /c echo B || cmd /c echo C')).toEqual({ status: 0, out: ['B'] });
+
+    // The two failures that set no exit code at all still gate, and still exit non-zero.
+    expect(run('definitely-not-a-real-program-xyz && cmd /c echo B')).toEqual({ status: 1, out: [] });
+    expect(run('Get-Content C:\\nope\\missing-file.txt && cmd /c echo B')).toEqual({ status: 1, out: [] });
+    // And a cmdlet failing *after* a native success, where $LASTEXITCODE is 0 and only the
+    // error record carries the failure.
+    expect(run('cmd /c exit 0 && Get-Content C:\\nope\\missing-file.txt')).toEqual({ status: 1, out: [] });
+  });
+});
+
+describe('an exit status write_stdin did not cause', () => {
+  // Measured: all 40 recorded write_stdin failures across twenty sessions were the tool being
+  // blamed for the exit of a command some earlier exec_command had started. 37 were an empty
+  // poll of a vitest run with one failing test; three were an interrupt.
+  it('never blames a call that wrote nothing', () => {
+    expect(writeStdinExitIsBenign('')).toBe(true);
+  });
+
+  it('never blames an interrupt for the exit it asked for', () => {
+    for (const chars of ['\u0003', '\u0004', '\u0003\r\n', '\r\n\u0003', '\u0004\n']) {
+      expect(writeStdinExitIsBenign(chars)).toBe(true);
+    }
+  });
+
+  it('still owns the exit of input it actually typed', () => {
+    // The negatives are the point: typed input is this call's command in every sense that
+    // matters, and a bare newline at a prompt submits whatever was already on the line.
+    for (const chars of ['npm test\r', 'y\n', '\n', '\r\n', 'q', '\u0003 npm test\r']) {
+      expect(writeStdinExitIsBenign(chars)).toBe(false);
+    }
+  });
+});
+
 describe('hinting at a refused line', () => {
   it('explains the escape character that caused the parser error', () => {
     const refusal = [
@@ -1007,6 +1227,24 @@ describe('a pipeline stopped early by Select-Object -First', () => {
     expect(note).toContain('-Wait');
     // The no-match wording belongs to the search shape and would be a lie about git.
     expect(note).not.toContain('no matches');
+  });
+
+  it('explains the status the cut actually left behind', () => {
+    // `git log` was measured exiting -1 where `git diff` exits 1. Naming a number the model can
+    // see in the same result is the whole point of the note; naming a different one loses it.
+    const note = benignExitNote(WORKER_1_DIFF_CUT, 'powershell', -1, DIFF_OUTPUT);
+    expect(note).toContain('Exit code -1');
+    expect(note).not.toContain('Exit code 1 ');
+  });
+
+  it('calls an empty search result no matches even when a cut could also explain it', () => {
+    // Both stories fit the status, and only one fits the output. A search that printed nothing
+    // did not have anything cut off it, so the cut wording would send the model looking for
+    // output that was never there.
+    const empty = 'Wall time: 0.0100 seconds\nProcess exited with code 1\nOutput:\n';
+    const note = benignExitNote(`${BOUND_RG} -n foo src | Select-Object -First 200`, 'powershell', 1, empty);
+    expect(note).toContain('no matches');
+    expect(note).not.toContain('-Wait');
   });
 
   // Every negative below is the direction this must fail towards: a real failure recorded as a

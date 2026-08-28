@@ -30,6 +30,7 @@ export interface SettingsPatch {
   sessions: Config['sessions'];
   compaction: Config['compaction'];
   multiAgent: Config['multiAgent'];
+  uncapturedCaller: Config['uncapturedCaller'];
   goal: Config['goal'];
 }
 
@@ -74,6 +75,8 @@ const api = {
   pickBinary: () => call<AppState>('binary:pick'),
   connect: () => call<AppState>('connection:connect'),
   disconnect: () => call<AppState>('connection:disconnect'),
+  checkForUpdates: () => call<AppState['update']>('update:check'),
+  installUpdate: () => call<AppState['update']>('update:install'),
   runDiagnostics: () => call<Diagnosis>('diagnostics:run'),
   getLog: () => call<LogEntry[]>('log:get'),
   getLogText: () => call<string>('log:text'),

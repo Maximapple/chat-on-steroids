@@ -17,6 +17,19 @@ afterAll(async () => {
 });
 
 describe('settings migration', () => {
+  it('never treats an upgrade as consent for an uncaptured caller', async () => {
+    const legacy = { ...defaultConfig() } as Record<string, unknown>;
+    delete legacy['uncapturedCaller'];
+    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(legacy), 'utf8');
+    expect((await loadConfig()).uncapturedCaller.enabled).toBe(false);
+
+    const optedIn = { ...defaultConfig(), uncapturedCaller: { enabled: true } };
+    await saveConfig(optedIn);
+    expect((await loadConfig()).uncapturedCaller.enabled).toBe(true);
+    await updateConfig((current) => ({ ...current, uncapturedCaller: { enabled: false } }));
+    expect((await loadConfig()).uncapturedCaller.enabled).toBe(false);
+  });
+
   it('never leaves Goal enabled while session recording is off', async () => {
     const impossible = {
       ...defaultConfig(),
@@ -383,7 +396,7 @@ describe('the goal loop settings', () => {
   it('is off out of the box', () => {
     const config = defaultConfig();
     expect(config.goal.enabled).toBe(false);
-    expect(config.goal.model).toBe('~deepseek/deepseek-v4-flash-latest');
+    expect(config.goal.model).toBe('z-ai/glm-5.3-flash');
     expect(config.goal.reasoning).toBe('default');
     expect(config.goal.prompt).toContain('Your job is to prompt ChatGPT');
     expect(config.goal.prompt).toContain('Nobody handed you a separate goal');
@@ -478,10 +491,27 @@ describe('the goal loop settings', () => {
       'utf8'
     );
     const loaded = await loadConfig();
-    expect(loaded.goal.model).toBe('~deepseek/deepseek-v4-flash-latest');
+    expect(loaded.goal.model).toBe('z-ai/glm-5.3-flash');
     expect(loaded.goal.prompt).toBe(defaultConfig().goal.prompt);
     expect(loaded.goal.enabled).toBe(true);
     expect(loaded.roots).toEqual(config.roots);
+  });
+
+  it('moves an untouched older Goal default to GLM 5.3 Flash without replacing a custom model', async () => {
+    const config = defaultConfig();
+    await fs.writeFile(
+      path.join(dir, 'config.json'),
+      JSON.stringify({ ...config, goal: { ...config.goal, model: '~deepseek/deepseek-v4-flash-latest' } }),
+      'utf8'
+    );
+    expect((await loadConfig()).goal.model).toBe('z-ai/glm-5.3-flash');
+
+    await fs.writeFile(
+      path.join(dir, 'config.json'),
+      JSON.stringify({ ...config, goal: { ...config.goal, model: 'openai/gpt-5.2-mini:nitro' } }),
+      'utf8'
+    );
+    expect((await loadConfig()).goal.model).toBe('openai/gpt-5.2-mini:nitro');
   });
 
   it('adds the section to a config written before the loop existed', async () => {
@@ -490,7 +520,7 @@ describe('the goal loop settings', () => {
     await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(withoutGoal), 'utf8');
     expect((await loadConfig()).goal).toEqual({
       enabled: false,
-      model: '~deepseek/deepseek-v4-flash-latest',
+      model: 'z-ai/glm-5.3-flash',
       reasoning: 'default',
       prompt: defaultConfig().goal.prompt,
       objectivePrompt: defaultConfig().goal.objectivePrompt

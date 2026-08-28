@@ -6,6 +6,16 @@ directories:
   output: release
   buildResources: build
 
+# electron-builder writes the target-appropriate app-update.yml into the installed resources
+# and emits checksum-bearing release metadata. Runtime discovery uses the official GitHub provider;
+# it never scrapes release pages or guesses asset names.
+publish:
+  provider: github
+  owner: totec448-spec
+  repo: chat-on-steroids
+  channel: ${env.COS_UPDATE_CHANNEL}
+  releaseType: release
+
 # Only built output + runtime dependencies ship. Native prebuilds are narrowed again in each
 # platform section so a package never carries another OS/CPU's executable payload.
 files:

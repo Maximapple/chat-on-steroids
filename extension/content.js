@@ -628,6 +628,8 @@
   let goalError = '';
   /** Guards the settle watch and the send, so one finished turn produces one message. */
   let goalBusy = false;
+  /** Serializes async durable-receipt loading/ACK for one offered Goal token. */
+  let goalDraftHandlingToken = '';
   /** When this tab started trying to type a ready draft, so a held composer eventually gives up. */
   let goalTypingSince = 0;
   /** Terminal Goal card the user dismissed. Keyed to its chat + finished turn across repaints. */
@@ -661,7 +663,9 @@
    * only its acknowledgement, never the send.
    */
   const GOAL_SPENT_STORAGE = 'clf-goal-spent-v1';
+  const GOAL_SPENT_DURABLE_STORAGE = 'goalSpentReceiptsV1';
   const goalSpent = new Set();
+  const goalAckedTokens = new Set();
   try {
     const restored = JSON.parse(sessionStorage.getItem(GOAL_SPENT_STORAGE) || '[]');
     if (Array.isArray(restored)) {
@@ -672,6 +676,18 @@
   } catch {
     // A corrupt/blocked sessionStorage entry costs only the reload receipt; normal ACK still works.
   }
+  const goalSpentReady =
+    globalThis.chrome && chrome.storage && chrome.storage.local && typeof chrome.storage.local.get === 'function'
+      ? Promise.resolve(chrome.storage.local.get(GOAL_SPENT_DURABLE_STORAGE))
+          .then((stored) => {
+            const rows = stored && stored[GOAL_SPENT_DURABLE_STORAGE];
+            if (!Array.isArray(rows)) return;
+            for (const item of rows.slice(-64)) {
+              if (typeof item === 'string' && item.length > 0 && item.length <= 500) goalSpent.add(item);
+            }
+          })
+          .catch(() => undefined)
+      : Promise.resolve();
 
   function goalSpentKey(conversation, token) {
     return `${conversation}\u0000${token}`;
@@ -681,7 +697,7 @@
     return goalSpent.has(goalSpentKey(conversation, token));
   }
 
-  function rememberGoalSpent(conversation, token) {
+  async function rememberGoalSpent(conversation, token) {
     const key = goalSpentKey(conversation, token);
     goalSpent.delete(key);
     goalSpent.add(key);
@@ -690,6 +706,36 @@
       sessionStorage.setItem(GOAL_SPENT_STORAGE, JSON.stringify([...goalSpent]));
     } catch {
       // The in-memory receipt still closes the ordinary lost-ACK window for this document.
+    }
+    try {
+      if (globalThis.chrome && chrome.storage && chrome.storage.local && typeof chrome.storage.local.set === 'function') {
+        // Browser-owned durable receipt: app + MV3 worker + Chrome may all restart after
+        // ChatGPT accepted the message but before /goal/ack reached the app. Conversation id
+        // plus app token suppresses only that exact re-send; no transcript is stored.
+        await chrome.storage.local.set({ [GOAL_SPENT_DURABLE_STORAGE]: [...goalSpent] });
+      }
+    } catch {
+      // sessionStorage still protects the common content-script/service-worker restart path.
+    }
+  }
+
+  async function acknowledgeGoalOnce(conversation, token) {
+    const key = goalSpentKey(conversation, token);
+    if (goalAckedTokens.has(key)) return true;
+    goalAckedTokens.add(key);
+    while (goalAckedTokens.size > 64) goalAckedTokens.delete(goalAckedTokens.values().next().value);
+    try {
+      const reply = await ask({ type: 'goal_ack', conversationId: conversation, token });
+      if (!reply || reply.ok !== true) {
+        goalAckedTokens.delete(key);
+        return false;
+      }
+      return true;
+    } catch {
+      // A stale activity response can re-offer an already handled token. Deduplicate only a
+      // successful ACK; a transport failure must remain retryable on the next activity pull.
+      goalAckedTokens.delete(key);
+      return false;
     }
   }
 
@@ -5542,11 +5588,16 @@
   }
 
   function currentState() {
+    // Recorder custody deliberately survives the ambiguous `/c/A` -> `/` router gap, but
+    // presentation authority does not. A New Chat composer must never expose an action that
+    // would target A merely because the recorder is retaining A until another concrete route
+    // proves whether this was churn or navigation.
+    const presentedConversation = composerChat().state === 'chat' ? conversationId : null;
     return controlState({
       job,
       connected: status.connected && status.paired,
       disconnected: status.disconnected === true,
-      conversationId,
+      conversationId: presentedConversation,
       pressedAt,
       phase: nativePhase,
       error: localError,
@@ -5599,6 +5650,8 @@
    */
   let menuNode = null;
   let menuOpen = false;
+  /** Last settings shape actually stamped into menuNode. Transcript/activity churn is not one. */
+  let menuRenderSignature = '';
   /** Set while a toggle is in flight, so a second click cannot race the first one's write. */
   let menuBusy = false;
 
@@ -5642,13 +5695,14 @@
    */
   async function setSetting(key, on) {
     if (menuBusy) return;
-    if (key === 'autoCompact' && goalConfig && goalConfig.blocked === 'worker') return;
+    const where = composerChat();
+    if (key === 'autoCompact' && where.state === 'chat' && goalConfig && goalConfig.blocked === 'worker') return;
     menuBusy = true;
     renderMenu();
     try {
       const reply = await ask({
         type: 'settings_set',
-        ...(conversationId ? { conversationId } : {}),
+        ...(where.state === 'chat' ? { conversationId: where.id } : {}),
         [key]: on
       });
       if (reply && reply.ok === true && reply.data) {
@@ -5664,9 +5718,17 @@
   }
 
   function menuView() {
+    const where = composerChat();
+    // Enabled/model/key are global settings and remain useful on New Chat. Objective, worker
+    // role and any draft are conversation state from the chat just left, and must not leak into
+    // the new composer's sheet while recorder custody is intentionally retained.
+    const presentedGoal =
+      where.state === 'chat' || !goalConfig
+        ? goalConfig
+        : { ...goalConfig, objective: '', blocked: '', draft: null };
     return settingsView({
       context,
-      goal: goalConfig,
+      goal: presentedGoal,
       compact: currentState(),
       editing: menuEditing
     });
@@ -5844,14 +5906,27 @@
     if (!control || !control.root.isConnected) return void closeMenu();
     const root = menuElement();
     const view = menuView();
-    // Every repaint of this sheet is a rebuild, and one of them can now land while somebody
-    // is halfway through typing a goal — an activity poll repaints it on its own cadence. The
-    // text itself survives in menuDraft; the caret and the focus have to be carried by hand,
-    // or the sentence being written jumps to its end a second later.
+    const signature = JSON.stringify({ view, menuBusy, objectiveBusy });
+    // Activity and transcript polls call renderControl even when no setting visible in this
+    // sheet changed. Rebuilding stable controls for those unrelated mutations used to replace
+    // the textarea once per poll and force a long goal back to the top. Leave the existing DOM
+    // entirely alone when its rendered state is already authoritative.
+    if (menuRenderSignature === signature && root.childElementCount > 0) {
+      root.hidden = false;
+      control.button.setAttribute('aria-expanded', 'true');
+      placeMenu(root, control.button);
+      return;
+    }
+    // A legitimate settings/Goal-state change may still require a rebuild. Preserve every
+    // piece of editor state DOM replacement can otherwise destroy: sheet and textarea scroll,
+    // focus, selection range and direction. The draft itself lives in menuDraft and is never
+    // read back from a transient node.
     const typing = root.querySelector('[data-clf-goal-input]');
+    const rootScrollTop = root.scrollTop;
+    const typingScrollTop = typing ? typing.scrollTop : 0;
     const caret =
       typing && document.activeElement === typing
-        ? { start: typing.selectionStart, end: typing.selectionEnd }
+        ? { start: typing.selectionStart, end: typing.selectionEnd, direction: typing.selectionDirection }
         : null;
     root.textContent = '';
     root.dataset.clfBusy = menuBusy || objectiveBusy ? '1' : '0';
@@ -5906,14 +5981,17 @@
     root.append(act);
 
     root.hidden = false;
+    menuRenderSignature = signature;
     control.button.setAttribute('aria-expanded', 'true');
     placeMenu(root, control.button);
+    root.scrollTop = rootScrollTop;
     if (caret) {
       const box = root.querySelector('[data-clf-goal-input]');
       if (box) {
         box.focus();
         try {
-          box.setSelectionRange(caret.start, caret.end);
+          box.setSelectionRange(caret.start, caret.end, caret.direction || 'none');
+          box.scrollTop = typingScrollTop;
         } catch {
           // A browser that will not take a selection on a freshly attached node keeps the
           // focus, which is the half that matters.
@@ -6016,6 +6094,9 @@
     input.addEventListener('input', () => {
       menuDraft = input.value;
       save.disabled = objectiveBusy || !menuDraft.trim();
+      // Typing intentionally does not call renderMenu. Advance the signature to the state now
+      // represented by this same textarea so the next unrelated activity pull remains a no-op.
+      menuRenderSignature = JSON.stringify({ view: menuView(), menuBusy, objectiveBusy });
     });
     buttons.append(save, cancel);
     if (objective.text) {
@@ -6120,7 +6201,13 @@
           : state.label;
     control.button.setAttribute('data-clf-tip', meter ? `${tip}\n${meter.tip}` : tip);
     if (menuOpen) renderMenu();
-    control.pill.hidden = state.mode === 'idle' && !state.hint;
+    // An unavailable action is not progress. In particular a New Chat has no eligible
+    // conversation to compact, so painting the internal fallback label as a pill beside the
+    // settings gear makes it look as though there is a second action. The reason remains on
+    // the gear hover and inside the sheet; the pill is reserved for a transaction/result that
+    // deserves persistent composer space.
+    control.pill.hidden =
+      state.mode === 'off' || state.mode === 'hidden' || (state.mode === 'idle' && !state.hint);
     control.cancel.hidden = state.action !== 'cancel';
     // One word, always. The pill sits inside ChatGPT's composer and has a button's width
     // to work with; `label · hint` spent all of it on a sentence that then got ellipsed
@@ -6253,7 +6340,14 @@
     const failure = goal.error || (draft && draft.stage === 'failed' ? draft.error || 'OpenRouter did not answer' : '');
     if (failure) {
       const at = draft && draft.stage === 'failed' ? 2 : (GOAL_STEP_AT[goal.phase] ?? 1);
-      return { stage: 'The goal loop stopped', detail: failure, body: '', kind: 'goal-error', ...bar(at) };
+      return {
+        stage: 'The goal loop stopped',
+        detail: failure,
+        body: '',
+        kind: 'goal-error',
+        retryable: Boolean(draft && draft.retryable),
+        ...bar(at)
+      };
     }
     // A chat opening on a specific goal. There is no answer to read and no turn to settle,
     // so the first two steps of the ordinary run simply did not happen; saying "sending the
@@ -6263,28 +6357,17 @@
       if (goal.phase === 'sending') return { stage: 'Sending it to ChatGPT', detail: '', body: '', kind: 'goal', ...bar(3) };
       return { stage: `${who} is writing the first message`, detail: '', body: '', kind: 'goal', ...bar(2) };
     }
-    if (goal.phase === 'done') {
-      // The loop's own success condition, and the one state worth spelling out: nothing was
-      // typed, and that is the answer rather than a failure to produce one. The bar stops at
-      // the reply for the same reason — there was never anything to send.
-      return { stage: 'Goal reached', detail: 'nothing was sent', body: '', kind: 'goal-done', ...bar(2, true) };
-    }
-    if (goal.phase === 'settling') {
-      return { stage: 'Checking the answer is finished', detail: '', body: '', kind: 'goal', ...bar(0) };
-    }
+    // Ordinary evaluation is speculative until the model has produced a real next message or
+    // an actionable failure. Painting settling/requesting here made every normal user message
+    // flash a Goal popup that vanished again for NO_REPLY. Silence is the correct UI for the
+    // expected path, including the terminal no-reply decision.
+    if (goal.phase === 'done' || goal.phase === 'settling') return null;
     if (goal.phase === 'sending' && draft && draft.reply) {
       return { stage: 'Sending it to ChatGPT', detail: '', body: draft.reply, kind: 'goal', ...bar(3) };
     }
-    if (goal.phase === 'requesting' && !draft) {
-      return { stage: 'Sending the answer to OpenRouter', detail: who, body: '', kind: 'goal', ...bar(1) };
-    }
+    if (goal.phase === 'requesting' && !draft) return null;
     if (!draft) return null;
-    if (draft.stage === 'no-reply') {
-      return { stage: 'Goal reached', detail: 'nothing was sent', body: '', kind: 'goal-done', ...bar(2, true) };
-    }
-    if (draft.stage === 'sending') {
-      return { stage: 'Sending the answer to OpenRouter', detail: who, body: '', kind: 'goal', ...bar(1) };
-    }
+    if (draft.stage === 'no-reply' || draft.stage === 'sending') return null;
     if (draft.stage === 'answering') {
       // Streamed, so the wait has something in it. The text is the message being written for
       // the user, which is exactly the thing worth reading before it is sent.
@@ -6360,7 +6443,14 @@
       dismissedGoalStage = stagePanel.dismissKey;
       removeStagePanel();
     });
-    head.append(title, detail, close);
+    const retry = document.createElement('button');
+    retry.className = 'clf-stage-retry';
+    retry.type = 'button';
+    retry.textContent = 'Retry';
+    retry.title = 'Retry this Goal turn';
+    retry.hidden = true;
+    retry.addEventListener('click', () => void retryFailedGoal());
+    head.append(title, detail, retry, close);
 
     const steps = document.createElement('div');
     steps.className = 'clf-stage-steps';
@@ -6369,7 +6459,7 @@
     body.className = 'clf-stage-body';
 
     root.append(head, steps, body);
-    return { root, title, detail, close, steps, body, dismissKey: '' };
+    return { root, title, detail, retry, close, steps, body, dismissKey: '' };
   }
 
   /**
@@ -6497,6 +6587,7 @@
     if (stagePanel.detail.textContent !== view.detail) stagePanel.detail.textContent = view.detail;
     stagePanel.dismissKey = dismissKey;
     stagePanel.close.hidden = dismissKey === '';
+    stagePanel.retry.hidden = view.retryable !== true;
     stagePanel.root.dataset.clfStageKind = view.kind;
     paintStageSteps(stagePanel.steps, view);
     if (stagePanel.body.textContent !== view.body) {
@@ -7507,49 +7598,61 @@
     const draft = goalDraft;
     if (!draft || !conversationId || draft.conversationId !== conversationId) return;
     if (goalBusy) return;
-    if (goalWasSpent(conversationId, draft.token)) {
+    if (goalDraftHandlingToken === draft.token) return;
+    goalDraftHandlingToken = draft.token;
+    try {
+      await goalSpentReady;
+    // Loading the durable browser receipt is an async boundary. Another activity pull may
+    // have spent/replaced this draft while it was in flight; re-prove local ownership before
+    // any ACK or composer action so two startup pulls cannot acknowledge the same draft twice.
+      if (goalBusy || goalDraft !== draft) return;
+      if (goalWasSpent(conversationId, draft.token)) {
       // The message already crossed the browser's irreversible boundary. A lost ACK may make
       // the app re-offer it, including after a content-script reload; only retry the receipt.
       goalDraft = null;
-      await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
+      await acknowledgeGoalOnce(conversationId, draft.token);
       return;
     }
-    if (!goalUsable()) {
+      if (!goalUsable()) {
       // Settings are live. Turning Goal Mode off (or removing its key) while OpenRouter is
       // drafting must revoke permission to type the result, even if that result becomes ready
       // on the very poll that carries the new setting.
       goalPhase = '';
       goalDraft = null;
-      await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
+      await acknowledgeGoalOnce(conversationId, draft.token);
       return;
     }
-    if (draft.stage === 'failed') {
+      if (draft.stage === 'failed') {
       goalPhase = 'drafting';
       goalError = draft.error || 'OpenRouter did not answer';
-      goalDraft = null;
-      await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
+      // Retain a retryable failure under the same token/turn. ACK would turn it into a spent
+      // tombstone and force the user to manufacture a new ChatGPT turn just to recover.
+      if (!draft.retryable) {
+        goalDraft = null;
+        await acknowledgeGoalOnce(conversationId, draft.token);
+      }
       return;
     }
-    if (draft.stage === 'no-reply') {
+      if (draft.stage === 'no-reply') {
       // The model read the conversation and decided the thing the user asked for is done.
       // That is the loop ending the way it is meant to, not a failure.
       goalPhase = 'done';
       goalError = '';
       goalDraft = null;
-      await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
+      await acknowledgeGoalOnce(conversationId, draft.token);
       return;
     }
-    if (draft.stage !== 'ready' || !draft.reply) return;
+      if (draft.stage !== 'ready' || !draft.reply) return;
     // A turn started while the draft was being written — the user typed, or ChatGPT began
     // something of its own. The draft is about a conversation that has moved on.
-    if (generating || CLF_DOM.generating() || compactCapture || nativeBusy || (job && job.busy)) {
+      if (generating || CLF_DOM.generating() || compactCapture || nativeBusy || (job && job.busy)) {
       goalPhase = '';
       goalDraft = null;
-      await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
+      await acknowledgeGoalOnce(conversationId, draft.token);
       return;
     }
-    goalBusy = true;
-    try {
+      goalBusy = true;
+      try {
       if (goalTypingSince === 0) goalTypingSince = Date.now();
       goalPhase = 'sending';
       injectStage();
@@ -7561,32 +7664,57 @@
         goalPhase = 'sending';
         goalError = 'the message box was in use, so nothing was sent';
         goalDraft = null;
-        await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
+        await acknowledgeGoalOnce(conversationId, draft.token);
         return;
       }
       await sleep(200);
       const sent = await CLF_DOM.send();
       goalDraft = null;
       if (!sent) {
-        await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
+        await acknowledgeGoalOnce(conversationId, draft.token);
         goalPhase = 'sending';
         goalError = 'ChatGPT would not send the message';
         return;
       }
       // Sending is the irreversible step. Record it before the fallible ACK hop so a lost
       // receipt can never turn the same ready draft into a second user message.
-      rememberGoalSpent(conversationId, draft.token);
-      await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
+      await rememberGoalSpent(conversationId, draft.token);
+      await acknowledgeGoalOnce(conversationId, draft.token);
       goalPhase = '';
       goalError = '';
-    } finally {
-      goalBusy = false;
+      } finally {
+        goalBusy = false;
       // Only once the draft is spent. This marks when *this draft* first found the composer
       // in use, and the retry path above measures its two-minute patience against it — so
       // clearing it on every pull, as this used to, restarted the window each time and the
       // give-up could never arrive. A draft that is still waiting keeps its start time.
-      if (!goalDraft) goalTypingSince = 0;
-      renderControl();
+        if (!goalDraft) goalTypingSince = 0;
+        renderControl();
+        injectStage();
+      }
+    } finally {
+      if (goalDraftHandlingToken === draft.token) goalDraftHandlingToken = '';
+    }
+  }
+
+  async function retryFailedGoal() {
+    const draft = goalDraft;
+    if (!draft || draft.stage !== 'failed' || !draft.retryable || goalBusy || !conversationId) return;
+    goalBusy = true;
+    goalError = '';
+    goalPhase = 'drafting';
+    injectStage();
+    try {
+      const reply = await ask({ type: 'goal_retry', conversationId, token: draft.token });
+      if (!reply || reply.ok !== true || !reply.data?.goal) {
+        goalError = replyError(reply) || 'the Goal retry was not accepted';
+        return;
+      }
+      goalDraft = reply.data.goal;
+      goalError = '';
+      void pullActivity();
+    } finally {
+      goalBusy = false;
       injectStage();
     }
   }

@@ -232,6 +232,27 @@ function buildGroups(): void {
   recordTools.append(toolNames(['session']));
   recording.append(recordTools);
 
+  const uncaptured = document.createElement('input');
+  uncaptured.type = 'checkbox';
+  uncaptured.id = 'uncapturedCallerEnabled';
+  uncaptured.title = 'Authorise one separate local caller when the extension cannot prove its ChatGPT conversation';
+  uncaptured.addEventListener('change', () => void save());
+  const uncapturedCaller = groupShell('uncaptured-caller', 'Uncaptured chat access', 'i-lock', uncaptured);
+  const uncapturedTools = el('div', 'tools');
+  const uncapturedRow = el('div', 'tool is-static');
+  const uncapturedBody = el('span');
+  uncapturedBody.append(
+    el('strong', '', 'Explicit fallback identity'),
+    el(
+      'em',
+      '',
+      'Lets an otherwise-unattributed chat use enabled tools as one separate principal. It cannot become a captured chat or take that chat’s terminals.'
+    )
+  );
+  uncapturedRow.append(uncapturedBody);
+  uncapturedTools.append(uncapturedRow);
+  uncapturedCaller.append(uncapturedTools);
+
   const enabled = document.createElement('input');
   enabled.type = 'checkbox';
   enabled.id = 'homeMaEnabled';
@@ -258,7 +279,7 @@ function buildGroups(): void {
   tools.append(toolNames(['agents']));
   agents.append(tools);
 
-  $('groups').replaceChildren(...permissionGroups, recording, agents);
+  $('groups').replaceChildren(...permissionGroups, recording, uncapturedCaller, agents);
 }
 
 function capInput(cap: Capability): HTMLInputElement {
@@ -310,6 +331,7 @@ function paintGroups(): void {
   // arrived before save completed, so this only reads them.
   for (const [id, onText] of [
     ['recording', 'session tool exposed'],
+    ['uncaptured-caller', 'explicit fallback authorised'],
     ['agents', 'agents tool exposed']
   ] as Array<[string, string]>) {
     const root = document.querySelector<HTMLElement>(`[data-group="${id}"]`);
@@ -364,6 +386,9 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark' } = {}): Prom
   const patch: SettingsPatch = {
     capabilities,
     readOnly,
+    uncapturedCaller: {
+      enabled: $<HTMLInputElement>('uncapturedCallerEnabled').checked
+    },
     tunnel: {
       kind: $<HTMLSelectElement>('tunnelKind').value as 'openai' | 'cloudflared' | 'manual',
       tunnelId: $<HTMLInputElement>('tunnelId').value.trim(),
@@ -408,6 +433,7 @@ async function saveSnapshot(patch: SettingsPatch, previous: AppState['config']):
     sessions: previous.sessions,
     compaction: previous.compaction,
     multiAgent: previous.multiAgent,
+    uncapturedCaller: previous.uncapturedCaller,
     goal: previous.goal
   };
   const next = await run(api.saveSettings(patch, base));
@@ -463,6 +489,64 @@ function isRunning(value: AppState['status']['state']): boolean {
     value === 'starting-server' ||
     value === 'connecting-tunnel'
   );
+}
+
+function paintUpdate(next: AppState): void {
+  // A renderer can briefly outlive the preload/main generation that created it during an app
+  // update, and test/diagnostic projections may deliberately omit newly added fields. Update UI
+  // is optional chrome, never a reason to abort the rest of Home/Settings rendering.
+  const status = next.update ?? {
+    phase: 'unsupported' as const,
+    format: 'unsupported' as const,
+    currentVersion: '',
+    availableVersion: null,
+    percent: null,
+    detail: 'Update state is unavailable in this app generation.',
+    canCheck: false,
+    canInstall: false
+  };
+  const button = $<HTMLButtonElement>('updateBtn');
+  button.hidden = status.phase === 'unsupported';
+  button.className = `update-chip${status.phase === 'ready' ? ' is-ready' : status.phase === 'error' ? ' is-error' : ''}`;
+  button.disabled = !status.canCheck && !status.canInstall;
+  button.title = status.detail;
+  const label: Record<AppState['update']['phase'], string> = {
+    unsupported: 'Updates unavailable',
+    idle: 'Check updates',
+    checking: 'Checking for updates',
+    available: `Update ${status.availableVersion ?? ''} available`.trim(),
+    downloading: status.percent === null ? 'Downloading update' : `Downloading ${Math.round(status.percent)}%`,
+    ready: status.format === 'deb' ? 'Install update' : 'Restart to update',
+    current: 'Up to date',
+    error: 'Update error · Retry'
+  };
+  $('updateLabel').textContent = label[status.phase];
+}
+
+function paintExtensionVersion(next: AppState): void {
+  const bridge = next.bridge;
+  const required = browserExtensionRequired(next.config);
+  const button = $<HTMLButtonElement>('extensionChip');
+  const shouldShow = required || bridge.present || !bridge.bundledAvailable;
+  button.hidden = !shouldShow;
+  const labels: Record<AppState['bridge']['compatibility'], string> = {
+    absent: 'Extension absent',
+    unknown: 'Extension version unknown',
+    current: 'Extension connected',
+    'extension-older': 'Extension update available',
+    'extension-newer': 'App older than extension',
+    incompatible: 'Extension incompatible'
+  };
+  $('extensionChipLabel').textContent = bridge.bundledAvailable
+    ? labels[bridge.compatibility]
+    : 'Bundled extension missing';
+  button.className = `update-chip${bridge.compatibility !== 'current' ? ' is-error' : ''}`;
+  button.disabled = bridge.compatibility === 'current';
+  button.title = !bridge.bundledAvailable
+    ? 'This installation is missing its bundled extension. Reinstall, or download this app version’s extension ZIP.'
+    : bridge.compatibility === 'current'
+      ? `Extension ${bridge.connectedVersion ?? bridge.bundledVersion} · protocol ${bridge.bundledProtocol}`
+      : 'Open the bundled extension folder, then open chrome://extensions and click Reload for Chat On Steroids. Use Load unpacked if it is not installed.';
 }
 
 /** What still has to happen before connecting can work, in the order of the wizard. */
@@ -692,6 +776,8 @@ function apply(next: AppState): void {
   $('connectLabel').textContent = running ? 'Disconnect' : 'Connect';
   connectBtn.disabled = !running && missing !== null;
   connectBtn.title = !running && missing ? missing.text : '';
+  paintUpdate(next);
+  paintExtensionVersion(next);
 
   // ---- health numbers and facts
   paintClock();
@@ -708,6 +794,11 @@ function apply(next: AppState): void {
     $<HTMLInputElement>('homeMaEnabled'),
     config.multiAgent.enabled,
     previousState?.config.multiAgent.enabled
+  );
+  applyChecked(
+    $<HTMLInputElement>('uncapturedCallerEnabled'),
+    config.uncapturedCaller?.enabled ?? false,
+    previousState?.config.uncapturedCaller?.enabled ?? false
   );
   // Recording is a tool switch like the rest of this list, so it goes through the same
   // dirty-field guard rather than being assigned outright from the Chat panel.
@@ -1387,6 +1478,28 @@ document.addEventListener('click', (event) => {
 });
 
 $('bridgeDownload').addEventListener('click', () => void run(api.downloadExtension()));
+
+$('updateBtn').addEventListener('click', async () => {
+  if (!state) return;
+  if (state.update.canInstall) {
+    await run(api.installUpdate());
+    return;
+  }
+  if (state.update.canCheck) await run(api.checkForUpdates());
+});
+
+$('extensionChip').addEventListener('click', async () => {
+  if (!state) return;
+  if (!state.bridge.bundledAvailable) {
+    await run(api.downloadExtension());
+    toast('Opened this app version’s extension ZIP. Reinstall or load the extracted folder in chrome://extensions.');
+    return;
+  }
+  const opened = await run(api.openExtensionFolder());
+  if (opened) {
+    toast('Folder opened. In chrome://extensions, click Reload for Chat On Steroids (or Load unpacked if absent).');
+  }
+});
 
 api.onStateChanged(apply);
 api.onLogEntry(addLogLine);

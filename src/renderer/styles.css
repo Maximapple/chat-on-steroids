@@ -197,6 +197,32 @@ header {
   gap: 14px;
 }
 
+.update-chip {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  border-radius: var(--pill);
+  padding: 7px 11px;
+  background: var(--panel);
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.update-chip.is-ready,
+.update-chip.is-error {
+  border-color: var(--soft);
+  color: var(--ink);
+}
+
+.update-chip:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
 /* The honest status line: a colour, a word, and how old the proof is. */
 .live {
   display: flex;

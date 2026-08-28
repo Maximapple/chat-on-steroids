@@ -182,6 +182,7 @@ src/main/index.ts             Electron startup, window/tray, shutdown, security 
 src/main/shutdown.ts          ordered teardown phases, each bounded, ending in the exit
 src/main/config.ts            validated settings, migrations, defaults, read-only caps
 src/main/connection.ts        MCP + tunnel lifecycle, per-surface publication & status
+src/main/update.ts            Windows/Linux official-release update lifecycle + UI projection
 src/main/ipc.ts               every renderer→main operation and main→renderer push
 src/preload/index.ts          the complete renderer-facing API allowlist
 src/main/secrets.ts           Electron safeStorage-backed secret storage
@@ -476,8 +477,32 @@ kernel.ts/recorder.ts did the call wait for, find and use the exact proof?
 
 Agent routing is *downstream* of this. Do not start there.
 
+**Explicit uncaptured caller.** `config.uncapturedCaller.enabled` is the only intentional
+exception to refusing an unresolved caller, and it is a separate principal named
+`authorized:uncaptured`, never a guessed conversation. Exact request-id evidence is allowed the
+full identity wait first and always wins. The fallback has its own workspace key and terminal
+owner (`@authorized-uncaptured`), so it cannot inherit or poll a captured chat's process. It still
+passes every live capability, read-only and platform guard. Do not replace this with
+`caller = undefined` plus permissive branches.
+
+Turning the setting off is a *revocation*, not a preference change, and `settings:save` calls
+`revokeAuthorizedUncaptured()` on the true→false edge to make it one: sessions owned by
+`@authorized-uncaptured` are terminated and their ownership rows dropped (forgotten rather than
+made anonymous, so an unkillable one becomes unreachable instead of adoptable), and the
+`authorized:uncaptured` workspace is deleted so a later re-enable starts clean instead of resuming
+the previous authorisation's folder inside the 12h TTL.
+
+Authority is versioned, because a boolean cannot survive a flap. `mcp/call-context.ts` holds an
+authorisation epoch; the kernel stamps `caller.uncapturedEpoch` when it admits a fallback call, and
+the revoke advances the epoch *first*, before it enumerates anything. `exec_command` therefore
+re-checks `uncapturedAuthorityCurrent(call.caller)` after its initial yield and before
+`noteExecOwner` — a session started under a retired grant is killed and refused rather than
+published, even if the setting reads enabled again by then. The live setting is checked alongside
+the epoch only to cover the window inside `settings:save` where the config is already written and
+the revoke has not run yet.
+
 **Tests.** `correlation.test.ts`, `mcp-inbound.test.ts`, `fiber.test.ts`,
-`content-script.test.ts`, `swarm.test.ts`.
+`content-script.test.ts`, `swarm.test.ts`, `uncaptured-revoke.test.ts`.
 
 ## 12. Session recording — `recorder.ts`, `store.ts`
 
@@ -596,7 +621,24 @@ compaction by creating a second session or copying history — the whole feature
 of one durable id. Automatic compaction is **edge-triggered and durable**: reopening an
 already-large old chat must not re-fire merely because its level sits above the threshold.
 
-**Tests.** `continuation.test.ts`, `resume.test.ts`.
+**The replacement chat must not be recorded before the commit runs.** B becomes observable to
+the recorder well before the page acknowledges which chat it landed in — a live 2.0.3 run had
+10.27 s between them. Whoever records B first wins, and if that is the recorder, the commit finds
+its destination owned by a session it has never heard of and abandons the compaction with *"the
+replacement chat already belongs to another local session"*. `session/resume-gate.ts` holds the
+one boolean both halves read (armed in `deliverOne()` *before* the browser is opened, cleared when
+the continuation commits or aborts, self-expiring after `RESUME_CLAIM_WINDOW_MS`). The rule is
+**defer, do not race and do not simply wait longer**: `deferForResumeCommit()` makes `/events` and
+`/correlations` answer `503 resume_commit_pending, retryable` for a conversation this app has
+never recorded while the gate is up. The browser only retires a journal row on 2xx, so nothing is
+lost, no shadow session exists for the commit to collide with, and the retry lands in the session
+that was moved onto B. The recorder's own `RESUME_COMMIT_SETTLE_MS` pause is a courtesy fast path
+for the few callers that have no retry, not the guarantee — raising it only moves the cliff and
+makes an unrelated new chat wait out a stalled resume.
+
+**Tests.** `continuation.test.ts`, `resume.test.ts`, and the shadow-race regression in
+`bridge.test.ts` (*answers an early replacement-chat observation as retryable*), which really
+spends the settle because the point is what happens after it expires.
 
 ## 16. Multi-agent — `agents.ts`
 
@@ -698,6 +740,17 @@ moves where the model read last. Placement is app-owned; the policy it restates 
 tokenizer wrappers are normalized away, and malformed schema, reasoning tags, or an empty cleaned
 reply fail closed before `humanReply()` or the browser can see a sendable payload.
 
+Provider/transport failure is a third state, not a model decision. `goal.ts` preserves one
+originating turn and model across at most three attempts (500ms then 1500ms production backoff),
+retries only transient HTTP/transport/timeout failures, and fences every attempt with the draft
+generation and `AbortController`. Pending/ready/failed drafts are snapshotted in durable
+`goal-drafts` state before provider work and before publication; terminal ACK is also durable.
+Restart restores an interrupted request as retryable, a late timed-out attempt cannot overwrite a
+newer one, and `/goal/retry` restarts only the exact conversation/token/client draft. The content
+script journals spent receipts in both document-session and extension-local storage, so an ACK
+response lost across page/MV3 restart cannot type the same successful draft twice. Internal error
+text never crosses `humanReply()`.
+
 **A chat's own goal.** The same engine, pointed the other way. The composer control is now
 present in a New Chat as well (`injectControl`), because a goal written there is what writes
 that chat's first message; compaction stays unavailable there and says why. `/goal/objective` stores one goal
@@ -728,6 +781,12 @@ that said work was unfinished, none of which drew anything at all.
 `renderer/chat.ts` is session timeline, handoff, swarm. To add a capability: narrow
 main-process action → validate in `ipc.ts` → expose exactly that method in
 `preload/index.ts` → call it. **Never add a generic `invoke(method, args)` escape hatch.**
+The top bar also projects `update.ts` and bridge compatibility state. Windows NSIS, Linux
+AppImage and Linux DEB are distinct update formats; macOS/development/unknown packages are
+explicitly unsupported. Update checks are delayed/non-blocking and low-frequency, renderer
+actions are only `checkUpdate`/`installUpdate`, and ordinary quit never auto-installs. The
+extension chip compares the connected version/protocol with the bundled copy and reveals the
+stable materialized folder; Chrome's unpacked-extension Reload remains an explicit user action.
 Async loads use generation counters so a slow load for session A cannot paint over the B the
 user selected, and unsolicited state pushes must not clobber a focused unsaved form field.
 Captured ChatGPT HTML is untrusted: `chat.ts::renderedMessage()` allowlists semantic tags,
@@ -745,7 +804,10 @@ invalidate callbacks from replaced tunnels — reuse that for any new async stat
 is local and stays green through an internet outage, and a single failed long poll is a
 retry, not an outage — an outage is complaints that outlive a poll cycle with no completed
 poll. `diagnostics.ts` builds the UI self-test and must agree with that same grace period.
-Tests: `tunnel.test.ts`.
+Both bundled tunnel helpers are owned process trees. OpenAI tunnel-client health failure and
+Cloudflare exit/startup timeout schedule bounded exponential reconnects; the current child and
+connection generation fence every late line/report, and Stop clears the timer before terminating
+the tree. Tests: `tunnel.test.ts`, `tunnel-lifecycle.test.ts`, `connection.test.ts`.
 
 **Desktop automation (Windows only).** `tools-desktop.ts` + `computer/*` for screenshots, UI
 Automation and SendInput/clipboard. Registration-time permission is not enough: each action re-checks. The
@@ -942,6 +1004,11 @@ x64/ARM64 AppImage+DEB. Windows stays per-user-capable, `asInvoker`, no forced e
 
 - Only `out/**` + `package.json` go into app files.
 - Target-specific tunnel and ripgrep resources ship outside asar — they must execute as real files.
+- Windows/Linux packages contain `app-update.yml`; supported Linux targets also contain the
+  electron-builder `package-type` marker. Release assembly carries `latest.yml`,
+  `latest-arm64.yml`, `latest-linux.yml` and `latest-linux-arm64.yml` beside the installers. These
+  checksum-bearing metadata files are the updater contract; never replace them with release-page
+  scraping or filename guesses.
 - `extension/` ships outside asar — Chrome's "Load unpacked" needs a real folder.
 - In packaged runtime `extension-path.ts` mirrors that bundled extension to stable `userData/extension`;
   do not point Chrome directly at an AppImage's temporary mount.

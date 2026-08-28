@@ -41,5 +41,6 @@ for (const arch of arches) {
     'never'
   ];
   if (dirOnly) builderArgs.push('--dir');
-  run(node, builderArgs, { ...process.env, COS_PACKAGE_ARCH: arch });
+  const updateChannel = platform === 'win32' && arch === 'arm64' ? 'latest-arm64' : 'latest';
+  run(node, builderArgs, { ...process.env, COS_PACKAGE_ARCH: arch, COS_UPDATE_CHANNEL: updateChannel });
 }

@@ -56,9 +56,15 @@ const {
   resetGoalStateForTests,
   setGoalObjective
 } = await import('../src/main/goal.js');
-const { createSession, deleteSession, getSession, initSessionStore, readEvents, resetSessionStoreForTests } = await import(
-  '../src/main/session/store.js'
-);
+const {
+  createSession,
+  deleteSession,
+  findSessionByConversation,
+  getSession,
+  initSessionStore,
+  readEvents,
+  resetSessionStoreForTests
+} = await import('../src/main/session/store.js');
 const { closeConversation, liveConversations, noteChatOrigin, recordChatObservations, recordToolCall, resetRecorderForTests } = await import('../src/main/session/recorder.js');
 const {
   CONTINUATIONS_STATE,
@@ -165,7 +171,7 @@ interface Reply {
 function request(
   method: string,
   path: string,
-  options: { body?: unknown; origin?: string | null; auth?: string | null; raw?: string } = {}
+  options: { body?: unknown; origin?: string | null; auth?: string | null; raw?: string; headers?: Record<string, string> } = {}
 ): Promise<Reply> {
   const url = new URL(path, base);
   const payload = options.raw ?? (options.body === undefined ? null : JSON.stringify(options.body));
@@ -175,6 +181,7 @@ function request(
   // only produce confusing downstream failures.
   headers['x-extension-version'] = APP_VERSION;
   headers['x-extension-protocol'] = String(BRIDGE_PROTOCOL);
+  Object.assign(headers, options.headers ?? {});
   if (payload !== null) {
     headers['content-type'] = 'application/json';
     headers['content-length'] = String(Buffer.byteLength(payload));
@@ -356,6 +363,30 @@ describe('who is allowed to talk to it', () => {
 // -------------------------------------------------------------- provisioning
 
 describe('provisioning', () => {
+  it('reports older, newer, and protocol-incompatible connected extension builds explicitly', async () => {
+    await pair();
+    expect(await bridgeStatus()).toMatchObject({
+      compatibility: 'current',
+      connectedVersion: APP_VERSION,
+      connectedProtocol: BRIDGE_PROTOCOL
+    });
+
+    expect((await request('GET', '/status', { headers: { 'x-extension-version': '1.9.9' } })).status).toBe(200);
+    expect(await bridgeStatus()).toMatchObject({ compatibility: 'extension-older', connectedVersion: '1.9.9' });
+
+    expect((await request('GET', '/status', { headers: { 'x-extension-version': '9.0.0' } })).status).toBe(200);
+    expect(await bridgeStatus()).toMatchObject({ compatibility: 'extension-newer', connectedVersion: '9.0.0' });
+
+    const incompatible = await request('GET', '/status', {
+      headers: { 'x-extension-version': APP_VERSION, 'x-extension-protocol': String(BRIDGE_PROTOCOL + 1) }
+    });
+    expect(incompatible.status).toBe(426);
+    expect(await bridgeStatus()).toMatchObject({
+      compatibility: 'incompatible',
+      connectedProtocol: BRIDGE_PROTOCOL + 1
+    });
+  });
+
   it('issues a token to the extension with nothing for the user to type', async () => {
     const reply = await request('POST', '/pair', { auth: null });
     expect(reply.status).toBe(200);
@@ -1409,6 +1440,63 @@ describe('delivering a bootstrap', () => {
     expect(summary?.title).toBe('Resumed · Harden the MCP workflows');
     expect(summary?.origin).toEqual({ kind: 'resume', fromSessionId: source.id, agentId: null, task: '' });
   });
+
+  /**
+   * The live 2.0.3 Compact & Resume failure, at the timing that actually produced it.
+   *
+   * On 2026-08-28 a real run opened its replacement chat at 08:26:03.646 and the page's
+   * acknowledgement — the moment the A→B commit can run — did not arrive until 08:26:13.914.
+   * The page's own first observation got there first. The recorder waited its 5 s courtesy
+   * settle, gave up 10 ms before the commit, and created a local session for B; the commit then
+   * found its destination owned by a session it had never heard of and abandoned the
+   * compaction ("the replacement chat already belongs to another local session"), leaving the
+   * user typing into a chat the app had no continued session in.
+   *
+   * Waiting longer would only move that cliff, and would make an unrelated new chat opened
+   * during a stalled resume wait a minute for its own session. The batch is the thing that can
+   * afford to wait: the browser only retires a journal row on 2xx, so the app answers retryable
+   * for exactly as long as the resume might still claim this chat, and the same batch comes back
+   * afterwards. This test therefore really spends the settle rather than mocking it away — the
+   * whole point is what happens *after* it expires.
+   */
+  it('answers an early replacement-chat observation as retryable instead of shadowing the resume', async () => {
+    await pair();
+    const from = 'aa11bb22-cc33-dd44-ee55-ff6677889900';
+    const to = '6a91461b-b460-83eb-8852-305f8ed93a12';
+    const { sessionId, token: resumeToken } = await compactedSession(from, 'carry this work into the new chat');
+    const command = queueResume(sessionId, resumeToken)!;
+    await redeem(command.id);
+
+    const bootstrap = {
+      kind: 'user_message',
+      time: Date.now(),
+      text: 'Continue the previous Chat On Steroids session. Read the handoff below.',
+      messageId: 'm-early-replacement'
+    };
+    const early = await request('POST', '/events', { body: { conversationId: to, events: [bootstrap] } });
+    expect(early.status).toBe(503);
+    expect(early.body).toMatchObject({ error: 'resume_commit_pending', retryable: true });
+    // Nothing local claims B, in memory or on disk, so there is no shadow for the commit to
+    // collide with — and a 503 is not permission for the browser to drop the observation.
+    expect(liveConversations().some((entry) => entry.conversationId === to)).toBe(false);
+    expect(await findSessionByConversation(to)).toBeNull();
+
+    // The acknowledgement finally arrives and the session moves A → B.
+    const ack = await request('POST', '/commands/ack', { body: { id: command.id, status: 'sent', conversationId: to } });
+    expect(ack.status).toBe(200);
+    expect(continuationByToken(resumeToken)?.state).toBe('committed');
+    expect((await getSession(sessionId))?.conversationId).toBe(to);
+
+    // The retry the browser was told to make lands in the session that was moved onto B,
+    // not in a second one — which is the whole difference between a continued conversation
+    // and the split history this race used to produce.
+    const retry = await request('POST', '/events', { body: { conversationId: to, events: [bootstrap] } });
+    expect(retry.status).toBe(200);
+    expect(retry.body.sessionId).toBe(sessionId);
+    expect((await readEvents(sessionId, { kinds: ['user_message'] })).some(
+      (event) => event.kind === 'user_message' && event.message.text.startsWith('Continue the previous')
+    )).toBe(true);
+  }, 30_000);
 
   it('names a worker chat after the agent and the task it was given', async () => {
     await pair();

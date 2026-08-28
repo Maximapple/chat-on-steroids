@@ -69,8 +69,11 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
           'PowerShell does not expand * or ? for native programs. Pass ripgrep filename patterns as -g \'*.go\', and expand other globs with Get-ChildItem before use.',
           'Bare rg/ripgrep in PowerShell is bound to this app’s bundled ripgrep; name an explicit path for a different one.',
           // Two bash habits that Windows PowerShell answers with a failure the output does not
-          // explain. Neither can be rewritten safely — stripping the redirect changes what the
-          // command returns, and `;` is not what `&&` means — so they are said once, up front.
+          // explain. The redirect cannot be repaired for the model — stripping it changes what
+          // the command returns — and the operators only can be for the simple chains
+          // `normalizePowerShellOperators` is willing to read, which is most of them but
+          // deliberately not all. Both are therefore said once, up front, so the model writes
+          // the line that works rather than relying on a rewrite that may decline.
           'In Windows PowerShell do not append 2>&1 to a native program: stderr is already captured, and redirecting it leaves $? false even after exit 0. PowerShell 5.1 has no && or ||: use cmds, or A; if ($?) { B }.'
         ]
       : [

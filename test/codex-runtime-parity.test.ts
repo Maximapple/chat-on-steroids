@@ -21,6 +21,7 @@ import {
   deriveExecArgs,
   getShell,
   getShellByModelProvidedPath,
+  isWindowsPowerShell5,
   posixShellPreference,
   shlexJoin
 } from '../src/main/codex/shell.js';
@@ -112,6 +113,34 @@ describe('Codex unified exec runtime parity', () => {
 
     const pwsh = getShellByModelProvidedPath('pwsh');
     if (pwsh) expect(path.basename(pwsh.shellPath).toLowerCase()).toBe('pwsh.exe');
+  });
+
+  it('tells Windows PowerShell 5.1 apart from pwsh by path alone', () => {
+    // Two things ride on this answer: whether exec_command's cmd description tells the model
+    // there is no `&&`, and whether normalizePowerShellOperators rewrites a chain that would
+    // have run fine. Both are wrong on a machine with PowerShell 7, which the shell *type*
+    // cannot distinguish because getShell('powershell') resolves either binary.
+    for (const yes of [
+      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      'C:/Windows/System32/WindowsPowerShell/v1.0/PowerShell.EXE',
+      'powershell.exe',
+      'powershell',
+      '  powershell.exe  '
+    ]) {
+      expect(isWindowsPowerShell5(yes), yes).toBe(true);
+    }
+    for (const no of [
+      'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+      'pwsh',
+      'pwsh.exe',
+      '/usr/local/bin/pwsh',
+      // Not a shell this predicate should ever claim, and an unknown one answers false.
+      'C:\\Windows\\System32\\cmd.exe',
+      '/bin/bash',
+      ''
+    ]) {
+      expect(isWindowsPowerShell5(no), no).toBe(false);
+    }
   });
 
   it('resolves a relative explicit shell path against the command cwd, not the app cwd', async () => {
