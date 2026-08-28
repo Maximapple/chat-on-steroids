@@ -907,6 +907,14 @@ escaping native path fails; exact correlation routes / conflicting correlation d
 guess; owner polls the terminal / another worker cannot; current epoch accepts the Fiber
 answer / stale epoch discards it.
 
+**A test that cannot run must say so.** A precondition answered with a bare `return` inside a
+test body — wrong platform, no bundled ripgrep, no desktop window, no 8.3 alias on the volume —
+reports a green pass for work that never happened, and a suite of those is how a Windows-only
+assumption reaches a macOS release runner unnoticed. Use `it.runIf(...)`/`describe.runIf(...)` when
+the condition is the host, and `ctx.skip('why')` when it is a runtime prerequisite discovered
+inside the test. If one name covers two contract checks and only one of them has its prerequisite,
+split the test rather than returning early from the second.
+
 **Both sides of a protocol.** A compiling one-sided edit is still broken. The multi-hop
 protocols are: app↔extension bridge, content↔Fiber `postMessage`, main↔preload↔renderer
 IPC, MCP schema↔handler↔recorder summary, durable store↔restart restoration.

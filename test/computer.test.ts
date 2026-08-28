@@ -51,24 +51,38 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   // Capturing deliberately no longer demands the foreground: looking at a window that
   // something else is covering is a picture, not a failure. A window that does not exist
   // at all is still an error, and it has to say so as one.
-  it('captures a window that will not come forward, but refuses one that does not exist', async () => {
+  // Split from the capture below on purpose: this half needs nothing from the desktop, so it
+  // must stay an honest pass on a runner where there is no window to photograph.
+  it('refuses a screenshot of a window that does not exist', async () => {
     await expect(screenshot({ window: 999_999_999, maxWidth: 320 })).rejects.toThrow(
       /No window with that id/i
     );
+  });
+
+  it('captures a window that will not come forward', async (ctx) => {
     const { windows } = await listWindows();
     const background = windows.find((w) => w.state !== 'minimized');
-    if (!background) return;
+    if (!background) {
+      ctx.skip('this desktop has no visible window to capture');
+      return;
+    }
     const shot = await screenshot({ window: background.id, maxWidth: 320 });
     expect(shot.width).toBeGreaterThan(0);
     expect(typeof shot.focused).toBe('boolean');
   });
 
-  it('does not move foreground focus while observing a background window', async () => {
+  it('does not move foreground focus while observing a background window', async (ctx) => {
     const before = (await activeWindow()).window;
-    if (!before) return;
+    if (!before) {
+      ctx.skip('this desktop has no foreground window');
+      return;
+    }
     const { windows } = await listWindows();
     const background = windows.find((window) => window.id !== before.id && window.state !== 'minimized');
-    if (!background) return;
+    if (!background) {
+      ctx.skip('this desktop has no second visible window');
+      return;
+    }
 
     const shot = await screenshot({ window: background.id, maxWidth: 320 });
     expect(['window', 'screen_fallback']).toContain(shot.captureMode);
@@ -86,10 +100,13 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     expect(crop.region.height).toBeGreaterThan(0);
   });
 
-  it('waits for an existing visible window without a fixed sleep', async () => {
+  it('waits for an existing visible window without a fixed sleep', async (ctx) => {
     const { windows } = await listWindows();
     const candidate = windows[0];
-    if (!candidate) return;
+    if (!candidate) {
+      ctx.skip('this desktop has no window to wait for');
+      return;
+    }
     const found = await waitForWindow({ process: candidate.process, timeoutMs: 1000 });
     expect(found.process.toLowerCase()).toContain(candidate.process.toLowerCase());
   });
@@ -103,9 +120,12 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     for (const element of result.elements) expect(element.ref).toMatch(/^g\d+_s\d+_e\d+$/);
   });
 
-  it('returns a Codex-style window state with semantic UI refs', async () => {
+  it('returns a Codex-style window state with semantic UI refs', async (ctx) => {
     const target = await visibleWindow();
-    if (target === null) return;
+    if (target === null) {
+      ctx.skip('this desktop has no visible window to describe');
+      return;
+    }
     const state = await getWindowState({ window: target, includeScreenshot: false, maxElements: 8 });
     expect(state.window.id).toBeGreaterThan(0);
     expect(state.screenshot).toBeNull();
@@ -173,9 +193,12 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     expect(other.frameId).toBe(result.screenshot!.frameId + 1);
   });
 
-  it('waits for a compact postcondition inside the same action call', async () => {
+  it('waits for a compact postcondition inside the same action call', async (ctx) => {
     const current = (await activeWindow()).window;
-    if (!current) return;
+    if (!current) {
+      ctx.skip('this desktop has no foreground window to verify against');
+      return;
+    }
     const result = await actAndCapture([{ type: 'wait', ms: 0 }], {
       verify: { until: 'foreground', window: current.id, timeoutMs: 250 }
     });
@@ -223,24 +246,42 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     ).rejects.toThrow(/STALE_FRAME/);
   });
 
-  it('pairs window state element centres with the screenshot it returned', async () => {
+  it('describes one moment when a capture races the state it is acquiring', async (ctx) => {
     // A competing capture is fired while get_window_state is mid-acquisition. The state
-    // it returns must describe one moment: centres computed against its own screenshot,
-    // never against the frame the interloper installed.
+    // it returns must describe one moment: its own screenshot, never the frame the interloper
+    // installed. Every window can answer this, so it is separate from the centre pairing
+    // below, which additionally needs an automation tree the desktop may not have.
     const target = await visibleWindow();
-    if (target === null) return;
+    if (target === null) {
+      ctx.skip('this desktop has no visible window to describe');
+      return;
+    }
     const statePromise = getWindowState({ window: target, includeScreenshot: true, maxWidth: 640, maxElements: 12 });
     const interloper = screenshot({ maxWidth: 320 });
     const [state, other] = await Promise.all([statePromise, interloper]);
 
     expect(state.screenshot).not.toBeNull();
-    const shot = state.screenshot!;
     // Different capture, therefore a different region and scale to be mapped against.
-    expect(shot.frameId).not.toBe(other.frameId);
+    expect(state.screenshot!.frameId).not.toBe(other.frameId);
+  });
+
+  it('pairs window state element centres with the screenshot it returned', async (ctx) => {
+    const target = await visibleWindow();
+    if (target === null) {
+      ctx.skip('this desktop has no visible window to describe');
+      return;
+    }
+    const state = await getWindowState({ window: target, includeScreenshot: true, maxWidth: 640, maxElements: 12 });
+    expect(state.screenshot).not.toBeNull();
+    const shot = state.screenshot!;
     // A window with no automation tree has no centres to pair. That is a property of the
-    // desktop this happens to run on, not of the mapping under test, so it is a skip rather
-    // than a failure; the checked count below still holds the assertion that matters.
-    if (state.elements.length === 0) return;
+    // desktop this happens to run on, not of the mapping under test, so it is reported as a
+    // real skip rather than a pass; the checked count below still holds the assertion that
+    // matters when there is a tree.
+    if (state.elements.length === 0) {
+      ctx.skip('this window exposes no automation tree to pair');
+      return;
+    }
 
     let checked = 0;
     for (const element of state.elements) {
@@ -260,14 +301,20 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     expect(checked).toBeGreaterThan(0);
   });
 
-  it('refuses a ref minted before the desktop helper restarted', async () => {
+  it('refuses a ref minted before the desktop helper restarted', async (ctx) => {
     // A UI Automation runtime id is meaningless to a different helper process, so acting
     // on one would target whatever now holds that id rather than what the model saw.
     const target = await visibleWindow();
-    if (target === null) return;
+    if (target === null) {
+      ctx.skip('this desktop has no visible window to mint a ref from');
+      return;
+    }
     const state = await getWindowState({ window: target, includeScreenshot: false, maxElements: 4 });
     const live = state.elements.find((element) => element.ref.startsWith('g'));
-    if (!live) return;
+    if (!live) {
+      ctx.skip('this window exposes no generation-stamped ref');
+      return;
+    }
     const older = live.ref.replace(/^g(\d+)/, (_match, gen: string) => `g${Number(gen) - 1}`);
     await expect(act([{ type: 'click_ref', ref: older }])).rejects.toThrow(/UNKNOWN_UI_REF|STALE_REF/);
   });
