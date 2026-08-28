@@ -44,6 +44,29 @@ const {
 } = await import('../src/main/update.js');
 
 describe('application update target policy', () => {
+  // `packageFormat()` reads the live process, so a test that needs a particular installed format
+  // has to state it. Without this seam the lifecycle tests silently inherited the workstation they
+  // were written on: green on Windows, `phase: 'unsupported'` on the macOS and Linux release
+  // runners, which is exactly what the native matrix caught. The fixture pins the package, never
+  // the policy — every branch of that policy is still asserted from real inputs below.
+  type PackageFixture = { name: 'nsis' | 'appimage'; platform: NodeJS.Platform; appImage: string };
+  const supportedPackages: PackageFixture[] = [
+    { name: 'nsis', platform: 'win32', appImage: '' },
+    { name: 'appimage', platform: 'linux', appImage: '/tmp/Chat-On-Steroids-Linux-x64.AppImage' }
+  ];
+
+  const installedAs = (fixture: Pick<PackageFixture, 'platform' | 'appImage'>): (() => void) => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { ...platform, value: fixture.platform });
+    // An empty value is the same as an absent one to `classifyUpdatePackage`, and stubbing it
+    // either way keeps a runner that really is inside an AppImage from leaking into a test.
+    vi.stubEnv('APPIMAGE', fixture.appImage);
+    return () => {
+      vi.unstubAllEnvs();
+      Object.defineProperty(process, 'platform', platform);
+    };
+  };
+
   it('distinguishes installed formats instead of pretending every Linux package is an AppImage', () => {
     expect(classifyUpdatePackage({ isPackaged: true, platform: 'win32', appImage: null, packageType: null })).toBe('nsis');
     expect(classifyUpdatePackage({ isPackaged: true, platform: 'linux', appImage: '/tmp/app.AppImage', packageType: null })).toBe('appimage');
@@ -68,16 +91,20 @@ describe('application update target policy', () => {
     ).toBe('download <local path> from <release server> failed');
   });
 
-  it('projects check, progress, ready, and explicit-install lifecycle without install-on-quit', async () => {
+  it.each(supportedPackages)(
+    'projects check, progress, ready, and explicit-install lifecycle without install-on-quit on a $name package',
+    async (fixture) => {
+    const restorePackage = installedAs(fixture);
     vi.useFakeTimers();
     resetUpdaterForTests();
+    updater.resetListeners();
     updater.checkForUpdates.mockImplementationOnce(async () => {
       updater.emit('checking-for-update');
       updater.emit('update-not-available', { version: '2.0.3' });
       return null;
     });
     startUpdater();
-    expect(updateStatus()).toMatchObject({ phase: 'idle', format: 'nsis', canCheck: true });
+    expect(updateStatus()).toMatchObject({ phase: 'idle', format: fixture.name, canCheck: true });
     expect(updater.autoDownload).toBe(true);
     expect(updater.autoInstallOnAppQuit).toBe(false);
     expect(updater.allowPrerelease).toBe(false);
@@ -96,9 +123,13 @@ describe('application update target policy', () => {
     expect(preparing).toHaveBeenCalledOnce();
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
     vi.useRealTimers();
-  });
+    restorePackage();
+  }
+  );
 
   it('recovers the card when the installer handoff itself fails', async () => {
+    // Pinned to the AppImage package the failure below actually comes from.
+    const restorePackage = installedAs({ platform: 'linux', appImage: '/tmp/Chat-On-Steroids-Linux-x64.AppImage' });
     vi.useFakeTimers();
     resetUpdaterForTests();
     updater.resetListeners();
@@ -163,9 +194,11 @@ describe('application update target policy', () => {
     updater.emit('update-downloaded', { version: '2.0.4' });
     expect(updateStatus()).toMatchObject({ phase: 'ready', canInstall: true });
     vi.useRealTimers();
+    restorePackage();
   });
 
   it('also recovers when the handoff throws instead of dispatching', async () => {
+    const restorePackage = installedAs({ platform: 'linux', appImage: '/tmp/Chat-On-Steroids-Linux-x64.AppImage' });
     vi.useFakeTimers();
     resetUpdaterForTests();
     updater.resetListeners();
@@ -188,5 +221,34 @@ describe('application update target policy', () => {
     expect(after.detail).toContain('Could not start the installer');
     expect(after.detail).toContain('<local path>');
     vi.useRealTimers();
+    restorePackage();
+  });
+
+  // The other half of the policy the fixture above pins: where there is no in-app installer the
+  // card must say so and stay inert, rather than offering a check that can never install. This is
+  // the state the macOS release runners are in, and it is asserted from the same real inputs.
+  it.each([
+    { name: 'macOS', platform: 'darwin' as NodeJS.Platform, appImage: '', detail: 'macOS updates stay manual until releases are signed and notarized.' },
+    { name: 'an unmarked Linux package', platform: 'linux' as NodeJS.Platform, appImage: '', detail: 'This package format does not support in-app installation.' }
+  ])('leaves the update card unsupported and inert on $name', async (fixture) => {
+    const restorePackage = installedAs(fixture);
+    resetUpdaterForTests();
+    updater.resetListeners();
+    updater.checkForUpdates.mockClear();
+
+    startUpdater();
+    expect(updateStatus()).toMatchObject({
+      phase: 'unsupported',
+      format: 'unsupported',
+      detail: fixture.detail,
+      canCheck: false,
+      canInstall: false
+    });
+    // An unsupported package never reaches the provider, so nothing can be downloaded and the
+    // explicit install act has nothing to hand off.
+    expect((await checkForUpdates()).phase).toBe('unsupported');
+    expect(updater.checkForUpdates).not.toHaveBeenCalled();
+    expect(() => installDownloadedUpdate()).toThrow('No downloaded update is ready to install.');
+    restorePackage();
   });
 });
