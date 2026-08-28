@@ -2868,11 +2868,13 @@ describe('exec_command and write_stdin', () => {
     expect(textOf(reply)).toContain('native-workdir-ok');
   });
 
-  it('uses the shared scrubbed child environment and exposes bundled ripgrep', async () => {
+  it('uses the shared scrubbed child environment for model-run commands', async () => {
     // Unified exec used to construct a second, almost-identical environment instead of using
     // childEnv(). That copy missed the secret scrubber and the bundled-rg PATH prefix. Both are
     // contract properties, not implementation details: model-run commands must never inherit a
     // connector credential, and `rg` is a runtime the app deliberately ships for those commands.
+    // This test owns the credential half; the next one owns the PATH half, which needs a staged
+    // binary and must be able to say when it has none.
     const heldSecret = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-must-never-reach-exec-command';
     try {
@@ -2893,9 +2895,17 @@ describe('exec_command and write_stdin', () => {
       if (heldSecret === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = heldSecret;
     }
+  });
 
+  it('puts the bundled ripgrep on the child PATH', async (ctx) => {
+    // The other half of the same childEnv() contract, split out so it can say when it did not
+    // run: only the packaging steps stage the binary, so a bare `npm test` has none to find,
+    // and a pass here would otherwise claim a PATH that was never checked.
     const bundled = locateRipgrep();
-    if (!bundled) return;
+    if (!bundled) {
+      ctx.skip('ripgrep is not staged in this checkout');
+      return;
+    }
     const rg = await core('tools/call', {
       name: 'exec_command',
       arguments: {
@@ -2910,9 +2920,12 @@ describe('exec_command and write_stdin', () => {
     expect(textOf(rg).toLowerCase()).toContain(bundled.toLowerCase());
   });
 
-  it.runIf(IS_WINDOWS)('binds bare PowerShell rg to the bundled binary instead of a shadowing function', async () => {
+  it.runIf(IS_WINDOWS)('binds bare PowerShell rg to the bundled binary instead of a shadowing function', async (ctx) => {
     const bundled = locateRipgrep();
-    if (!bundled) return;
+    if (!bundled) {
+      ctx.skip('ripgrep is not staged in this checkout');
+      return;
+    }
     await fs.writeFile(path.join(approved, 'rg-shadow-target.txt'), 'needle-from-real-ripgrep\n', 'utf8');
 
     const reply = await core('tools/call', {
@@ -2933,14 +2946,17 @@ describe('exec_command and write_stdin', () => {
     expect(reply.body.result?.structuredContent?.exit_code).toBe(0);
   });
 
-  it.runIf(IS_WINDOWS)('expands a glob for the bundled ripgrep it just bound the command to', async () => {
+  it.runIf(IS_WINDOWS)('expands a glob for the bundled ripgrep it just bound the command to', async (ctx) => {
     // Binding and expanding are two rewrites of the same command and they were composed in
     // the order that cancels one out: binding turns the leading `rg` into `& '<path>'`, which
     // the normalizer no longer recognises as ripgrep, so every ordinary `rg pattern *.txt`
     // went out with the asterisk still in it. Both halves had unit tests and both passed —
     // they were only ever called separately. This is the pair, through the real tool.
     const bundled = locateRipgrep();
-    if (!bundled) return;
+    if (!bundled) {
+      ctx.skip('ripgrep is not staged in this checkout');
+      return;
+    }
     await fs.writeFile(path.join(approved, 'glob-one.rgtxt'), 'needle-through-the-glob\n', 'utf8');
     await fs.writeFile(path.join(approved, 'glob-two.rgtxt'), 'nothing here\n', 'utf8');
 
@@ -2962,9 +2978,12 @@ describe('exec_command and write_stdin', () => {
     expect(reply.body.result?.structuredContent?.exit_code).toBe(0);
   });
 
-  it.runIf(IS_WINDOWS)('normalizes the recorded child-glob and balanced-quote failures through the real tool', async () => {
+  it.runIf(IS_WINDOWS)('normalizes the recorded child-glob and balanced-quote failures through the real tool', async (ctx) => {
     const bundled = locateRipgrep();
-    if (!bundled) return;
+    if (!bundled) {
+      ctx.skip('ripgrep is not staged in this checkout');
+      return;
+    }
     await fs.mkdir(path.join(approved, 'test'), { recursive: true });
     await fs.writeFile(path.join(approved, 'test', 'computer-one.test.ts'), 'from "fsops.js"\n', 'utf8');
     await fs.writeFile(path.join(approved, 'test', 'computer-two.test.ts'), 'nothing here\n', 'utf8');

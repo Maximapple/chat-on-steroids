@@ -450,7 +450,7 @@ describe.runIf(!IS_WINDOWS)('a native POSIX path', () => {
 
 /** Native drive paths copied from command output are normalized back into the virtual sandbox. */
 describe.runIf(IS_WINDOWS)('a native Windows path', () => {
-  it('accepts the DOS 8.3 spelling of an approved file as the same native path', async () => {
+  it('accepts the DOS 8.3 spelling of an approved file as the same native path', async (ctx) => {
     const long = path.join(approved, 'sub', 'nested.txt');
     const short = execFileSync(
       process.env.ComSpec || 'cmd.exe',
@@ -458,8 +458,12 @@ describe.runIf(IS_WINDOWS)('a native Windows path', () => {
       { encoding: 'utf8' }
     ).trim();
     // Some volumes disable 8.3 aliases. The regression is meaningful only when Windows
-    // actually supplies a distinct short spelling for the file.
-    if (!short.includes('~') || short.toLowerCase() === long.toLowerCase()) return;
+    // actually supplies a distinct short spelling for the file, and a volume that has none
+    // must say it skipped rather than report a pass for a comparison it never made.
+    if (!short.includes('~') || short.toLowerCase() === long.toLowerCase()) {
+      ctx.skip('this volume does not supply a distinct 8.3 spelling');
+      return;
+    }
 
     const resolved = await resolvePath(roots, short);
     expect(resolved.real).toBe(long);

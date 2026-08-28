@@ -830,11 +830,15 @@ describe('the ripgrep option table against the ripgrep this app ships', () => {
     expect(pinned?.[1]).toBe(RG_OPTION_TABLE_VERSION);
   });
 
-  it('lists every option the binary documents, with the right arity', () => {
+  it('lists every option the binary documents, with the right arity', (ctx) => {
     const executable = locateRipgrep();
     // Only the packaging steps fetch ripgrep, so a plain `npm ci && npm test` has no binary
-    // to ask. The pin check above is the half that catches the change a person makes.
-    if (executable === null || !existsSync(executable)) return;
+    // to ask. The pin check above is the half that catches the change a person makes. Reported
+    // as a skip rather than a pass: a run that never opened the binary proved nothing about it.
+    if (executable === null || !existsSync(executable)) {
+      ctx.skip('ripgrep is not staged in this checkout');
+      return;
+    }
 
     const help = execFileSync(executable, ['--help'], { encoding: 'utf8' });
     const documented = new Map<string, boolean>();
@@ -971,12 +975,13 @@ describe('repairing a bash-style escaped quote', () => {
     expect(repairPowerShellQuoting(WORKER_2_SYMBOL_SWEEP, 'bash').cmd).toBe(WORKER_2_SYMBOL_SWEEP);
   });
 
-  it('hands the program the pattern the caller actually wrote', () => {
+  // Windows only, and reported as skipped elsewhere rather than as a pass: the whole point is
+  // what the real Win32 command line does with the repaired text.
+  it.runIf(process.platform === 'win32')('hands the program the pattern the caller actually wrote', () => {
     // The point of the whole exercise, checked against the shell rather than against a belief
     // about it. The repaired text is executed as a command line, which is how it reaches
     // PowerShell in production — not passed through an argv API that would do its own
     // escaping and prove nothing about this.
-    if (process.platform !== 'win32') return;
     const probe = join(tmpdir(), 'exec-hints-argv-probe.ps1');
     const driver = join(tmpdir(), 'exec-hints-argv-driver.ps1');
     writeFileSync(probe, 'foreach ($a in $args) { [Console]::Out.WriteLine("<" + $a + ">") }\n', 'utf8');
@@ -1099,16 +1104,19 @@ describe('the operators Windows PowerShell 5.1 does not have', () => {
     expect(normalizePowerShellOperators(chain, 'powershell', '')).toEqual({ cmd: chain, notes: [] });
   });
 
-  it('runs the same commands the operators would have run, and exits the same way', () => {
+  it.runIf(process.platform === 'win32')('runs the same commands the operators would have run, and exits the same way', (ctx) => {
     // The rewrite is only worth anything if the shell agrees, so this asks it — through the
     // exact `-EncodedCommand` invocation exec.ts builds, because the exit status is where a
     // wrong rewrite does real damage. A chain that printed the right output while exiting 0
     // after a failed command would report `A && B && C` as a *successful* call, which is worse
     // than the parser error it replaced. Zero versus non-zero is the parity being checked;
     // Windows PowerShell 5.1 collapses every failing native exit to 1 on its own.
-    if (process.platform !== 'win32') return;
     const winPowerShell = findWindowsPowerShell();
-    if (winPowerShell === null) return;
+    // A Windows machine without 5.1 cannot answer this; say so instead of reporting a pass.
+    if (winPowerShell === null) {
+      ctx.skip('Windows PowerShell 5.1 is not installed here');
+      return;
+    }
     const run = (cmd: string): { status: number | null; out: string[] } => {
       const rewritten = normalizePowerShellOperators(cmd, 'powershell', winPowerShell);
       expect(rewritten.notes).toHaveLength(1);
