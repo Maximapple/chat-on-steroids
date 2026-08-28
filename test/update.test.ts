@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const updater = vi.hoisted(() => {
   const listeners = new Map<string, Array<(...args: any[]) => void>>();
@@ -55,13 +55,22 @@ describe('application update target policy', () => {
     { name: 'appimage', platform: 'linux', appImage: '/tmp/Chat-On-Steroids-Linux-x64.AppImage' }
   ];
 
-  const installedAs = (fixture: Pick<PackageFixture, 'platform' | 'appImage'>): (() => void) => {
+  let restorePackage: (() => void) | null = null;
+  // The restore runs from a hook, not from the end of a test body: one failed assertion aborts the
+  // body, and a pinned platform that outlived its test would fail the *next* one instead.
+  afterEach(() => {
+    restorePackage?.();
+    restorePackage = null;
+    vi.useRealTimers();
+  });
+
+  const installedAs = (fixture: Pick<PackageFixture, 'platform' | 'appImage'>): void => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
     Object.defineProperty(process, 'platform', { ...platform, value: fixture.platform });
     // An empty value is the same as an absent one to `classifyUpdatePackage`, and stubbing it
     // either way keeps a runner that really is inside an AppImage from leaking into a test.
     vi.stubEnv('APPIMAGE', fixture.appImage);
-    return () => {
+    restorePackage = () => {
       vi.unstubAllEnvs();
       Object.defineProperty(process, 'platform', platform);
     };
@@ -94,42 +103,41 @@ describe('application update target policy', () => {
   it.each(supportedPackages)(
     'projects check, progress, ready, and explicit-install lifecycle without install-on-quit on a $name package',
     async (fixture) => {
-    const restorePackage = installedAs(fixture);
-    vi.useFakeTimers();
-    resetUpdaterForTests();
-    updater.resetListeners();
-    updater.checkForUpdates.mockImplementationOnce(async () => {
-      updater.emit('checking-for-update');
-      updater.emit('update-not-available', { version: '2.0.3' });
-      return null;
-    });
-    startUpdater();
-    expect(updateStatus()).toMatchObject({ phase: 'idle', format: fixture.name, canCheck: true });
-    expect(updater.autoDownload).toBe(true);
-    expect(updater.autoInstallOnAppQuit).toBe(false);
-    expect(updater.allowPrerelease).toBe(false);
-    expect(updater.allowDowngrade).toBe(false);
+      installedAs(fixture);
+      vi.useFakeTimers();
+      resetUpdaterForTests();
+      updater.resetListeners();
+      updater.checkForUpdates.mockImplementationOnce(async () => {
+        updater.emit('checking-for-update');
+        updater.emit('update-not-available', { version: '2.0.3' });
+        return null;
+      });
+      startUpdater();
+      expect(updateStatus()).toMatchObject({ phase: 'idle', format: fixture.name, canCheck: true });
+      expect(updater.autoDownload).toBe(true);
+      expect(updater.autoInstallOnAppQuit).toBe(false);
+      expect(updater.allowPrerelease).toBe(false);
+      expect(updater.allowDowngrade).toBe(false);
 
-    expect((await checkForUpdates()).phase).toBe('current');
-    updater.emit('update-available', { version: '2.0.4' });
-    updater.emit('download-progress', { percent: 42.4 });
-    expect(updateStatus()).toMatchObject({ phase: 'downloading', availableVersion: '2.0.4', percent: 42.4 });
-    updater.emit('update-downloaded', { version: '2.0.4' });
-    expect(updateStatus()).toMatchObject({ phase: 'ready', canInstall: true, percent: 100 });
+      expect((await checkForUpdates()).phase).toBe('current');
+      updater.emit('update-available', { version: '2.0.4' });
+      updater.emit('download-progress', { percent: 42.4 });
+      expect(updateStatus()).toMatchObject({ phase: 'downloading', availableVersion: '2.0.4', percent: 42.4 });
+      updater.emit('update-downloaded', { version: '2.0.4' });
+      expect(updateStatus()).toMatchObject({ phase: 'ready', canInstall: true, percent: 100 });
 
-    const preparing = vi.fn();
-    setBeforeUpdateInstall(preparing);
-    installDownloadedUpdate();
-    expect(preparing).toHaveBeenCalledOnce();
-    expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
-    vi.useRealTimers();
-    restorePackage();
-  }
+      const preparing = vi.fn();
+      setBeforeUpdateInstall(preparing);
+      installDownloadedUpdate();
+      expect(preparing).toHaveBeenCalledOnce();
+      expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
+      vi.useRealTimers();
+    }
   );
 
   it('recovers the card when the installer handoff itself fails', async () => {
     // Pinned to the AppImage package the failure below actually comes from.
-    const restorePackage = installedAs({ platform: 'linux', appImage: '/tmp/Chat-On-Steroids-Linux-x64.AppImage' });
+    installedAs({ platform: 'linux', appImage: '/tmp/Chat-On-Steroids-Linux-x64.AppImage' });
     vi.useFakeTimers();
     resetUpdaterForTests();
     updater.resetListeners();
@@ -194,11 +202,10 @@ describe('application update target policy', () => {
     updater.emit('update-downloaded', { version: '2.0.4' });
     expect(updateStatus()).toMatchObject({ phase: 'ready', canInstall: true });
     vi.useRealTimers();
-    restorePackage();
   });
 
   it('also recovers when the handoff throws instead of dispatching', async () => {
-    const restorePackage = installedAs({ platform: 'linux', appImage: '/tmp/Chat-On-Steroids-Linux-x64.AppImage' });
+    installedAs({ platform: 'linux', appImage: '/tmp/Chat-On-Steroids-Linux-x64.AppImage' });
     vi.useFakeTimers();
     resetUpdaterForTests();
     updater.resetListeners();
@@ -221,7 +228,6 @@ describe('application update target policy', () => {
     expect(after.detail).toContain('Could not start the installer');
     expect(after.detail).toContain('<local path>');
     vi.useRealTimers();
-    restorePackage();
   });
 
   // The other half of the policy the fixture above pins: where there is no in-app installer the
@@ -231,7 +237,7 @@ describe('application update target policy', () => {
     { name: 'macOS', platform: 'darwin' as NodeJS.Platform, appImage: '', detail: 'macOS updates stay manual until releases are signed and notarized.' },
     { name: 'an unmarked Linux package', platform: 'linux' as NodeJS.Platform, appImage: '', detail: 'This package format does not support in-app installation.' }
   ])('leaves the update card unsupported and inert on $name', async (fixture) => {
-    const restorePackage = installedAs(fixture);
+    installedAs(fixture);
     resetUpdaterForTests();
     updater.resetListeners();
     updater.checkForUpdates.mockClear();
@@ -249,6 +255,5 @@ describe('application update target policy', () => {
     expect((await checkForUpdates()).phase).toBe('unsupported');
     expect(updater.checkForUpdates).not.toHaveBeenCalled();
     expect(() => installDownloadedUpdate()).toThrow('No downloaded update is ready to install.');
-    restorePackage();
   });
 });
