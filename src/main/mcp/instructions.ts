@@ -158,7 +158,11 @@ function desktopInstructions(ctx: ToolContext, platform: NodeJS.Platform): strin
     'observe never needs a window to be in front and never fails for lack of focus. Only computer does, and',
     'only for its focus action — so when something steals focus, look first and act on what you see.',
     'Coordinates are pixels of a screenshot frame. Coordinate actions require frameId so a click cannot land on a screen',
-    'that has since changed. Batch the actions that belong together and use captureAfter to verify the result.',
+    'that has since changed. For native input, pass the observed window id as targetWindow; it is a fail-closed safety assertion and never silently steals focus. Include focus(window) when intentional activation is needed.',
+    'Keep a computer call on one target window and one UI-changing decision. focus/move/wait/clipboard setup may accompany it; after the mutation, inspect the returned capture before deciding the next action.',
+    'Mutating computer calls return a fresh active-window result screenshot by default when screen access is available. Set captureAfter=false only when the result genuinely does not need visual verification.',
+    'When a small Retina control is visually ambiguous, observe it again with a larger max_width instead of guessing a pixel.',
+    'Prefer focus(window) over Command+Tab when the destination window id is known. Never use a fixed sleep as proof that an app switch finished.',
     // Waiting was the single most repeated desktop pattern in the recorded sessions: a batch of
     // nothing but a fixed sleep plus a screenshot, over and over, because the model had no way to
     // say what it was waiting *for*. verify is that way, and it waits inside the one call.

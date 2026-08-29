@@ -12,7 +12,8 @@ private typealias JSONObject = [String: Any]
 // Native Desktop safety budgets. Window matching deliberately fails closed: a semantic
 // AX element or pixel frame is never allowed to drift onto a different native window.
 private let AX_WINDOW_GEOMETRY_TOLERANCE: CGFloat = 24
-private let FOCUS_POLL_TIMEOUT_SECONDS: TimeInterval = 0.8
+private let FOCUS_POLL_TIMEOUT_SECONDS: TimeInterval = 2.5
+private let POINTER_ANIMATION_MAX_STEPS = 12
 private let MAX_CAPTURE_PIXELS = 8_000_000
 
 private struct HelperFailure: Error {
@@ -131,9 +132,40 @@ private func windowRow(_ id: CGWindowID) -> WindowRow? {
     allWindowRows().first { $0.id == id }
 }
 
+private func frontmostPID() -> pid_t? {
+    NSWorkspace.shared.frontmostApplication?.processIdentifier
+}
+
+private func focusedAXWindowID(for pid: pid_t, rows suppliedRows: [WindowRow]? = nil) -> CGWindowID? {
+    guard AXIsProcessTrusted() else { return nil }
+    let app = AXUIElementCreateApplication(pid)
+    guard let focused = axElementAttribute(app, kAXFocusedWindowAttribute as CFString) else { return nil }
+    if let exact = axWindowNumber(focused) { return exact }
+    guard let bounds = axBounds(focused) else { return nil }
+    let rows = suppliedRows ?? allWindowRows()
+    return rows
+        .filter { $0.pid == pid && geometryConvincinglyMatches(bounds, $0.bounds) }
+        .min(by: { geometryDistance(bounds, $0.bounds) < geometryDistance(bounds, $1.bounds) })?.id
+}
+
+private func windowServerFrontWindowID(rows suppliedRows: [WindowRow]? = nil) -> CGWindowID? {
+    let rows = suppliedRows ?? allWindowRows()
+    return rows.first(where: { $0.onScreen })?.id
+}
+
 private func foregroundWindowID() -> CGWindowID? {
-    guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-    return allWindowRows().first { $0.pid == app.processIdentifier && $0.onScreen }?.id
+    guard let pid = frontmostPID() else { return nil }
+    let rows = allWindowRows()
+    // Workspace and WindowServer can briefly disagree during an app switch. Returning no
+    // foreground window is safer than attributing input to stale state from either side.
+    guard let windowServerFrontID = windowServerFrontWindowID(rows: rows),
+          let windowServerFront = rows.first(where: { $0.id == windowServerFrontID }),
+          windowServerFront.pid == pid else { return nil }
+    if let focused = focusedAXWindowID(for: pid, rows: rows),
+       rows.contains(where: { $0.id == focused && $0.pid == pid && $0.onScreen }) {
+        return focused
+    }
+    return windowServerFront.id
 }
 
 private func requireAccessibility(prompt: Bool) throws {
@@ -160,6 +192,13 @@ private func axAttribute(_ element: AXUIElement, _ attribute: CFString) -> AnyOb
     var value: CFTypeRef?
     guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
     return value
+}
+
+private func axElementAttribute(_ element: AXUIElement, _ attribute: CFString) -> AXUIElement? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success, let value else { return nil }
+    guard CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return value as! AXUIElement
 }
 
 private func axString(_ element: AXUIElement, _ attribute: CFString) -> String? {
@@ -247,14 +286,68 @@ private func matchingAXWindow(_ row: WindowRow) throws -> AXUIElement {
     return best.0
 }
 
+private func setAXValueIfPossible(_ element: AXUIElement, _ attribute: CFString, _ value: CFTypeRef) {
+    var settable = DarwinBoolean(false)
+    guard AXUIElementIsAttributeSettable(element, attribute, &settable) == .success,
+          settable.boolValue else { return }
+    _ = AXUIElementSetAttributeValue(element, attribute, value)
+}
+
+private func setAXBooleanIfPossible(_ element: AXUIElement, _ attribute: CFString, _ value: Bool) {
+    var settable = DarwinBoolean(false)
+    guard AXUIElementIsAttributeSettable(element, attribute, &settable) == .success,
+          settable.boolValue else { return }
+    _ = AXUIElementSetAttributeValue(element, attribute, value ? kCFBooleanTrue : kCFBooleanFalse)
+}
+
+private func focusedAXElementWindowID(for pid: pid_t, rows suppliedRows: [WindowRow]? = nil) -> CGWindowID? {
+    guard AXIsProcessTrusted() else { return nil }
+    let app = AXUIElementCreateApplication(pid)
+    guard let element = axElementAttribute(app, kAXFocusedUIElementAttribute as CFString) else { return nil }
+    var current: AXUIElement? = element
+    for _ in 0..<10 {
+        guard let candidate = current else { return nil }
+        if let window = axElementAttribute(candidate, kAXWindowAttribute as CFString) {
+            if let exact = axWindowNumber(window) { return exact }
+            if let bounds = axBounds(window) {
+                let rows = suppliedRows ?? allWindowRows()
+                return rows
+                    .filter { $0.pid == pid && geometryConvincinglyMatches(bounds, $0.bounds) }
+                    .min(by: { geometryDistance(bounds, $0.bounds) < geometryDistance(bounds, $1.bounds) })?.id
+            }
+        }
+        if axRole(candidate) == "Window" {
+            if let exact = axWindowNumber(candidate) { return exact }
+            if let bounds = axBounds(candidate) {
+                let rows = suppliedRows ?? allWindowRows()
+                return rows
+                    .filter { $0.pid == pid && geometryConvincinglyMatches(bounds, $0.bounds) }
+                    .min(by: { geometryDistance(bounds, $0.bounds) < geometryDistance(bounds, $1.bounds) })?.id
+            }
+        }
+        current = axElementAttribute(candidate, kAXParentAttribute as CFString)
+    }
+    return nil
+}
+
+private func inputTargetMatches(_ row: WindowRow) -> Bool {
+    guard frontmostPID() == row.pid else { return false }
+    guard let focused = focusedAXWindowID(for: row.pid), focused == row.id else { return false }
+    guard foregroundWindowID() == row.id else { return false }
+    if let focusedElementWindow = focusedAXElementWindowID(for: row.pid) {
+        guard focusedElementWindow == row.id else { return false }
+    }
+    return true
+}
+
 private func focusWindow(_ id: CGWindowID) throws -> Bool {
     guard let row = windowRow(id) else { return false }
     try requireAccessibility(prompt: true)
+    if inputTargetMatches(row) { return true }
     guard let app = NSRunningApplication(processIdentifier: row.pid) else { return false }
     let window = try matchingAXWindow(row)
 
-    // Restore a minimized target before activation. Failure is harmless here: the exact-window
-    // foreground poll below remains the authority and fails closed if the restore did not work.
+    // Restore a minimized target before activation.
     var minimizedSettable = DarwinBoolean(false)
     if AXUIElementIsAttributeSettable(window, kAXMinimizedAttribute as CFString, &minimizedSettable) == .success,
        minimizedSettable.boolValue {
@@ -262,14 +355,87 @@ private func focusWindow(_ id: CGWindowID) throws -> Bool {
     }
 
     _ = app.activate(options: [.activateIgnoringOtherApps])
+    let appElement = AXUIElementCreateApplication(row.pid)
+    setAXBooleanIfPossible(appElement, kAXFrontmostAttribute as CFString, true)
+    setAXValueIfPossible(appElement, kAXMainWindowAttribute as CFString, window)
+    setAXValueIfPossible(appElement, kAXFocusedWindowAttribute as CFString, window)
+    setAXBooleanIfPossible(window, kAXMainAttribute as CFString, true)
+    setAXBooleanIfPossible(window, kAXFocusedAttribute as CFString, true)
     _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
 
     let deadline = Date().addingTimeInterval(FOCUS_POLL_TIMEOUT_SECONDS)
     repeat {
-        if foregroundWindowID() == id { return true }
+        if inputTargetMatches(row) { return true }
         usleep(25_000)
     } while Date() < deadline
     return false
+}
+
+// Passive assertion used immediately before physical input. It never steals focus: if the
+// user or another app took focus, fail closed before posting an event to the wrong process.
+private func assertInputTarget(_ id: CGWindowID) throws -> WindowRow {
+    guard let row = windowRow(id) else {
+        throw fail("WINDOW_NOT_FOUND", "target window \(id) no longer exists; no input was sent")
+    }
+    guard let livePID = frontmostPID(), livePID == row.pid else {
+        let actual = frontmostPID().map { String($0) } ?? "none"
+        throw fail(
+            "INPUT_TARGET_LOST",
+            "expected \(row.process) pid \(row.pid), but frontmost pid is \(actual); no input was sent"
+        )
+    }
+    guard let focused = focusedAXWindowID(for: row.pid) else {
+        throw fail(
+            "AX_FOCUS_FAILED",
+            "Accessibility did not expose a focused window for \(row.process); no input was sent"
+        )
+    }
+    if focused != id {
+        throw fail(
+            "AX_FOCUS_FAILED",
+            "expected focused window \(id), but Accessibility reports window \(focused); no input was sent"
+        )
+    }
+    if let focusedElementWindow = focusedAXElementWindowID(for: row.pid), focusedElementWindow != id {
+        throw fail(
+            "AX_FOCUS_FAILED",
+            "focused UI element belongs to window \(focusedElementWindow), expected \(id); no input was sent"
+        )
+    }
+    guard foregroundWindowID() == id else {
+        throw fail(
+            "WINDOW_NOT_KEY_WINDOW",
+            "window \(id) is not the active input window; no input was sent"
+        )
+    }
+    return row
+}
+
+// Active acquisition is reserved for an explicit focus action, a window-bound coordinate
+// frame, or a semantic click whose target is already known. Plain type/keypress never call it.
+private func activateInputTarget(_ id: CGWindowID) throws {
+    guard let row = windowRow(id) else {
+        throw fail("WINDOW_NOT_FOUND", "target window \(id) no longer exists")
+    }
+    if inputTargetMatches(row) { return }
+    if try focusWindow(id) {
+        _ = try assertInputTarget(id)
+        return
+    }
+    if frontmostPID() != row.pid {
+        let actual = frontmostPID().map { String($0) } ?? "none"
+        throw fail(
+            "TARGET_APP_NOT_FRONTMOST",
+            "could not activate \(row.process) pid \(row.pid); frontmost pid is \(actual)"
+        )
+    }
+    guard let focused = focusedAXWindowID(for: row.pid) else {
+        throw fail("AX_FOCUS_FAILED", "Accessibility did not expose a focused window for \(row.process)")
+    }
+    if focused != id {
+        throw fail("AX_FOCUS_FAILED", "Accessibility focused window \(focused), expected \(id)")
+    }
+    throw fail("WINDOW_NOT_KEY_WINDOW", "window \(id) could not be proven as the active input target")
 }
 
 private final class UISnapshot {
@@ -337,6 +503,14 @@ private func findUI(_ request: JSONObject, suppliedWindow: WindowRow? = nil) thr
         guard (query.isEmpty || haystack.contains(query)),
               (roleFilter.isEmpty || role.lowercased().contains(roleFilter)) else { continue }
         guard let bounds = axBounds(element), bounds.width >= 0, bounds.height >= 0 else { continue }
+        if query.isEmpty {
+            let usefulRoles: Set<String> = [
+                "Button", "CheckBox", "RadioButton", "PopUpButton", "ComboBox", "TextField",
+                "TextArea", "Link", "MenuItem", "TabGroup", "Slider", "Incrementor",
+                "DisclosureTriangle", "Document", "WebArea", "Outline", "Row", "Cell", "StaticText"
+            ]
+            if !usefulRoles.contains(role) && name.isEmpty && identifier.isEmpty { continue }
+        }
         let runtimeKey = "e\(visited)"
         retained[runtimeKey] = element
         returned.append([
@@ -388,25 +562,58 @@ private func movePointer(_ point: CGPoint) throws {
     try postMouse(.mouseMoved, point: point, button: .left)
 }
 
-private func click(_ point: CGPoint, button: CGMouseButton, count: Int) throws {
+private func movePointerSmoothly(to point: CGPoint) throws {
+    let start = CGEvent(source: nil)?.location ?? point
+    let distance = hypot(point.x - start.x, point.y - start.y)
+    let steps = min(POINTER_ANIMATION_MAX_STEPS, max(1, Int((distance / 90).rounded(.up))))
+    if steps <= 1 {
+        try movePointer(point)
+        return
+    }
+    for step in 1...steps {
+        let progress = CGFloat(step) / CGFloat(steps)
+        let eased = progress * progress * (3 - 2 * progress)
+        let next = CGPoint(
+            x: start.x + (point.x - start.x) * eased,
+            y: start.y + (point.y - start.y) * eased
+        )
+        try movePointer(next)
+        usleep(8_000)
+    }
+}
+
+private func click(_ point: CGPoint, button: CGMouseButton, count: Int, targetWindow: CGWindowID? = nil) throws {
+    try movePointerSmoothly(to: point)
     let (down, up, _) = mouseTypes(button)
     for clickIndex in 1...count {
+        if let targetWindow { _ = try assertInputTarget(targetWindow) }
         try postMouse(down, point: point, button: button, clickState: Int64(clickIndex))
         try postMouse(up, point: point, button: button, clickState: Int64(clickIndex))
         usleep(35_000)
     }
 }
 
-private func drag(_ xs: [NSNumber], _ ys: [NSNumber], button: CGMouseButton) throws {
+private func drag(_ xs: [NSNumber], _ ys: [NSNumber], button: CGMouseButton, targetWindow: CGWindowID? = nil) throws {
     guard xs.count == ys.count, xs.count >= 2 else { throw fail("BAD_ACTION", "drag needs at least two points") }
     let points = zip(xs, ys).map { CGPoint(x: $0.0.doubleValue, y: $0.1.doubleValue) }
     let (down, up, dragged) = mouseTypes(button)
+    try movePointerSmoothly(to: points[0])
+    if let targetWindow { _ = try assertInputTarget(targetWindow) }
     try postMouse(down, point: points[0], button: button)
-    for point in points.dropFirst() {
-        try postMouse(dragged, point: point, button: button)
-        usleep(12_000)
+    var current = points[0]
+    do {
+        for point in points.dropFirst() {
+            if let targetWindow { _ = try assertInputTarget(targetWindow) }
+            try postMouse(dragged, point: point, button: button)
+            current = point
+            usleep(12_000)
+        }
+        if let targetWindow { _ = try assertInputTarget(targetWindow) }
+        try postMouse(up, point: points[points.count - 1], button: button)
+    } catch {
+        try? postMouse(up, point: current, button: button)
+        throw error
     }
-    try postMouse(up, point: points[points.count - 1], button: button)
 }
 
 private let keyCodes: [String: CGKeyCode] = [
@@ -426,42 +633,107 @@ private let keyCodes: [String: CGKeyCode] = [
     "f2": 120, "pagedown": 121, "f1": 122, "left": 123, "right": 124, "down": 125, "up": 126
 ]
 
-private func pressKeys(_ names: [String]) throws {
-    let codes = try names.map { name -> CGKeyCode in
-        guard let code = keyCodes[name.lowercased()] else { throw fail("BAD_KEY", "unknown key \(name)") }
-        return code
-    }
-    for code in codes {
-        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true) else {
-            throw fail("INPUT_FAILED", "could not create a key-down event")
-        }
-        event.post(tap: .cghidEventTap)
-    }
-    usleep(35_000)
-    for code in codes.reversed() {
-        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else {
-            throw fail("INPUT_FAILED", "could not create a key-up event")
-        }
-        event.post(tap: .cghidEventTap)
+private let modifierFlags: [String: CGEventFlags] = [
+    "command": .maskCommand,
+    "shift": .maskShift,
+    "rightshift": .maskShift,
+    "option": .maskAlternate,
+    "rightoption": .maskAlternate,
+    "control": .maskControl,
+    "rightcontrol": .maskControl,
+    "capslock": .maskAlphaShift
+]
+
+private func normalizedKeyName(_ name: String) -> String {
+    switch name.lowercased() {
+    case "cmd", "meta": return "command"
+    case "alt": return "option"
+    case "ctrl": return "control"
+    case "esc": return "escape"
+    default: return name.lowercased()
     }
 }
 
-private func typeText(_ text: String) throws {
+private func pressKeys(_ names: [String], targetWindow: CGWindowID) throws {
+    var target = try assertInputTarget(targetWindow)
+    let normalized = names.map(normalizedKeyName)
+    guard let source = CGEventSource(stateID: .privateState) else {
+        throw fail("INPUT_FAILED", "could not create a keyboard event source")
+    }
+    let codes = try normalized.map { name -> CGKeyCode in
+        guard let code = keyCodes[name] else { throw fail("BAD_KEY", "unknown key \(name)") }
+        return code
+    }
+
+    var flags: CGEventFlags = []
+    var modifierIndices: [Int] = []
+    var ordinaryIndices: [Int] = []
+    for (index, name) in normalized.enumerated() {
+        if modifierFlags[name] != nil { modifierIndices.append(index) } else { ordinaryIndices.append(index) }
+    }
+
+    func postKey(_ code: CGKeyCode, keyDown: Bool, flags: CGEventFlags) throws {
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: keyDown) else {
+            throw fail("INPUT_FAILED", "could not create a keyboard event")
+        }
+        event.flags = flags
+        event.postToPid(target.pid)
+    }
+
+    // Re-check immediately before the chord. Ordinary key events carry the accumulated flags,
+    // so Command+B is delivered as Command+B rather than relying on inferred global key state.
+    target = try assertInputTarget(targetWindow)
+    for index in modifierIndices {
+        let name = normalized[index]
+        guard let flag = modifierFlags[name] else { continue }
+        flags.insert(flag)
+        try postKey(codes[index], keyDown: true, flags: flags)
+    }
+    for index in ordinaryIndices {
+        try postKey(codes[index], keyDown: true, flags: flags)
+    }
+    for index in ordinaryIndices.reversed() {
+        try postKey(codes[index], keyDown: false, flags: flags)
+    }
+    for index in modifierIndices.reversed() {
+        let name = normalized[index]
+        guard let flag = modifierFlags[name] else { continue }
+        flags.remove(flag)
+        try postKey(codes[index], keyDown: false, flags: flags)
+    }
+}
+
+private func typeText(_ text: String, targetWindow: CGWindowID) throws {
+    guard let source = CGEventSource(stateID: .privateState) else {
+        throw fail("INPUT_FAILED", "could not create a keyboard event source")
+    }
     let units = Array(text.utf16)
     var cursor = 0
     while cursor < units.count {
-        let end = min(units.count, cursor + 32)
+        var target = try assertInputTarget(targetWindow)
+        var end = min(units.count, cursor + 32)
+        if end < units.count, end > cursor {
+            let previous = units[end - 1]
+            let next = units[end]
+            if previous >= 0xD800 && previous <= 0xDBFF && next >= 0xDC00 && next <= 0xDFFF {
+                end -= 1
+            }
+        }
         let chunk = Array(units[cursor..<end])
-        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
             throw fail("INPUT_FAILED", "could not create a text input event")
         }
+        down.flags = []
+        up.flags = []
         chunk.withUnsafeBufferPointer { pointer in
             down.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: pointer.baseAddress!)
             up.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: pointer.baseAddress!)
         }
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
+        // No refocus here. A stolen focus means abort, never continue into the wrong app.
+        target = try assertInputTarget(targetWindow)
+        down.postToPid(target.pid)
+        up.postToPid(target.pid)
         cursor = end
     }
 }
@@ -491,6 +763,11 @@ private func actUI(_ request: JSONObject) throws -> JSONObject {
             throw fail("UI_ACTION_FAILED", "the control does not expose a settable value")
         }
     } else if action == "click" {
+        _ = try assertInputTarget(snapshot.window)
+        if let bounds = axBounds(element), !bounds.isEmpty {
+            try movePointerSmoothly(to: CGPoint(x: bounds.midX, y: bounds.midY))
+        }
+        _ = try assertInputTarget(snapshot.window)
         if AXUIElementPerformAction(element, kAXPressAction as CFString) != .success {
             // A physical fallback is only safe when the exact snapshot window is in front and
             // has not moved/resized. Otherwise the same screen coordinates may belong to an
@@ -504,13 +781,68 @@ private func actUI(_ request: JSONObject) throws -> JSONObject {
             guard let bounds = axBounds(element), !bounds.isEmpty else {
                 throw fail("UI_ACTION_FAILED", "the control exposes neither AXPress nor usable bounds")
             }
-            try click(CGPoint(x: bounds.midX, y: bounds.midY), button: .left, count: 1)
+            try click(CGPoint(x: bounds.midX, y: bounds.midY), button: .left, count: 1, targetWindow: snapshot.window)
             route = "sendinput"
         }
     } else {
         throw fail("BAD_ACTION", "unknown UI action \(action)")
     }
     return ["runtimeKey": runtimeKey, "name": axName(element), "route": route]
+}
+
+private func owningAXWindow(_ element: AXUIElement) -> AXUIElement? {
+    var current: AXUIElement? = element
+    for _ in 0..<8 {
+        guard let candidate = current else { return nil }
+        if axRole(candidate) == "Window" { return candidate }
+        if let window = axElementAttribute(candidate, kAXWindowAttribute as CFString) { return window }
+        current = axElementAttribute(candidate, kAXParentAttribute as CFString)
+    }
+    return nil
+}
+
+private func axWindowMatches(_ element: AXUIElement, _ row: WindowRow) -> Bool {
+    guard let window = owningAXWindow(element) else { return false }
+    if let number = axWindowNumber(window) { return number == row.id }
+    guard let bounds = axBounds(window) else { return false }
+    return geometryConvincinglyMatches(bounds, row.bounds)
+}
+
+private let safeHitTestPressRoles: Set<String> = [
+    "Button", "CheckBox", "RadioButton", "PopUpButton", "MenuButton", "MenuItem",
+    "Link", "DisclosureTriangle", "Tab"
+]
+
+private func tryPressElement(at point: CGPoint, target row: WindowRow) throws -> Bool {
+    guard AXIsProcessTrusted() else { return false }
+    let system = AXUIElementCreateSystemWide()
+    var hit: AXUIElement?
+    guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success,
+          let hit else { return false }
+    guard axWindowMatches(hit, row) else { return false }
+
+    var current: AXUIElement? = hit
+    for _ in 0..<6 {
+        guard let candidate = current else { break }
+        guard safeHitTestPressRoles.contains(axRole(candidate)) else {
+            current = axElementAttribute(candidate, kAXParentAttribute as CFString)
+            continue
+        }
+        var rawActions: CFArray?
+        if AXUIElementCopyActionNames(candidate, &rawActions) == .success,
+           let actions = rawActions as? [String],
+           actions.contains(kAXPressAction as String) {
+            if let bounds = axBounds(candidate), !bounds.isEmpty {
+                try movePointerSmoothly(to: CGPoint(x: bounds.midX, y: bounds.midY))
+            } else {
+                try movePointerSmoothly(to: point)
+            }
+            _ = try assertInputTarget(row.id)
+            if AXUIElementPerformAction(candidate, kAXPressAction as CFString) == .success { return true }
+        }
+        current = axElementAttribute(candidate, kAXParentAttribute as CFString)
+    }
+    return false
 }
 
 private func validateFrame(_ frame: JSONObject) throws {
@@ -523,7 +855,6 @@ private func validateFrame(_ frame: JSONObject) throws {
         guard row.bounds.integral == expected.integral else {
             throw fail("STALE_FRAME", "target window \(windowID) moved or resized after the screenshot")
         }
-        guard try focusWindow(windowID) else { throw fail("FOCUS_FAILED", "window \(windowID) could not be activated") }
         guard let after = windowRow(windowID), after.bounds.integral == expected.integral else {
             throw fail("STALE_FRAME", "target window \(windowID) changed geometry while it was activated")
         }
@@ -838,7 +1169,8 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
         result["screen"] = rectObject(try virtualScreenRect())
     case "focus":
         let id = CGWindowID(int(request["id"]))
-        result["focused"] = try focusWindow(id)
+        try activateInputTarget(id)
+        result["focused"] = true
         result["foreground"] = foregroundWindowID().map(Int.init) ?? 0
     case "find_ui":
         result.merge(try findUI(request)) { _, new in new }
@@ -881,6 +1213,10 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
         try requireAccessibility(prompt: true)
         if let frame = request["frame"] as? JSONObject { try validateFrame(frame) }
         let actions = request["actions"] as? [JSONObject] ?? []
+        var leasedWindow = number(request["targetWindow"])?.uint32Value
+        if leasedWindow == nil, let frame = request["frame"] as? JSONObject {
+            leasedWindow = number(frame["window"])?.uint32Value
+        }
         var routes: [String] = []
         var completed = 0
         for (index, action) in actions.enumerated() {
@@ -888,6 +1224,14 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                 let type = string(action["type"])
                 switch type {
                 case "click_ui", "set_value_ui":
+                    guard let actionWindow = number(action["window"])?.uint32Value else {
+                        throw fail("BAD_ACTION", "semantic action is missing its target window")
+                    }
+                    if let leasedWindow, leasedWindow != actionWindow {
+                        throw fail("TARGET_WINDOW_CONFLICT", "semantic action targets window \(actionWindow), but this batch is pinned to window \(leasedWindow)")
+                    }
+                    leasedWindow = actionWindow
+                    if type == "click_ui" { _ = try assertInputTarget(actionWindow) }
                     var uiRequest = action
                     uiRequest["id"] = action["window"]
                     uiRequest["action"] = type == "click_ui" ? "click" : "set_value"
@@ -895,17 +1239,34 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     let reply = try actUI(uiRequest)
                     routes.append(string(reply["route"], default: "uia"))
                 case "move":
-                    try movePointer(CGPoint(x: int(action["x"]), y: int(action["y"])))
+                    guard let leasedWindow else {
+                        throw fail("INPUT_TARGET_REQUIRED", "pointer input requires a target window; no input was sent")
+                    }
+                    _ = try assertInputTarget(leasedWindow)
+                    try movePointerSmoothly(to: CGPoint(x: int(action["x"]), y: int(action["y"])))
                     routes.append("sendinput")
                 case "click", "double_click":
-                    try click(
-                        CGPoint(x: int(action["x"]), y: int(action["y"])),
-                        button: mouseButton(string(action["button"])),
-                        count: type == "double_click" ? 2 : 1
-                    )
-                    routes.append("sendinput")
+                    guard let leasedWindow else {
+                        throw fail("INPUT_TARGET_REQUIRED", "click input requires a target window; no input was sent")
+                    }
+                    _ = try assertInputTarget(leasedWindow)
+                    let point = CGPoint(x: int(action["x"]), y: int(action["y"]))
+                    let button = mouseButton(string(action["button"]))
+                    if type == "click", button == .left, let row = windowRow(leasedWindow),
+                       try tryPressElement(at: point, target: row) {
+                        routes.append("uia")
+                    } else {
+                        _ = try assertInputTarget(leasedWindow)
+                        try click(point, button: button, count: type == "double_click" ? 2 : 1, targetWindow: leasedWindow)
+                        routes.append("sendinput")
+                    }
                 case "scroll":
-                    try movePointer(CGPoint(x: int(action["x"]), y: int(action["y"])))
+                    guard let leasedWindow else {
+                        throw fail("INPUT_TARGET_REQUIRED", "scroll input requires a target window; no input was sent")
+                    }
+                    _ = try assertInputTarget(leasedWindow)
+                    try movePointerSmoothly(to: CGPoint(x: int(action["x"]), y: int(action["y"])))
+                    _ = try assertInputTarget(leasedWindow)
                     guard let event = CGEvent(
                         scrollWheelEvent2Source: nil,
                         units: .line,
@@ -917,22 +1278,38 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     event.post(tap: .cghidEventTap)
                     routes.append("sendinput")
                 case "drag":
+                    guard let leasedWindow else {
+                        throw fail("INPUT_TARGET_REQUIRED", "drag input requires a target window; no input was sent")
+                    }
+                    _ = try assertInputTarget(leasedWindow)
                     try drag(
                         action["xs"] as? [NSNumber] ?? [],
                         action["ys"] as? [NSNumber] ?? [],
-                        button: mouseButton(string(action["button"]))
+                        button: mouseButton(string(action["button"])),
+                        targetWindow: leasedWindow
                     )
                     routes.append("sendinput")
                 case "type":
-                    try typeText(string(action["text"]))
+                    guard let leasedWindow else {
+                        throw fail("INPUT_TARGET_REQUIRED", "text input requires a target window; no input was sent")
+                    }
+                    _ = try assertInputTarget(leasedWindow)
+                    try typeText(string(action["text"]), targetWindow: leasedWindow)
                     routes.append("sendinput")
                 case "keypress":
-                    try pressKeys(action["keys"] as? [String] ?? [])
+                    guard let leasedWindow else {
+                        throw fail("INPUT_TARGET_REQUIRED", "keyboard input requires a target window; no input was sent")
+                    }
+                    _ = try assertInputTarget(leasedWindow)
+                    try pressKeys(action["keys"] as? [String] ?? [], targetWindow: leasedWindow)
                     routes.append("sendinput")
                 case "focus":
-                    guard try focusWindow(CGWindowID(int(action["window"]))) else {
-                        throw fail("FOCUS_FAILED", "the requested window could not be activated")
+                    let requested = CGWindowID(int(action["window"]))
+                    if let leasedWindow, leasedWindow != requested {
+                        throw fail("TARGET_WINDOW_CONFLICT", "focus targets window \(requested), but this batch is pinned to window \(leasedWindow)")
                     }
+                    leasedWindow = requested
+                    try activateInputTarget(requested)
                     routes.append("focus")
                 default:
                     throw fail("BAD_ACTION", "unknown action \(type)")

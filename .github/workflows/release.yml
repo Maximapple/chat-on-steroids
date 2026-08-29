@@ -247,8 +247,20 @@ jobs:
           fake_bin="$(mktemp -d)"
           normal_smoke_root="$(mktemp -d)"
           fallback_smoke_root="$(mktemp -d)"
+          cleanup_path_with_retries() {
+            target="$1"
+            for attempt in 1 2 3 4 5; do
+              rm -rf "$target" 2>/dev/null && return 0
+              sleep 0.2
+            done
+            # Cleanup is not product evidence. A process that created one last profile file
+            # after the smoke already proved renderer readiness must not turn the release red.
+            rm -rf "$target" 2>/dev/null || true
+          }
           cleanup() {
-            rm -rf "$fake_bin" "$normal_smoke_root" "$fallback_smoke_root"
+            cleanup_path_with_retries "$fake_bin"
+            cleanup_path_with_retries "$normal_smoke_root"
+            cleanup_path_with_retries "$fallback_smoke_root"
           }
           trap cleanup EXIT
           printf '#!/bin/sh\nexit 1\n' > "$fake_bin/unshare"
