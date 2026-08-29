@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import path from 'node:path';
 
 const maintainerLogin = 'totec448-spec';
 const safeMaintainerEmail = /^(?:\d+\+)?totec448-spec@users\.noreply\.github\.com$/i;
@@ -27,14 +28,25 @@ function runGit(args, { allowFailure = false, encoding = 'utf8' } = {}) {
 }
 
 function repositoryOwner() {
-  const fromActions = String(process.env.GITHUB_REPOSITORY ?? '').split('/')[0]?.trim();
-  if (fromActions) return fromActions;
-
+  // Ownership belongs to the repository being checked, not to an outer CI process.
+  // Vitest creates temporary Git repositories for this gate; those child repos inherit
+  // GITHUB_REPOSITORY/GITHUB_WORKSPACE from Actions and must not be mistaken for the fork.
   const remote = runGit(['config', '--get', 'remote.origin.url'], { allowFailure: true });
-  if (remote.status !== 0) return null;
-  const value = String(remote.stdout ?? '').trim();
-  const match = /(?:github\.com[/:])([^/:\s]+)\/[^/\s]+(?:\.git)?$/i.exec(value);
-  return match?.[1] ?? null;
+  if (remote.status === 0) {
+    const value = String(remote.stdout ?? '').trim();
+    const match = /(?:github\.com[/:])([^/:\s]+)\/[^/\s]+(?:\.git)?$/i.exec(value);
+    if (match?.[1]) return match[1];
+  }
+
+  const workspace = String(process.env.GITHUB_WORKSPACE ?? '').trim();
+  const fromActions = String(process.env.GITHUB_REPOSITORY ?? '').split('/')[0]?.trim();
+  if (!workspace || !fromActions) return null;
+
+  const normalize = (value) => {
+    const resolved = path.resolve(value);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(process.cwd()) === normalize(workspace) ? fromActions : null;
 }
 
 function findBlockedText(text, location) {
