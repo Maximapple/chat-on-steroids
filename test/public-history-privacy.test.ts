@@ -31,11 +31,12 @@ function commit(repository: string, message: string, email: string): void {
   });
 }
 
-function verify(repository: string) {
+function verify(repository: string, env: NodeJS.ProcessEnv = process.env) {
   return spawnSync(process.execPath, [script], {
     cwd: repository,
     encoding: 'utf8',
     windowsHide: true,
+    env,
   });
 }
 
@@ -58,7 +59,12 @@ describe('public-history privacy gate', () => {
     const privateEmail = ['totec448', 'gmail.com'].join('@');
     commit(repository, 'Unsafe identity', privateEmail);
 
-    const result = verify(repository);
+    const result = verify(repository, {
+      ...process.env,
+      // Reproduce a child repository running inside a fork's GitHub Actions job.
+      GITHUB_REPOSITORY: 'example-fork/chat-on-steroids',
+      GITHUB_WORKSPACE: process.cwd(),
+    });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('non-noreply maintainer email');
     expect(result.stderr).not.toContain(privateEmail);
