@@ -132,7 +132,13 @@ function describeSurfaces(): SurfaceStatus[] {
 
 function desktopUnavailableDetail(id: SurfaceId): string {
   if (id === 'desktop' && !desktopAutomationSupported()) {
-    return 'Desktop automation is Windows-only. Core files, terminal, sessions and sub-agents remain available.';
+    if (process.platform === 'darwin') {
+      return 'Desktop automation requires macOS 12.3 or newer. Core files, terminal, sessions and sub-agents remain available on macOS 12.0-12.2.';
+    }
+    if (process.platform === 'linux') {
+      return 'Desktop automation is not available on Linux yet. Core files, terminal, sessions and sub-agents remain available.';
+    }
+    return 'Desktop automation is not available on this operating system. Core files, terminal, sessions and sub-agents remain available.';
   }
   return id === 'desktop'
     ? 'Turn on "See the screen", "Control mouse and keyboard" or a clipboard permission to use this connector.'

@@ -13,12 +13,13 @@ describe('open upstream issue hardening bundle', () => {
     expect(worker).toContain("(?:^|\\/)c\\/([0-9a-f-]{8,64})(?:\\/|$)");
   });
 
-  it('ships one MV3 manifest that has Chrome and Firefox background fallbacks', () => {
+  it('keeps the Chrome MV3 manifest valid while retaining Firefox runtime compatibility hooks', () => {
     const manifest = JSON.parse(source('extension/manifest.json'));
     expect(Number(manifest.minimum_chrome_version)).toBeGreaterThanOrEqual(121);
     expect(manifest.background.service_worker).toBe('background.js');
-    expect(manifest.background.scripts).toEqual(['background.js']);
+    expect(manifest.background).not.toHaveProperty('scripts');
     expect(manifest.browser_specific_settings.gecko.strict_min_version).toBe('128.0');
+    expect(source('extension/background.js')).toContain('globalThis.browser ?? globalThis.chrome');
     expect(source('src/main/bridge.ts')).toContain("origin.startsWith('moz-extension://')");
   });
 
