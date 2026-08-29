@@ -267,6 +267,7 @@ class UnifiedExecProcess {
   outputClosed = false;
   cancelled = false;
   private exited = false;
+  private exitedAtMs: number | null = null;
   private exit: number | null = null;
   private failure: string | null = null;
   private openStreams = 0;
@@ -430,6 +431,7 @@ class UnifiedExecProcess {
   private signalExit(exitCode: number | null): void {
     if (!this.exited) {
       this.exited = true;
+      this.exitedAtMs = Date.now();
       this.exit = exitCode;
     }
     if (!this.cancelled) {
@@ -451,6 +453,10 @@ class UnifiedExecProcess {
 
   exitCode(): number | null {
     return this.exit;
+  }
+
+  exitedAt(): number | null {
+    return this.exitedAtMs;
   }
 
   failureMessage(): string | null {
@@ -624,6 +630,15 @@ export interface BackgroundTerminalInfo {
   tty: boolean;
 }
 
+export interface BackgroundTerminalState {
+  processId: number;
+  running: boolean;
+  exitedUnread: boolean;
+  tty: boolean;
+  startedAt: number;
+  changedAt: number;
+}
+
 interface ProcessEntry {
   process: UnifiedExecProcess;
   processId: number;
@@ -631,6 +646,7 @@ interface ProcessEntry {
   hookCommand: string;
   tty: boolean;
   initialExecCommandActive: boolean;
+  startedAt: number;
   lastUsed: number;
 }
 
@@ -697,6 +713,7 @@ export class UnifiedExecProcessManager {
         hookCommand: request.hookCommand,
         tty: request.tty,
         initialExecCommandActive: true,
+        startedAt: start,
         lastUsed: start
       });
     }
@@ -854,6 +871,24 @@ export class UnifiedExecProcessManager {
     } finally {
       release();
     }
+  }
+
+  /**
+   * Non-destructive lifecycle projection for /activity. This never drains output and never
+   * removes an exited process; write_stdin remains the only consumer of the pending result.
+   */
+  backgroundState(processId: number): BackgroundTerminalState | null {
+    const entry = this.processes.get(processId);
+    if (!entry) return null;
+    const exited = entry.process.hasExited();
+    return {
+      processId,
+      running: !exited,
+      exitedUnread: exited,
+      tty: entry.tty,
+      startedAt: entry.startedAt,
+      changedAt: entry.process.exitedAt() ?? entry.startedAt
+    };
   }
 
   /** Live sessions, oldest id first. */

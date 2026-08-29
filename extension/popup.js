@@ -1,3 +1,5 @@
+const webext = globalThis.browser ?? globalThis.chrome;
+
 /**
  * Status UI, and the one place that answers "where did the stream stop?".
  *
@@ -305,8 +307,8 @@ function paintDetails(status, info) {
 
 async function refresh() {
   const [status, info] = await Promise.all([
-    chrome.runtime.sendMessage({ type: 'status' }),
-    chrome.runtime.sendMessage({ type: 'tabStatus' }).catch(() => null)
+    webext.runtime.sendMessage({ type: 'status' }),
+    webext.runtime.sendMessage({ type: 'tabStatus' }).catch(() => null)
   ]);
   latest = { status, tab: info };
 
@@ -356,7 +358,7 @@ function syncOverwrite() {
 }
 
 async function loadPreferences() {
-  const stored = await chrome.storage.local.get([RENDER_STREAM_KEY, SHOW_TIMES_KEY]);
+  const stored = await webext.storage.local.get([RENDER_STREAM_KEY, SHOW_TIMES_KEY]);
   overwriteEnabled = stored[RENDER_STREAM_KEY] !== false;
   showTimes = stored[SHOW_TIMES_KEY] === true;
   syncOverwrite();
@@ -396,13 +398,13 @@ $('more').addEventListener('toggle', () => paintDetails(latest.status, latest.ta
 
 $('retryBtn').addEventListener('click', async () => {
   $('retryBtn').disabled = true;
-  await chrome.runtime.sendMessage({ type: 'pair' });
+  await webext.runtime.sendMessage({ type: 'pair' });
   $('retryBtn').disabled = false;
   await refresh();
 });
 
 $('unpairBtn').addEventListener('click', async () => {
-  await chrome.runtime.sendMessage({ type: 'unpair' });
+  await webext.runtime.sendMessage({ type: 'unpair' });
   await refresh();
 });
 
@@ -411,10 +413,10 @@ $('overwriteToggle').addEventListener('change', async () => {
   overwriteEnabled = $('overwriteToggle').checked === true;
   syncOverwrite();
   try {
-    await chrome.storage.local.set({ [RENDER_STREAM_KEY]: overwriteEnabled });
+    await webext.storage.local.set({ [RENDER_STREAM_KEY]: overwriteEnabled });
     // The toggle is the action. Enabling it immediately pulls the latest app timeline into
     // every known ChatGPT tab; there is deliberately no second "Overwrite now" button.
-    if (overwriteEnabled) await chrome.runtime.sendMessage({ type: 'overwriteNow' });
+    if (overwriteEnabled) await webext.runtime.sendMessage({ type: 'overwriteNow' });
   } catch {
     overwriteEnabled = previous;
     syncOverwrite();
@@ -423,7 +425,7 @@ $('overwriteToggle').addEventListener('change', async () => {
 
 $('timeToggle').addEventListener('change', async () => {
   showTimes = $('timeToggle').checked === true;
-  await chrome.storage.local.set({ [SHOW_TIMES_KEY]: showTimes });
+  await webext.storage.local.set({ [SHOW_TIMES_KEY]: showTimes });
 });
 
 // A popup is open for seconds at a time and the three stages move within those seconds.

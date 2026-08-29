@@ -47,6 +47,14 @@ export function execOwner(processId: number): string | null {
   return owners.get(processId) ?? null;
 }
 
+/** Live/result-bearing process ids proven to belong to one conversation. */
+export function execProcessIdsForConversation(conversationId: string): number[] {
+  if (!conversationId) return [];
+  return [...owners.entries()]
+    .filter(([, owner]) => owner === conversationId)
+    .map(([processId]) => processId);
+}
+
 /**
  * Whether `conversationId` may write to `processId`.
  *

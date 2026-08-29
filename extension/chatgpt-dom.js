@@ -260,7 +260,7 @@ var CLF_DOM = (() => {
   /** The conversation this tab is on, or null for a chat that has not been sent yet. */
   function conversationId() {
     return safe(() => {
-      const match = /^\/c\/([0-9a-f-]{8,64})/i.exec(location.pathname);
+      const match = /(?:^|\/)c\/([0-9a-f-]{8,64})(?:\/|$)/i.exec(location.pathname);
       return match ? match[1] : null;
     }, null);
   }

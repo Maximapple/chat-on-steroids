@@ -124,22 +124,26 @@ const AUTH_FAILURE = /\b(401|403|unauthorized|invalid[_ ]api[_ ]key|invalid_requ
  * a local health check that stays green throughout an outage, because from its point
  * of view nothing local has failed.
  */
-const UNREACHABLE =
-  /poll failed|no such host|dial tcp|i\/o timeout|connection (was )?(aborted|refused|reset)|network is (unreachable|down)|no route to host|tls handshake timeout|temporary failure in name resolution|forcibly closed/i;
+const CONTROL_PLANE_POLL = /\bpoll (?:failed|timed out(?:;\s*backing off)?)\b/i;
+const UNREACHABLE_NETWORK =
+  /no such host|dial tcp|i\/o timeout|timed out|context deadline exceeded|connection (was )?(aborted|refused|reset)|network is (unreachable|down)|no route to host|tls handshake timeout|temporary failure in name resolution|forcibly closed/i;
 
 /** Turns a Go network error into something worth showing a person. */
 export function describeNetworkError(raw: string): string {
   if (/no such host|name resolution/i.test(raw)) return 'no internet connection';
   if (/connection (was )?(aborted|reset)|forcibly closed/i.test(raw)) return 'the connection dropped';
   if (/refused/i.test(raw)) return 'the connection was refused';
-  if (/timeout/i.test(raw)) return 'the connection timed out';
+  if (/timeout|timed out|context deadline exceeded/i.test(raw)) return 'the connection timed out';
   if (/network is (unreachable|down)|no route to host/i.test(raw)) return 'the network is unreachable';
   return 'a network error';
 }
 
 /** True when this machine can still resolve OpenAI's control plane. */
 export function isUnreachableError(raw: string): boolean {
-  return UNREACHABLE.test(raw);
+  const text = String(raw || '');
+  // A bare Go timeout can come from the local MCP startup probe too. Only the tunnel
+  // client's control-plane poll context is allowed to classify OpenAI as unreachable.
+  return CONTROL_PLANE_POLL.test(text) && UNREACHABLE_NETWORK.test(text);
 }
 
 export async function startTunnel(opts: TunnelStartOptions): Promise<TunnelHandle> {
@@ -272,14 +276,16 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
   let lastHandshake: number | null = null;
   /** Poll errors already reported, so only new ones reach the log. */
   let pollErrors = 0;
-  /** When the current client process reached ready, for the first-poll grace period. */
-  let launchedAt = 0;
   /** The client's local health server, once it has published its port. */
   let healthBase: string | null = null;
   /** Last snapshot of what the client says about itself, for the UI. */
   let health: TunnelHealth | null = null;
   /** What the UI was last told, so a state is only re-reported when it changes. */
-  let shown: 'connected' | 'offline' | null = null;
+  let shown: 'connected' | 'offline' | 'waiting' | null = null;
+  /** Invalidate async watcher work across restart/stop boundaries. */
+  let watcherEpoch = 0;
+  /** Children intentionally stopped by this supervisor; their exit handler must not retry too. */
+  const supervisorStops = new WeakSet<ChildProcess>();
 
   const clearTimer = (): void => {
     if (timer) clearTimeout(timer);
@@ -302,14 +308,29 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
   };
 
   const showOffline = (): void => {
-    if (shown === 'offline') return;
+    const first = shown !== 'offline';
     shown = 'offline';
-    logWarn(
-      `${tag} offline: ${unreachableReason} (last verified handshake ${ago(lastHandshake)})`
-    );
+    if (first) {
+      logWarn(
+        `${tag} offline: ${unreachableReason} (last verified handshake ${ago(lastHandshake)})`
+      );
+    }
+    // Re-report health even while state stays offline; otherwise the diagnostics card freezes.
     opts.report({
       state: 'offline',
       detail: `This PC cannot reach OpenAI — ${unreachableReason}. Last verified handshake ${ago(lastHandshake)}. ChatGPT cannot use the connector until it is back; the tunnel keeps retrying on its own.`,
+      handshakeAt: lastHandshake,
+      health
+    });
+  };
+
+  const showWaiting = (detail: string): void => {
+    const first = shown !== 'waiting';
+    shown = 'waiting';
+    if (first) logInfo(`${tag}: ${detail}`);
+    opts.report({
+      state: 'connecting-tunnel',
+      detail,
       handshakeAt: lastHandshake,
       health
     });
@@ -325,7 +346,11 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
     if (poll?.lastSuccessMs) lastHandshake = poll.lastSuccessMs;
     // A poll completing after the complaints began is proof the link came back, so the
     // run ends here and the blip is never shown to anyone.
-    if (outageRecovered(run, lastHandshake)) run = NO_OUTAGE;
+    if (outageRecovered(run, lastHandshake)) {
+      run = NO_OUTAGE;
+      lastUnreachable = 0;
+      unreachableReason = '';
+    }
     health = {
       pollErrors: poll?.errors ?? null,
       uptimeSeconds: client?.uptimeSeconds ?? null,
@@ -343,6 +368,32 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
       pollErrors = poll.errors;
     }
     return poll === null ? null : (poll.lastSuccessMs ?? 0);
+  };
+
+  const reportHealthState = (read: number | null, now = Date.now()): void => {
+    const fresh = lastHandshake !== null && now - lastHandshake <= POLL_FRESH_MS;
+    if (fresh && !outageConfirmed(run, now)) {
+      showConnected();
+      return;
+    }
+
+    if (read === null) {
+      const recentComplaint = lastUnreachable > 0 && now - lastUnreachable < RECOVERY_QUIET_MS;
+      showWaiting(
+        recentComplaint
+          ? 'Tunnel is ready; a control-plane retry was reported, but health is temporarily unavailable. Waiting for verification…'
+          : 'Tunnel is ready, but its control-plane health is temporarily unavailable. Waiting for verification…'
+      );
+      return;
+    }
+
+    if (lastHandshake === null && !outageConfirmed(run, now)) {
+      showWaiting('Tunnel is ready. Waiting for the first verified handshake with OpenAI…');
+      return;
+    }
+
+    if (!unreachableReason) unreachableReason = 'it stopped answering';
+    showOffline();
   };
 
   /**
@@ -364,6 +415,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
 
   const retry = (detail: string): void => {
     if (stopped) return;
+    watcherEpoch += 1;
     attempts += 1;
     shown = null;
     const wait = Math.min(MAX_BACKOFF_MS, 2000 * 2 ** (attempts - 1));
@@ -390,35 +442,27 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
    * saying "connected". The log lines only supply the wording for *why* it is down.
    */
   const watch = (base: string): void => {
+    const epoch = watcherEpoch;
     clearTimer();
     timer = setTimeout(
       () => {
         void (async () => {
-          if (stopped) return;
+          if (stopped || epoch !== watcherEpoch) return;
           const ready = await probe(`${base}/readyz`);
+          if (stopped || epoch !== watcherEpoch) return;
           if (!ready.ok) {
             logWarn(`${tag} went unready: ${ready.detail}`);
+            if (child) supervisorStops.add(child);
             await stopTree(child);
+            if (stopped || epoch !== watcherEpoch) return;
             retry(ready.detail || 'The tunnel stopped responding.');
             return;
           }
 
           const read = await refreshHealth(base);
-
-          // A client that has only just started may not have completed its first poll
-          // yet; that is not an outage, so it gets one poll cycle of grace.
-          const since = lastHandshake ?? launchedAt;
-          const stale =
-            read === null
-              ? Date.now() - lastUnreachable < RECOVERY_QUIET_MS
-              : Date.now() - since > POLL_FRESH_MS || outageConfirmed(run, Date.now());
-
-          if (stale) {
-            if (!unreachableReason) unreachableReason = 'it stopped answering';
-            showOffline();
-          } else {
-            showConnected();
-          }
+          if (stopped || epoch !== watcherEpoch) return;
+          reportHealthState(read);
+          if (stopped || epoch !== watcherEpoch) return;
           watch(base);
         })();
       },
@@ -493,10 +537,11 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
         if (level === 'ERROR' || level === 'FATAL' || level === 'WARN') {
           const errText = event['error'] ? String(event['error']) : '';
           lastError = `${level} ${message}${errText ? `: ${errText}` : ''}`.slice(0, 400);
-          if (isUnreachableError(message) || isUnreachableError(errText)) {
+          const controlPlaneError = `${message}${errText ? `: ${errText}` : ''}`;
+          if (isUnreachableError(controlPlaneError)) {
             // Retry chatter. noteUnreachable logs one plain line per run rather than a
             // socket dump per attempt, and the state it leads to is decided in `watch`.
-            noteUnreachable(errText || message);
+            noteUnreachable(controlPlaneError);
           } else {
             logWarn(`${tag}: ${lastError}`);
           }
@@ -518,6 +563,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
     proc.on('exit', (code) => {
       if (stopped || proc !== child) return;
       done = true;
+      if (supervisorStops.delete(proc)) return;
       logWarn(`${tag} client exited with code ${code}`);
       retry(lastError || `Tunnel client stopped (exit ${code}).`);
     });
@@ -540,12 +586,17 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
           attempts = 0;
           shown = null;
           healthBase = base;
-          launchedAt = Date.now();
+          // A replacement client starts with no inherited proof or complaint state.
+          lastHandshake = null;
+          lastUnreachable = 0;
+          unreachableReason = '';
           pollErrors = 0;
           run = NO_OUTAGE;
-          await refreshHealth(base);
-          if (Date.now() - lastUnreachable < RECOVERY_QUIET_MS) showOffline();
-          else showConnected();
+          health = null;
+          watcherEpoch += 1;
+          const read = await refreshHealth(base);
+          if (stopped || proc !== child) return;
+          reportHealthState(read);
           watch(base);
           return;
         }
@@ -554,8 +605,9 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
       await delay(1000);
     }
     if (!done && !stopped) {
+      supervisorStops.add(proc);
       await stopTree(proc);
-      retry(lastError || 'The tunnel did not become ready within 60 seconds.');
+      if (!stopped) retry(lastError || 'The tunnel did not become ready within 60 seconds.');
     }
   };
 
@@ -565,6 +617,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
     healthBase: () => healthBase,
     stop: async () => {
       stopped = true;
+      watcherEpoch += 1;
       clearTimer();
       await stopTree(child);
       child = null;

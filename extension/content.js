@@ -24,6 +24,8 @@
 (() => {
   'use strict';
 
+  const webext = globalThis.browser ?? globalThis.chrome;
+
   // Static content scripts are not re-run in an already-open tab when an unpacked
   // extension is reloaded/updated. background.js deliberately re-injects this file into
   // those tabs from runtime.onInstalled. The normal static injection can race that recovery
@@ -33,7 +35,7 @@
   // boolean with the note that "a real extension reload invalidates the old isolated world,
   // so its marker disappears with it". It does not. Chrome keys the isolated world by
   // extension id and leaves that JS context standing when the extension reloads; what it
-  // invalidates is `chrome.runtime`. The orphan therefore keeps its globals — including
+  // invalidates is `webext.runtime`. The orphan therefore keeps its globals — including
   // this marker — and the recovery injection from runtime.onInstalled returned at this very
   // line. The document was then left with a recorder that can never send again, which is
   // precisely the state that produces a healthy MCP tunnel, a visibly alive MAIN-world
@@ -62,7 +64,7 @@
       try {
         incumbent.stop();
       } catch {
-        // Best effort. The orphan's loops are inert once its `chrome.runtime` is gone.
+        // Best effort. The orphan's loops are inert once its `webext.runtime` is gone.
       }
     }
     globalThis.__CLF_CONTENT_RECORDER__ = recorderHandle;
@@ -151,12 +153,12 @@
   }
 
   async function loadRenderPreference() {
-    if (TEST_MODE || !globalThis.chrome || !chrome.storage || !chrome.storage.local) {
+    if (TEST_MODE || !webext || !webext.storage || !webext.storage.local) {
       renderPreferenceReady = true;
       return;
     }
     try {
-      const stored = await chrome.storage.local.get([RENDER_STREAM_KEY, SHOW_TIMES_KEY]);
+      const stored = await webext.storage.local.get([RENDER_STREAM_KEY, SHOW_TIMES_KEY]);
       if (typeof stored[RENDER_STREAM_KEY] === 'boolean') RENDER_STREAM = stored[RENDER_STREAM_KEY];
       SHOW_TIMES = stored[SHOW_TIMES_KEY] === true;
     } catch {
@@ -576,6 +578,9 @@
   let job = null;
   /** Local tool calls the app still has running. Only ever a hint from /activity. */
   let pendingTools = 0;
+  /** Returned async exec sessions are not in-flight tools; they have their own lifecycle. */
+  let backgroundExec = { running: 0, exitedUnread: 0, lastTransitionAt: null };
+  let lastBackgroundExecTransitionAt = 0;
   let pressedAt = 0;
   let localError = '';
   let retirementHandledFor = null;
@@ -735,7 +740,7 @@
   async function sendToWorker(message) {
     if (!alive) return null;
     try {
-      return await chrome.runtime.sendMessage(message);
+      return await webext.runtime.sendMessage(message);
     } catch (err) {
       const text = String(err && err.message ? err.message : err);
       if (text.includes('Extension context invalidated')) alive = false;
@@ -905,7 +910,7 @@
         conversationId: conversationId || undefined
       });
       // `ok` means the service worker handled the message, not necessarily that its journal
-      // reached chrome.storage.session. Release page ownership only when the worker says the
+      // reached webext.storage.session. Release page ownership only when the worker says the
       // batch is durable, or pending=0 proves the local app already accepted it all. Keeping
       // an ambiguous batch can replay it, which downstream is designed to tolerate; dropping
       // it here cannot be repaired after a service-worker restart.
@@ -1101,6 +1106,8 @@
     since = 0;
     job = null;
     pendingTools = 0;
+    backgroundExec = { running: 0, exitedUnread: 0, lastTransitionAt: null };
+    lastBackgroundExecTransitionAt = 0;
     autoCompactReady = false;
     resumeIdentityPending = false;
     // A native compaction belongs to the conversation it was started in. Navigating away
@@ -1596,7 +1603,7 @@
     // transcript state during React churn while the same conversation and tab are still
     // alive. Treating that one-frame null as "closed" used to release the background tab
     // mapping and terminalise a bound worker even though its model kept running. Real tab
-    // lifetime is owned by chrome.tabs.onRemoved in background.js; an SPA move is proven
+    // lifetime is owned by webext.tabs.onRemoved in background.js; an SPA move is proven
     // here only when another concrete conversation id replaces the old one.
     if (id && id !== conversationId) {
       // A goal written into a chat that had no id yet, whose opening message is the reason
@@ -1850,7 +1857,17 @@
       // identity. DOM rows alone are presentation and never mint durable page_tool ids.
       if (!stallReported && Date.now() - lastChangeAt > STALL_MS) {
         stallReported = true;
-        emit({ kind: 'chat_error', text: 'No visible progress for ten minutes. The turn is still marked as generating.', turnId });
+        let text = 'No visible progress for ten minutes. The turn is still marked as generating.';
+        if (backgroundExec.exitedUnread > 0) {
+          text =
+            `${backgroundExec.exitedUnread} background exec result` +
+            `${backgroundExec.exitedUnread === 1 ? ' is' : 's are'} waiting to be consumed while the turn remains generating.`;
+        } else if (backgroundExec.running > 0) {
+          text =
+            `${backgroundExec.running} background exec session` +
+            `${backgroundExec.running === 1 ? ' is' : 's are'} still running while the turn has made no visible progress for ten minutes.`;
+        }
+        emit({ kind: 'chat_error', text, turnId });
       }
     }
 
@@ -4838,7 +4855,14 @@
     const forEpoch = epoch;
     const current = () => alive && conversationId === forId && epoch === forEpoch;
     try {
-      const reply = await ask({ type: 'activity', conversationId, since });
+      const reply = await ask({
+        type: 'activity',
+        conversationId,
+        since,
+        ...(compactCapture && typeof compactCapture.token === 'string'
+          ? { compactToken: compactCapture.token }
+          : {})
+      });
       if (!reply || reply.ok !== true || !reply.data) {
         // Keep waiting only for failures that can genuinely mean "the local app/worker is
         // not reachable yet". A structured application refusal is an answer to the identity
@@ -4899,11 +4923,12 @@
       let exactTurnActivity = false;
       const isWork = (entry) =>
         entry &&
-        entry.turnId === turnId &&
-        (entry.kind === 'tool_call' ||
-          entry.kind === 'page_tool' ||
-          entry.kind === 'progress' ||
-          entry.kind === 'assistant_message');
+        (entry.kind === 'agent_message' ||
+          (entry.turnId === turnId &&
+            (entry.kind === 'tool_call' ||
+              entry.kind === 'page_tool' ||
+              entry.kind === 'progress' ||
+              entry.kind === 'assistant_message')));
       for (const entry of freshStream) {
         const seq = Number(entry && entry.seq);
         if (!Number.isFinite(seq)) continue;
@@ -4962,6 +4987,33 @@
       if (Number.isFinite(nextSince) && nextSince > since) since = nextSince;
       job = data.job || null;
       pendingTools = Number.isFinite(Number(data.pendingTools)) ? Number(data.pendingTools) : 0;
+      const rawBackgroundExec =
+        data.backgroundExec && typeof data.backgroundExec === 'object' ? data.backgroundExec : {};
+      const nextBackgroundExec = {
+        running: Number.isFinite(Number(rawBackgroundExec.running))
+          ? Math.max(0, Number(rawBackgroundExec.running))
+          : 0,
+        exitedUnread: Number.isFinite(Number(rawBackgroundExec.exitedUnread))
+          ? Math.max(0, Number(rawBackgroundExec.exitedUnread))
+          : 0,
+        lastTransitionAt: Number.isFinite(Number(rawBackgroundExec.lastTransitionAt))
+          ? Number(rawBackgroundExec.lastTransitionAt)
+          : null
+      };
+      if (
+        generating &&
+        nextBackgroundExec.lastTransitionAt !== null &&
+        nextBackgroundExec.lastTransitionAt > lastBackgroundExecTransitionAt
+      ) {
+        lastChangeAt = Date.now();
+      }
+      if (nextBackgroundExec.lastTransitionAt !== null) {
+        lastBackgroundExecTransitionAt = Math.max(
+          lastBackgroundExecTransitionAt,
+          nextBackgroundExec.lastTransitionAt
+        );
+      }
+      backgroundExec = nextBackgroundExec;
       // The generation this chat has open in the app, if any. Only ever *read* by
       // resumeOpenTurn(), on the boot pull, and only to work out whether this document is
       // standing in the middle of a turn a previous one opened. See adoptTurnId.
@@ -5442,8 +5494,9 @@
     // 400k ceiling only changes whether the next stop can be revived.
     if (goalConfig && goalConfig.blocked === 'worker') return;
     if (!conversationId || !context || !context.auto || !autoCompactReady) return;
-    // Anything already running owns this chat, including a run started by hand.
-    if (nativeBusy || pressedAt > 0) return;
+    // Anything already running owns this chat, including the exact handoff generation
+    // even if the app-side continuation briefly stops projecting a busy job.
+    if (compactCapture || nativeBusy || pressedAt > 0) return;
     if (job && job.busy) return;
     // Three views of liveness, and any of them is enough. `CLF_DOM.generating()` flickers
     // false between phases of one answer, so demanding all three would miss long turns at
@@ -8395,7 +8448,7 @@
   }
 
   /** Apply popup changes immediately in every open ChatGPT tab. */
-  if (globalThis.chrome && chrome.storage && chrome.storage.onChanged) {
+  if (webext && webext.storage && webext.storage.onChanged) {
     const storageChanged = (changes, areaName) => {
       if (!alive) return;
       if (areaName !== 'local' || !changes) return;
@@ -8414,14 +8467,14 @@
       paint();
       renderStreams();
     };
-    chrome.storage.onChanged.addListener(storageChanged);
-    if (typeof chrome.storage.onChanged.removeListener === 'function') {
-      rememberCleanup(() => chrome.storage.onChanged.removeListener(storageChanged));
+    webext.storage.onChanged.addListener(storageChanged);
+    if (typeof webext.storage.onChanged.removeListener === 'function') {
+      rememberCleanup(() => webext.storage.onChanged.removeListener(storageChanged));
     }
   }
 
   /** Popup commands target this tab directly; no bridge credential is involved. */
-  if (globalThis.chrome && chrome.runtime && chrome.runtime.onMessage) {
+  if (webext && webext.runtime && webext.runtime.onMessage) {
     const runtimeMessage = (message, _sender, sendResponse) => {
       // Recorder takeover revokes every browser-facing control channel, not only observation.
       // A predecessor left registered in this same isolated world can otherwise win a ping or
@@ -8497,9 +8550,9 @@
       }
       return false;
     };
-    chrome.runtime.onMessage.addListener(runtimeMessage);
-    if (typeof chrome.runtime.onMessage.removeListener === 'function') {
-      rememberCleanup(() => chrome.runtime.onMessage.removeListener(runtimeMessage));
+    webext.runtime.onMessage.addListener(runtimeMessage);
+    if (typeof webext.runtime.onMessage.removeListener === 'function') {
+      rememberCleanup(() => webext.runtime.onMessage.removeListener(runtimeMessage));
     }
   }
 
@@ -8571,13 +8624,13 @@
   every(STATUS_MS, checkStatus);
 
   // Only now, with every binding above initialised, does this recorder answer for itself.
-  // `chrome.runtime.id` is the exact orphan test: an invalidated isolated world keeps its
+  // `webext.runtime.id` is the exact orphan test: an invalidated isolated world keeps its
   // globals and its timers but loses that property, so a successor can tell a live
   // recorder it must not disturb from a dead one it must replace.
   recorderHandle.healthy = () => {
     if (!alive) return false;
     try {
-      return !!globalThis.chrome && !!chrome.runtime && typeof chrome.runtime.id === 'string';
+      return !!webext && !!webext.runtime && typeof webext.runtime.id === 'string';
     } catch {
       return false;
     }

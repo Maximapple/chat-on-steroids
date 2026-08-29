@@ -104,6 +104,9 @@ interface Continuation {
   /** Chat A: where the session is attached until the commit lands. */
   from: string;
   openedAt: number;
+  touchedAt: number;
+  /** Last touch already queued for durable persistence. */
+  lastTouchPersistedAt: number;
   state: ContinuationState;
   /** The brief, once captured. Handed to whoever opens chat B, and to nothing else. */
   summary: string;
@@ -150,6 +153,8 @@ interface ContinuationRecord {
   from: string;
   to: string | null;
   openedAt: number;
+  /** Added after v2.0.2; absent in older durable snapshots. */
+  touchedAt?: number;
   state: ContinuationState;
   summary: string;
   handoffId: string | null;
@@ -171,6 +176,7 @@ function durableRecord(entry: Continuation): ContinuationRecord {
     from: entry.from,
     to: entry.to,
     openedAt: entry.openedAt,
+    touchedAt: entry.touchedAt,
     state: entry.state,
     summary: entry.summary.slice(0, 512 * 1024),
     handoffId: entry.handoffId,
@@ -215,6 +221,9 @@ function publishRecord(entry: Continuation, record: ContinuationRecord): void {
   // waiting out a window that is already over.
   if (record.state === 'committed' || record.state === 'aborted') endResumeClaim(entry.token);
   entry.to = record.to;
+  const touchedAt = record.touchedAt ?? record.openedAt;
+  entry.touchedAt = touchedAt;
+  entry.lastTouchPersistedAt = Math.max(entry.lastTouchPersistedAt, touchedAt);
   entry.state = record.state;
   entry.summary = record.summary;
   entry.handoffId = record.handoffId;
@@ -229,6 +238,8 @@ async function transitionNow(
 ): Promise<ContinuationRecord> {
   const current = durableRecord(entry);
   const next = derive(current);
+  // Semantic forward progress renews the waiting lease too.
+  next.touchedAt = Date.now();
   try {
     // Persist the proposed semantic state before publishing it into the live transaction.
     // If the durable boundary rejects, callers still see the previous state and can retry or
@@ -291,7 +302,7 @@ const view = (entry: Continuation): ContinuationView => ({
 });
 
 const isOpen = (entry: Continuation): boolean =>
-  entry.state !== 'committed' && entry.state !== 'aborted' && Date.now() - entry.openedAt < CONTINUATION_TTL_MS;
+  entry.state !== 'committed' && entry.state !== 'aborted' && Date.now() - entry.touchedAt < CONTINUATION_TTL_MS;
 
 function sweep(): void {
   for (const entry of [...byToken.values()]) {
@@ -307,7 +318,7 @@ function sweep(): void {
       if (Date.now() - entry.openedAt > CONTINUATION_TTL_MS * 2) byToken.delete(entry.token);
       continue;
     }
-    if (Date.now() - entry.openedAt >= CONTINUATION_TTL_MS) {
+    if (Date.now() - entry.touchedAt >= CONTINUATION_TTL_MS) {
       abortContinuation(entry.token, 'it took too long and was given up on');
     }
   }
@@ -326,6 +337,32 @@ export function continuationByToken(token: string): ContinuationView | null {
   sweep();
   const entry = byToken.get(token);
   return entry ? view(entry) : null;
+}
+
+/**
+ * Renews only an exact, already-armed handoff generation that is still actively reporting
+ * from the browser. A stale token cannot resurrect itself after a full TTL of silence.
+ */
+export function touchContinuation(token: string, sessionId: string, conversationId: string): boolean {
+  const entry = byToken.get(token);
+  if (
+    !entry ||
+    entry.sessionId !== sessionId ||
+    entry.from !== conversationId ||
+    entry.state !== 'awaiting-summary' ||
+    !entry.armed
+  ) return false;
+
+  const now = Date.now();
+  if (now - entry.touchedAt >= CONTINUATION_TTL_MS) return false;
+  entry.touchedAt = now;
+  // Polling is frequent; persist at most twice a minute. The last durable touch remains
+  // comfortably inside the ten-minute expiry window if the app crashes between writes.
+  if (now - entry.lastTouchPersistedAt >= 30_000) {
+    entry.lastTouchPersistedAt = now;
+    changed();
+  }
+  return true;
 }
 
 /**
@@ -480,6 +517,8 @@ function makeContinuation(sessionId: string, fromConversationId: string): Contin
     sessionId,
     from: fromConversationId,
     openedAt: Date.now(),
+    touchedAt: Date.now(),
+    lastTouchPersistedAt: Date.now(),
     state: 'awaiting-summary',
     summary: '',
     handoffId: null,
@@ -1030,7 +1069,7 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
       raw.from.length === 0 || raw.from.length > 256 ||
       !validStates.has(raw.state) ||
       !Number.isFinite(raw.openedAt) ||
-      now - raw.openedAt >= CONTINUATION_TTL_MS * 2
+      now - (typeof raw.touchedAt === 'number' && Number.isFinite(raw.touchedAt) ? raw.touchedAt : raw.openedAt) >= CONTINUATION_TTL_MS * 2
     ) {
       continue;
     }
@@ -1040,6 +1079,9 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
       from: raw.from,
       to: typeof raw.to === 'string' && raw.to ? raw.to : null,
       openedAt: raw.openedAt,
+      touchedAt: typeof raw.touchedAt === 'number' && Number.isFinite(raw.touchedAt) ? raw.touchedAt : raw.openedAt,
+      lastTouchPersistedAt:
+        typeof raw.touchedAt === 'number' && Number.isFinite(raw.touchedAt) ? raw.touchedAt : raw.openedAt,
       state: raw.state,
       summary: typeof raw.summary === 'string' ? raw.summary.slice(0, 512 * 1024) : '',
       handoffId: typeof raw.handoffId === 'string' ? raw.handoffId : null,
@@ -1050,7 +1092,7 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
       error: typeof raw.error === 'string' ? raw.error : null
     };
     const waitingExpired =
-      entry.state !== 'committed' && entry.state !== 'aborted' && now - entry.openedAt >= CONTINUATION_TTL_MS;
+      entry.state !== 'committed' && entry.state !== 'aborted' && now - entry.touchedAt >= CONTINUATION_TTL_MS;
     if (entry.handoffId) {
       try {
         entry.handoff = await readHandoff(entry.sessionId, entry.handoffId);
