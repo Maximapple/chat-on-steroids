@@ -11,7 +11,8 @@ const connection = source('src/main/connection.ts');
 describe('macOS Desktop PR #28 hardening', () => {
   it('fails closed unless the exact requested native window is foreground', () => {
     expect(swift).toContain('FOCUS_POLL_TIMEOUT_SECONDS');
-    expect(swift).toContain('if foregroundWindowID() == id { return true }');
+    expect(swift).toContain('if inputTargetMatches(row) { return true }');
+    expect(swift).toContain('focusedAXWindowID(for: row.pid)');
     expect(swift).not.toContain('foregroundWindowID() == id ||');
     expect(swift).toContain('no accessible window convincingly matches window');
     expect(swift).toContain('AX_WINDOW_GEOMETRY_TOLERANCE');

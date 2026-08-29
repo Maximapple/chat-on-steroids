@@ -50,15 +50,15 @@ const MAX_CLIPBOARD_LINE_CHARS = 16_000;
 const MAX_CLIPBOARD_OUTPUT_CHARS = 64_000;
 
 const computerActionArg = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('click_ref'), ref: z.string().min(1).max(64) }).strict().describe('Click a control by ref from observe.'),
+  z.object({ type: z.literal('click_ref'), ref: z.string().min(1).max(64) }).strict().describe('Click ref.'),
   z
     .object({ type: z.literal('set_value'), ref: z.string().min(1).max(64), text: z.string().max(20_000) })
     .strict()
-    .describe('Set a text control’s value directly by ref.'),
+    .describe('Set text by ref.'),
   z
     .object({ type: z.literal('click'), x: imageCoordinateArg, y: imageCoordinateArg, button: mouseButtonArg.optional() })
     .strict()
-    .describe('Click at image coordinates.'),
+    .describe('Click image point.'),
   z
     .object({
       type: z.literal('double_click'),
@@ -67,12 +67,12 @@ const computerActionArg = z.discriminatedUnion('type', [
       button: mouseButtonArg.optional()
     })
     .strict()
-    .describe('Double-click at image coordinates.'),
-  z.object({ type: z.literal('move'), x: imageCoordinateArg, y: imageCoordinateArg }).strict().describe('Move the pointer.'),
+    .describe('Double-click image point.'),
+  z.object({ type: z.literal('move'), x: imageCoordinateArg, y: imageCoordinateArg }).strict().describe('Move pointer.'),
   z
     .object({ type: z.literal('drag'), path: z.array(pointArg).min(2).max(64), button: mouseButtonArg.optional() })
     .strict()
-    .describe('Press, follow the path, release.'),
+    .describe('Drag path.'),
   z
     .object({
       type: z.literal('scroll'),
@@ -82,19 +82,19 @@ const computerActionArg = z.discriminatedUnion('type', [
       scroll_y: z.number().int().min(-10_000).max(10_000).optional()
     })
     .strict()
-    .describe('Scroll at a point.'),
-  z.object({ type: z.literal('type'), text: z.string().max(4000) }).strict().describe('Type text into whatever has focus.'),
+    .describe('Scroll at point.'),
+  z.object({ type: z.literal('type'), text: z.string().max(4000) }).strict().describe('Type in targetWindow.'),
   z
     .object({ type: z.literal('keypress'), keys: z.array(z.string().max(20)).min(1).max(6) })
     .strict()
-    .describe('Press keys together, e.g. ["ctrl","s"] on Windows or ["command","s"] on macOS.'),
-  z.object({ type: z.literal('focus'), window: windowIdArg }).strict().describe('Bring a window to the front.'),
+    .describe('Press keys together.'),
+  z.object({ type: z.literal('focus'), window: windowIdArg }).strict().describe('Focus window.'),
   z.object({ type: z.literal('wait'), ms: z.number().int().min(0).max(10_000).optional() }).strict().describe('Pause.'),
-  z.object({ type: z.literal('read_clipboard') }).strict().describe('Return the clipboard text.'),
+  z.object({ type: z.literal('read_clipboard') }).strict().describe('Read clipboard.'),
   z
     .object({ type: z.literal('write_clipboard'), text: z.string().max(100_000) })
     .strict()
-    .describe('Replace the clipboard text; pair with keypress ctrl+v to paste.')
+    .describe('Write clipboard.')
 ]);
 
 const verificationArg = z
@@ -331,8 +331,8 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
       {
         title: 'Control mouse and keyboard',
         description:
-          'Run ordered desktop actions. Prefer refs from observe; pixels require frameId and target geometry is rechecked. ' +
-          'verify waits for a postcondition. Capture and clipboard steps stay in the batch.',
+          'Act on one desktop state. Prefer refs; pixels need frameId; keyboard needs targetWindow. ' +
+          'One mutation per call; inspect the returned capture before the next.',
         inputSchema: z
           .object({
             actions: z.array(computerActionArg).min(1).max(20),
@@ -341,21 +341,39 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
               .int()
               .min(1)
               .optional()
-              .describe('Required for coordinate actions or captureCrop.'),
+              .describe('Required for pixel actions/crops.'),
+            targetWindow: windowIdArg.optional().describe(
+              'Window expected to receive input; fails closed if focus differs.'
+            ),
             verify: verificationArg.optional(),
-            captureAfter: z.boolean().optional().describe('Return a fresh screenshot after the actions. Default false.'),
-            captureWindow: windowIdArg.optional().describe('Result capture: this window.'),
-            captureFull: z.boolean().optional().describe('Result capture: all monitors.'),
+            captureAfter: z.boolean().optional().describe('Fresh screenshot after mutations; default true with screen access.'),
+            captureWindow: windowIdArg.optional().describe('Capture this window.'),
+            captureFull: z.boolean().optional().describe('Capture all monitors.'),
             captureMaxWidth: z
               .number()
               .int()
               .min(320)
               .max(MAX_SCREENSHOT_WIDTH)
               .optional()
-              .describe(`Result capture width. Default ${DEFAULT_SCREENSHOT_WIDTH}.`),
-            captureCrop: cropArg.optional().describe('Result crop in the input frame.')
+              .describe(`Capture width; default ${DEFAULT_SCREENSHOT_WIDTH}.`),
+            captureCrop: cropArg.optional().describe('Crop in input frame.')
           })
           .superRefine((input, ctx) => {
+            const decisionActions = input.actions.filter(
+              (action) =>
+                action.type !== 'wait' &&
+                action.type !== 'read_clipboard' &&
+                action.type !== 'write_clipboard' &&
+                action.type !== 'move' &&
+                action.type !== 'focus'
+            );
+            if (decisionActions.length > 1) {
+              ctx.addIssue({
+                code: 'custom',
+                path: ['actions'],
+                message: 'Closed-loop desktop control allows one UI-changing action per computer call (plus focus/move/wait/clipboard setup). Inspect the returned screenshot before the next mutation.'
+              });
+            }
             if (input.verify) {
               const needsWindow = input.verify.until === 'foreground';
               const needsMatch = input.verify.until !== 'foreground';
@@ -377,7 +395,13 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
               }
             }
             const verifyCapture = input.verify?.capture === 'always' || input.verify?.capture === 'on_change';
-            const willCapture = input.captureAfter === true || verifyCapture;
+            const autoCapture =
+              caps.screen &&
+              input.captureAfter !== false &&
+              input.actions.some(
+                (action) => action.type !== 'wait' && action.type !== 'read_clipboard' && action.type !== 'write_clipboard'
+              );
+            const willCapture = input.captureAfter === true || verifyCapture || autoCapture;
             const captureFields = ['captureWindow', 'captureFull', 'captureMaxWidth', 'captureCrop'] as const;
             if (!willCapture) {
               for (const field of captureFields) {
@@ -402,7 +426,7 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
           .strict(),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
       },
-      async ({ actions, frameId, verify, captureAfter, captureWindow, captureFull, captureMaxWidth, captureCrop }) =>
+      async ({ actions, frameId, targetWindow, verify, captureAfter, captureWindow, captureFull, captureMaxWidth, captureCrop }) =>
         guard('computer', async () => {
           // Not reg.guarded: this tool covers two permissions. Pointer and keyboard steps
           // need "control", the clipboard steps need their own, and one blanket refusal
@@ -467,7 +491,11 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
           logInfo(`tool computer ${parsed.map((a) => a.type).join(', ')}`);
           noteDetail(parsed.map((a) => a.type).join(', '));
           const verifyCapture = verify?.capture === 'always' || verify?.capture === 'on_change';
-          const wantsCapture = captureAfter === true || verifyCapture;
+          const mutatesDesktop = parsed.some(
+            (action) => action.type !== 'wait' && action.type !== 'read_clipboard' && action.type !== 'write_clipboard'
+          );
+          const autoCapture = caps.screen && captureAfter !== false && mutatesDesktop;
+          const wantsCapture = captureAfter === true || verifyCapture || autoCapture;
           if ((verify || wantsCapture) && !caps.screen) {
             return fail('TOOL_DISABLED: verification and result capture need the See the screen permission.');
           }
@@ -488,15 +516,18 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
           // before anyone else can touch the desktop.
           const result = await actAndCapture(parsed, {
             frameId,
+            targetWindow,
             verify: parsedVerify,
             capture:
               wantsCapture
                 ? {
                     window: captureWindow,
                     full: captureFull,
-                    maxWidth: captureMaxWidth,
+                    maxWidth: captureMaxWidth ?? (autoCapture ? 1600 : undefined),
                     crop: captureCrop,
-                    preferActiveWindow: ctx.privacyScreenshots
+                    preferActiveWindow:
+                      ctx.privacyScreenshots ||
+                      (autoCapture && captureWindow === undefined && captureFull !== true && captureCrop === undefined)
                   }
                 : undefined
           });
@@ -531,7 +562,8 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
           const verified = result.verification
             ? `\nVerified ${result.verification.until} in ${result.verification.elapsedMs} ms: ${result.verification.detail}.`
             : '';
-          const done = `Done ${result.completedCount}/${parsed.length} via ${routeSummary}: ${parsed.map((a) => a.type).join(', ')}. ${pointer}${clipboard ? `\n${clipboard}` : ''}${verified}`;
+          const captureFallback = result.captureFallback ? `\nCapture note: ${result.captureFallback}.` : '';
+          const done = `Done ${result.completedCount}/${parsed.length} via ${routeSummary}: ${parsed.map((a) => a.type).join(', ')}. ${pointer}${clipboard ? `\n${clipboard}` : ''}${verified}${captureFallback}`;
           const shot = result.screenshot;
           if (shot) {
             return {

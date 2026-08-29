@@ -947,7 +947,7 @@ export interface PointerResult {
 
 export async function act(
   actions: Action[],
-  opts: { frameId?: number } = {}
+  opts: { frameId?: number; targetWindow?: number } = {}
 ): Promise<ActionResult> {
   return exclusive(() => actLocked(actions, opts));
 }
@@ -965,6 +965,7 @@ export async function actAndCapture(
   actions: Action[],
   opts: {
     frameId?: number;
+    targetWindow?: number;
     capture?: {
       window?: number;
       full?: boolean;
@@ -975,7 +976,7 @@ export async function actAndCapture(
     };
     verify?: VerificationSpec;
   } = {}
-): Promise<ActionResult & { screenshot: Screenshot | null; verification: VerificationResult | null }> {
+): Promise<ActionResult & { screenshot: Screenshot | null; verification: VerificationResult | null; captureFallback: string | null }> {
   return exclusive(async () => {
     const before = opts.frameId === undefined ? lastFrame : frameById(opts.frameId);
     // capture.crop is expressed in pixels of the screenshot the caller saw, exactly like a
@@ -1007,7 +1008,7 @@ export async function actAndCapture(
         );
       }
     }
-    if (!opts.capture) return { ...result, screenshot: null, verification };
+    if (!opts.capture) return { ...result, screenshot: null, verification, captureFallback: null };
 
     const { preferActiveWindow, ...capture } = opts.capture;
     // Resolved here rather than by the caller: the actions may have changed which window
@@ -1015,10 +1016,31 @@ export async function actAndCapture(
     if (preferActiveWindow && capture.window === undefined && capture.full !== true && capture.crop === undefined) {
       capture.window = (await activeWindow()).window?.id;
     }
+    let resultScreenshot: Screenshot;
+    let captureFallback: string | null = null;
+    try {
+      resultScreenshot = await screenshotLocked(capture, before);
+    } catch (err) {
+      const targetUnavailable =
+        capture.window !== undefined &&
+        err instanceof ComputerError &&
+        /WINDOW_NOT_FOUND|STALE_FRAME/.test(err.message);
+      if (!targetUnavailable) throw err;
+
+      const active = (await activeWindow()).window;
+      if (active) {
+        resultScreenshot = await screenshotLocked({ window: active.id, maxWidth: capture.maxWidth });
+        captureFallback = `target window ${capture.window} closed or changed before result capture; captured active window ${active.id} instead`;
+      } else {
+        resultScreenshot = await screenshotLocked({ maxWidth: capture.maxWidth });
+        captureFallback = `target window ${capture.window} closed or changed before result capture; captured the primary display instead`;
+      }
+    }
     return {
       ...result,
-      screenshot: await screenshotLocked(capture, before),
-      verification
+      screenshot: resultScreenshot,
+      verification,
+      captureFallback
     };
   });
 }
@@ -1099,7 +1121,7 @@ async function verifyDesktopLocked(spec: VerificationSpec): Promise<Verification
 
 async function actLocked(
   actions: Action[],
-  opts: { frameId?: number }
+  opts: { frameId?: number; targetWindow?: number }
 ): Promise<ActionResult> {
   const pointing = new Set(['move', 'click', 'double_click', 'scroll', 'drag']);
   const needsFrame = actions.some((a) => pointing.has(a.type));
@@ -1171,6 +1193,22 @@ async function actLocked(
   for (const action of actions) {
     if (action.type !== 'click_ref' && action.type !== 'set_value') continue;
     if (!uiTargets.has(action.ref)) uiTargets.set(action.ref, uiTarget(action.ref));
+  }
+
+  const targetCandidates = new Set<number>();
+  if (requestedFrame?.windowId !== null && requestedFrame?.windowId !== undefined) targetCandidates.add(requestedFrame.windowId);
+  for (const target of uiTargets.values()) targetCandidates.add(target.window);
+  for (const action of actions) if (action.type === 'focus') targetCandidates.add(action.window);
+  const inferredTargetWindow =
+    opts.targetWindow ?? (targetCandidates.size === 1 ? [...targetCandidates][0] : undefined);
+  if (opts.targetWindow !== undefined) {
+    for (const candidate of targetCandidates) {
+      if (candidate !== opts.targetWindow) {
+        throw new ComputerError(
+          `TARGET_WINDOW_CONFLICT: this batch is pinned to window ${opts.targetWindow}, but an action/frame targets window ${candidate}. Split cross-window work into separate computer calls.`
+        );
+      }
+    }
   }
 
   const mapOne = (action: Action): Record<string, unknown> => {
@@ -1252,6 +1290,7 @@ async function actLocked(
       reply = await runHelper({
         op: 'act',
         actions: sending,
+        ...(inferredTargetWindow === undefined ? {} : { targetWindow: inferredTargetWindow }),
         ...(needsFrame
           ? {
               frame: {
