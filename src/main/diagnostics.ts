@@ -296,7 +296,8 @@ export async function runDiagnostics(): Promise<Diagnosis> {
     //    thinks of us. Read together because the route check needs the client's uptime
     //    to tell "not working" apart from "has not finished starting".
     const [health, client] = await Promise.all([readPollHealth(base), readClientStatus(base)]);
-    checks.push(describeRoute(health, client?.uptimeSeconds ?? null));
+    const routeCheck = describeRoute(health, client?.uptimeSeconds ?? null);
+    checks.push(routeCheck);
 
     if (client) {
       checks.push({
@@ -308,7 +309,7 @@ export async function runDiagnostics(): Promise<Diagnosis> {
             ? 'The tunnel did not report a probe result for the main channel.'
             : `Probe of the local MCP server: ${client.probe}.`
       });
-      if (client.metadataError) {
+      if (client.metadataError && routeCheck.status !== 'pass') {
         checks.push({
           name: 'Last tunnel error',
           status: 'fail',

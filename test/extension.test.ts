@@ -123,10 +123,10 @@ describe('extension release metadata', () => {
     expect(html).not.toContain('id="overwriteBtn"');
     expect(js).toContain("const RENDER_STREAM_KEY = 'renderStreamEnabled';");
     expect(js).toContain("const SHOW_TIMES_KEY = 'showStreamTimes';");
-    expect(js).toContain('chrome.storage.local.set');
+    expect(js).toContain('webext.storage.local.set');
     expect(js).toContain("type: 'overwriteNow'");
     expect(backgroundSource).toContain('async overwriteNow()');
-    expect(backgroundSource).toContain("chrome.tabs.sendMessage(id, { type: 'clf-overwrite-now' })");
+    expect(backgroundSource).toContain("webext.tabs.sendMessage(id, { type: 'clf-overwrite-now' })");
   });
 });
 

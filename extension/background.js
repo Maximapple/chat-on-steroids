@@ -1,7 +1,7 @@
 /**
  * Service worker: the only part of the extension that talks to the app.
  *
- * The pairing token lives here and in chrome.storage.local, never in a content
+ * The pairing token lives here and in webext.storage.local, never in a content
  * script and never in the page. A content script that were somehow compromised can
  * ask this worker to post observations about the page it is already reading; it
  * cannot read the token, cannot reach the app on its own (the app refuses a
@@ -15,10 +15,12 @@
  * its page: a reload, a navigation or a crash takes its memory with it, and ChatGPT
  * virtualises old turns, so what is gone is often gone for good. So a content script
  * hands an observation over immediately and the durable copy lives here, in
- * chrome.storage.session — which survives this worker being shut down (Chrome does that
+ * webext.storage.session — which survives this worker being shut down (Chrome does that
  * after seconds of idling) and dies with the browser, which is the right lifetime for a
  * record the app has not accepted yet.
  */
+
+const webext = globalThis.browser ?? globalThis.chrome;
 
 const PORTS = [8765, 8766, 8767, 8768, 8769];
 const HELLO_TIMEOUT_MS = 1200;
@@ -27,7 +29,7 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const BRIDGE_PROTOCOL = 8;
 
 /**
- * Journal caps. The byte figure is what actually matters — chrome.storage.session has a
+ * Journal caps. The byte figure is what actually matters — webext.storage.session has a
  * ten-megabyte budget for the whole extension — and the count keeps a pathological run
  * of tiny events from making every write expensive.
  */
@@ -150,7 +152,7 @@ let ackingCommands = false;
  * app-side session and lets `/closed` mean the last live tab really left.
  *
  * Persisted in storage.session because Chrome routinely stops this worker while tabs stay
- * open. `chrome.tabs.onRemoved` wakes it again and can then retire the right conversation.
+ * open. `webext.tabs.onRemoved` wakes it again and can then retire the right conversation.
  */
 let tabConversations = {};
 /** Browser-supplied document owner for each tab, plus bounded retired owners. */
@@ -204,14 +206,14 @@ function load() {
 }
 
 async function loadOnce() {
-  const stored = await chrome.storage.local.get(['port', 'token', 'disconnected', 'deferredRevivals', 'commandAckOutbox']);
+  const stored = await webext.storage.local.get(['port', 'token', 'disconnected', 'deferredRevivals', 'commandAckOutbox']);
   port = typeof stored.port === 'number' ? stored.port : null;
   token = typeof stored.token === 'string' ? stored.token : null;
   // Deliberately in `local` rather than `session`: a choice to disconnect that a browser
   // restart undoes is not a choice, it is a delay.
   disconnected = stored.disconnected === true;
   deferredRevivals = Array.isArray(stored.deferredRevivals) ? stored.deferredRevivals.slice(-100) : [];
-  const live = await chrome.storage.session.get([
+  const live = await webext.storage.session.get([
     'settled',
     'journal',
     'tabConversations',
@@ -256,7 +258,7 @@ async function loadOnce() {
 }
 
 async function persist() {
-  await chrome.storage.local.set({ port, token, disconnected });
+  await webext.storage.local.set({ port, token, disconnected });
 }
 
 let liveWriteQueue = Promise.resolve();
@@ -264,7 +266,7 @@ let liveWriteQueue = Promise.resolve();
 function persistLive() {
   const write = liveWriteQueue.then(() =>
     Promise.all([
-      chrome.storage.session.set({
+      webext.storage.session.set({
         settled: settled.slice(-40),
         tabConversations,
         tabDocuments,
@@ -278,7 +280,7 @@ function persistLive() {
       }),
       // Only small command-control metadata crosses browser restarts. No transcript and no
       // revival text is duplicated into extension storage.
-      chrome.storage.local.set({
+      webext.storage.local.set({
         commandAckOutbox: commandAckOutbox.slice(-200),
         deferredRevivals: deferredRevivals.slice(-100)
       })
@@ -304,13 +306,13 @@ let journalWriteQueue = Promise.resolve();
 
 async function persistJournalNow() {
   try {
-    await chrome.storage.session.set({ journal });
+    await webext.storage.session.set({ journal });
     durabilityGap = false;
     return true;
   } catch {
     makeRoom(true);
     try {
-      await chrome.storage.session.set({ journal });
+      await webext.storage.session.set({ journal });
       durabilityGap = false;
       return true;
     } catch (err) {
@@ -353,7 +355,7 @@ const ESSENTIAL = new Set(['user_message', 'assistant_message', 'chat_error', 't
 
 /**
  * Cached per-entry serialised size, kept out-of-band so measuring an entry does not
- * mutate the thing we later write to chrome.storage.session.
+ * mutate the thing we later write to webext.storage.session.
  *
  * The old cache lived as `entry.b`. That made every measured entry several bytes larger
  * after it had been measured, so the journal could report itself under the 4 MiB cap
@@ -418,7 +420,7 @@ function gapEntry(source, kind, text) {
  * Both matter and for different reasons: the count keeps a run of tiny events from
  * making every write expensive, and the byte figure is the one Chrome enforces. Being
  * under one while over the other is what quietly turned this journal back into plain
- * RAM, because chrome.storage.session then refused the write.
+ * RAM, because webext.storage.session then refused the write.
  *
  * Progress lines go first, oldest first. Essentials are given up only when dropping
  * every last progress line still leaves the journal over budget — and when that
@@ -777,8 +779,8 @@ function scheduleRetry() {
   if (journal.length === 0 && closeOutbox.length === 0 && commandAckOutbox.length === 0) return;
   if (retryAlarmScheduled) return;
   try {
-    if (chrome.alarms && typeof chrome.alarms.create === 'function') {
-      chrome.alarms.create(RETRY_ALARM, { delayInMinutes: 0.25, periodInMinutes: 1 });
+    if (webext.alarms && typeof webext.alarms.create === 'function') {
+      webext.alarms.create(RETRY_ALARM, { delayInMinutes: 0.25, periodInMinutes: 1 });
       retryAlarmScheduled = true;
     }
   } catch {
@@ -789,7 +791,7 @@ function scheduleRetry() {
 function clearRetryIfIdle() {
   if (journal.length > 0 || closeOutbox.length > 0 || commandAckOutbox.length > 0) return;
   try {
-    if (chrome.alarms && typeof chrome.alarms.clear === 'function') void chrome.alarms.clear(RETRY_ALARM);
+    if (webext.alarms && typeof webext.alarms.clear === 'function') void webext.alarms.clear(RETRY_ALARM);
     retryAlarmScheduled = false;
   } catch {
     // No alarms API in narrow test harnesses.
@@ -814,7 +816,7 @@ async function hello(candidate) {
 function versionHeaders() {
   let version = '0';
   try {
-    version = chrome.runtime.getManifest().version;
+    version = webext.runtime.getManifest().version;
   } catch {
     // Not worth failing a request over.
   }
@@ -1335,7 +1337,7 @@ function messageEpoch(message) {
 /**
  * Whether a terminal lease was a wrong prediction about a document that is still running.
  *
- * `markTerminal` is speculative by construction: it fires from `chrome.tabs.onUpdated`
+ * `markTerminal` is speculative by construction: it fires from `webext.tabs.onUpdated`
  * the moment Chrome says a navigation is *starting*, and stamps whichever document the tab
  * currently holds. The design then assumed a replacement document would always arrive and
  * clear the stamp. When one does not — an aborted navigation, a redirect that reports a
@@ -1359,7 +1361,7 @@ async function terminalPredictionWrong(id, key, documentId) {
   if (typeof tabDocuments[key] !== 'string' || tabDocuments[key] !== documentId) return false;
   let tab = null;
   try {
-    tab = await chrome.tabs.get(id);
+    tab = await webext.tabs.get(id);
   } catch {
     return false;
   }
@@ -1600,7 +1602,7 @@ function conversationFromUrl(value) {
   try {
     const url = new URL(String(value || ''));
     if (url.protocol !== 'https:' || (url.hostname !== 'chatgpt.com' && url.hostname !== 'chat.openai.com')) return null;
-    const match = /^\/c\/([0-9a-f-]{8,64})/i.exec(url.pathname);
+    const match = /(?:^|\/)c\/([0-9a-f-]{8,64})(?:\/|$)/i.exec(url.pathname);
     return match ? match[1] : null;
   } catch {
     return null;
@@ -1660,7 +1662,7 @@ const HANDLERS = {
       compatible: found ? found.compatible !== false : null,
       appVersion: found ? found.version : null,
       appProtocol: found ? found.bridge : null,
-      extensionVersion: chrome.runtime.getManifest().version,
+      extensionVersion: webext.runtime.getManifest().version,
       extensionProtocol: BRIDGE_PROTOCOL,
       ...(pairingError ? { pairError: pairingError } : {})
     };
@@ -1705,7 +1707,7 @@ const HANDLERS = {
     // manifest.json already authorize URL-filtered tabs.query on these origins.
     let discovered = [];
     try {
-      discovered = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
+      discovered = await webext.tabs.query({ url: CHATGPT_TAB_URLS });
     } catch {
       discovered = [];
     }
@@ -1720,7 +1722,7 @@ const HANDLERS = {
     let applied = 0;
     for (const id of tabs) {
       try {
-        const result = await chrome.tabs.sendMessage(id, { type: 'clf-overwrite-now' });
+        const result = await webext.tabs.sendMessage(id, { type: 'clf-overwrite-now' });
         if (result && result.ok === true) applied += 1;
       } catch {
         // A tab may be between navigations/reloads and temporarily have no receiver. The
@@ -1740,7 +1742,7 @@ const HANDLERS = {
     await load();
     let active = null;
     try {
-      const found = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      const found = await webext.tabs.query({ active: true, lastFocusedWindow: true });
       active = found && found.length > 0 ? found[0] : null;
     } catch {
       active = null;
@@ -1756,7 +1758,7 @@ const HANDLERS = {
     let page = null;
     if (tab !== null && isChat) {
       try {
-        page = await chrome.tabs.sendMessage(tab, { type: 'clf-page-status' });
+        page = await webext.tabs.sendMessage(tab, { type: 'clf-page-status' });
       } catch {
         // No live recorder in that document: an unreloaded tab from before this extension
         // was loaded, or a page still starting up. Reported as such rather than as an error.
@@ -1766,7 +1768,7 @@ const HANDLERS = {
 
     let chatTabs = 0;
     try {
-      chatTabs = (await chrome.tabs.query({ url: CHATGPT_TAB_URLS })).length;
+      chatTabs = (await webext.tabs.query({ url: CHATGPT_TAB_URLS })).length;
     } catch {
       chatTabs = 0;
     }
@@ -1889,7 +1891,8 @@ const HANDLERS = {
     const query =
       `?conversationId=${encodeURIComponent(message.conversationId)}` +
       `&since=${Number(message.since) || 0}` +
-      `&goalClient=${encodeURIComponent(String(source.tab))}`;
+      `&goalClient=${encodeURIComponent(String(source.tab))}` +
+      `&compactToken=${encodeURIComponent(typeof message.compactToken === 'string' ? message.compactToken : '')}`;
     const result = await call(`/activity${query}`);
     return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
   },
@@ -1898,7 +1901,7 @@ const HANDLERS = {
     await load();
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
     try {
-      await chrome.scripting.executeScript({
+      await webext.scripting.executeScript({
         target: { tabId: source.tab, documentIds: [source.documentId] },
         world: 'MAIN',
         files: ['fiber.js']
@@ -2003,10 +2006,10 @@ const HANDLERS = {
       if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
     }
     try {
-      const activated = await chrome.tabs.update(source.tab, { active: true });
+      const activated = await webext.tabs.update(source.tab, { active: true });
       const senderWindow = sender && sender.tab && typeof sender.tab.windowId === 'number' ? sender.tab.windowId : null;
       const windowId = senderWindow ?? (activated && typeof activated.windowId === 'number' ? activated.windowId : null);
-      if (windowId !== null) await chrome.windows.update(windowId, { focused: true });
+      if (windowId !== null) await webext.windows.update(windowId, { focused: true });
     } catch {
       // Focus is a courtesy. The page owns Goal regardless, so browser/UI refusal must not turn
       // a valid hidden completion into a failed continuation.
@@ -2138,7 +2141,7 @@ const HANDLERS = {
     if (isFallback && senderTabId !== null) {
       let tabs = [];
       try {
-        tabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
+        tabs = await webext.tabs.query({ url: CHATGPT_TAB_URLS });
       } catch {
         tabs = [];
       }
@@ -2187,7 +2190,7 @@ const HANDLERS = {
   }
 };
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+webext.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const handler = message && typeof message.type === 'string' ? HANDLERS[message.type] : null;
   if (!handler) {
     sendResponse({ ok: false, error: 'unknown_message' });
@@ -2269,7 +2272,7 @@ async function reuseOpenChatTab(openedTabId, conversation, commandId) {
   await load();
   let tabs = [];
   try {
-    tabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
+    tabs = await webext.tabs.query({ url: CHATGPT_TAB_URLS });
   } catch {
     return false;
   }
@@ -2288,7 +2291,7 @@ async function reuseOpenChatTab(openedTabId, conversation, commandId) {
   }
   for (const candidate of existing) {
     try {
-      const alive = await chrome.tabs.sendMessage(candidate.id, { type: 'clf-recorder-ping' });
+      const alive = await webext.tabs.sendMessage(candidate.id, { type: 'clf-recorder-ping' });
       if (!alive || alive.ok !== true || alive.recorderVersion !== PAGE_RECORDER_VERSION) continue;
     } catch {
       // Two copies of one chat can survive an extension reload differently. A dead first match
@@ -2297,7 +2300,7 @@ async function reuseOpenChatTab(openedTabId, conversation, commandId) {
     }
     let reply = null;
     try {
-      reply = await chrome.tabs.sendMessage(candidate.id, {
+      reply = await webext.tabs.sendMessage(candidate.id, {
         type: 'clf-run-command',
         id: commandId,
         conversationId: conversation
@@ -2312,7 +2315,7 @@ async function reuseOpenChatTab(openedTabId, conversation, commandId) {
     // This document now owns the command durably. The marked fallback can no longer redeem it,
     // so removing that tab cannot destroy the only owner or cause duplicate user-message sends.
     try {
-      await chrome.tabs.remove(openedTabId);
+      await webext.tabs.remove(openedTabId);
     } catch {
       // The fallback may already have been closed by the user. Ownership is still safely here.
     }
@@ -2366,8 +2369,8 @@ function maybeReuseRevivalTab(tabId, url) {
 
 // Guarded like every other listener registration here: an older Chrome, or a harness that
 // stubs only the tab APIs this extension used to need, must not fail to load the worker.
-if (chrome.tabs && chrome.tabs.onCreated && typeof chrome.tabs.onCreated.addListener === 'function') {
-  chrome.tabs.onCreated.addListener((tab) => {
+if (webext.tabs && webext.tabs.onCreated && typeof webext.tabs.onCreated.addListener === 'function') {
+  webext.tabs.onCreated.addListener((tab) => {
     const url = typeof tab?.pendingUrl === 'string' && tab.pendingUrl ? tab.pendingUrl : tab?.url;
     maybeReuseRevivalTab(tab?.id, url);
   });
@@ -2375,7 +2378,7 @@ if (chrome.tabs && chrome.tabs.onCreated && typeof chrome.tabs.onCreated.addList
 
 // Document unload is not conversation lifetime. A real tab close is: reload keeps the
 // same tab id, while closing it wakes the service worker and retires only that tab's claim.
-chrome.tabs.onRemoved.addListener((id) => {
+webext.tabs.onRemoved.addListener((id) => {
   revivalReuseAttempted.delete(id);
   clearDeferredRevivalOffersForTab(id);
   void serializeTab(id, async () => {
@@ -2390,7 +2393,7 @@ chrome.tabs.onRemoved.addListener((id) => {
 // onRemoved never fires because the tab itself still exists. Only a URL that is concretely
 // outside ChatGPT is terminal here; `/c/A -> /` remains deliberately ambiguous and is handled
 // by the content script when another concrete conversation id appears.
-chrome.tabs.onUpdated.addListener((id, changeInfo) => {
+webext.tabs.onUpdated.addListener((id, changeInfo) => {
   if (!changeInfo) return;
   if (typeof changeInfo.url === 'string') maybeReuseRevivalTab(id, changeInfo.url);
   const fullNavigation = changeInfo.status === 'loading';
@@ -2412,7 +2415,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
       let targetUrl = typeof changeInfo.url === 'string' ? changeInfo.url : '';
       if (!targetUrl) {
         try {
-          const tab = await chrome.tabs.get(id);
+          const tab = await webext.tabs.get(id);
           targetUrl = typeof tab?.url === 'string' ? tab.url : '';
         } catch {
           targetUrl = '';
@@ -2496,7 +2499,7 @@ function offerDeferredRevivalToTab(entry, tab) {
   if (deferredRevivalOffers.get(id) === tab.id) return true;
   deferredRevivalOffers.set(id, tab.id);
   try {
-    const offered = chrome.tabs.sendMessage(tab.id, {
+    const offered = webext.tabs.sendMessage(tab.id, {
       type: 'clf-run-command',
       id,
       conversationId,
@@ -2514,7 +2517,7 @@ function offerDeferredRevivalToTab(entry, tab) {
           const preference = revivalPreference(id);
           if (preference) {
             if (tab.id === preference.preferredTabId) {
-              void chrome.tabs.remove(preference.fallbackTabId).catch(() => undefined);
+              void webext.tabs.remove(preference.fallbackTabId).catch(() => undefined);
             }
             void clearRevivalPreference(id).catch(() => undefined);
           }
@@ -2565,7 +2568,7 @@ function recoverDeferredRevivals() {
 
     let tabs = [];
     try {
-      tabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
+      tabs = await webext.tabs.query({ url: CHATGPT_TAB_URLS });
     } catch {
       tabs = [];
     }
@@ -2602,7 +2605,7 @@ function recoverDeferredRevivals() {
         // messages at a document that cannot receive them; registration/reload recovery retries
         // the same tab, and only a current recorder receives the actual command once.
         try {
-          const live = await chrome.tabs.sendMessage(exact.id, { type: 'clf-recorder-ping' });
+          const live = await webext.tabs.sendMessage(exact.id, { type: 'clf-recorder-ping' });
           if (live && live.ok === true && live.recorderVersion === PAGE_RECORDER_VERSION) {
             offerDeferredRevivalToTab(entry, exact);
           }
@@ -2615,7 +2618,7 @@ function recoverDeferredRevivals() {
       const url = deferredRevivalUrl(entry);
       if (!url) continue;
       try {
-        const created = await chrome.tabs.create({ url });
+        const created = await webext.tabs.create({ url });
         if (created && typeof created.id === 'number') tabs.push({ ...created, url });
       } catch {
         // Browser policy/window teardown can reject create; the local marker remains for the next
@@ -2633,7 +2636,7 @@ function recoverDeferredRevivals() {
 async function restoreOpenChatgptTabs() {
   let tabs = [];
   try {
-    tabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
+    tabs = await webext.tabs.query({ url: CHATGPT_TAB_URLS });
   } catch {
     return;
   }
@@ -2641,13 +2644,13 @@ async function restoreOpenChatgptTabs() {
     const id = tab && typeof tab.id === 'number' ? tab.id : null;
     if (id === null) continue;
     try {
-      const live = await chrome.tabs.sendMessage(id, { type: 'clf-recorder-ping' });
+      const live = await webext.tabs.sendMessage(id, { type: 'clf-recorder-ping' });
       if (live && live.ok === true && live.recorderVersion === PAGE_RECORDER_VERSION) {
         // Healthy content.js does not prove the independently running MAIN-world helper is
         // still present. Request-id ownership depends on fiber.js, and re-executing it is
         // idempotent because the helper keeps one listener per protocol version.
         try {
-          await chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['fiber.js'] });
+          await webext.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['fiber.js'] });
         } catch {
           // The tab can navigate between the ping and repair. Static injection covers it.
         }
@@ -2659,13 +2662,13 @@ async function restoreOpenChatgptTabs() {
     }
     try {
       // Rebuild the isolated-world DOM adapter before the recorder that consumes it.
-      await chrome.scripting.executeScript({ target: { tabId: id }, files: ['chatgpt-dom.js'] });
+      await webext.scripting.executeScript({ target: { tabId: id }, files: ['chatgpt-dom.js'] });
       // Keep the React/Fiber reader in ChatGPT's own world, exactly like the static manifest
       // declaration. An older helper may still answer too; the nonce/version gate in
       // content.js makes those replies harmless, and a future version bump rejects them.
-      await chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['fiber.js'] });
-      await chrome.scripting.executeScript({ target: { tabId: id }, files: ['content.js'] });
-      await chrome.scripting.insertCSS({ target: { tabId: id }, files: ['overlay.css'] });
+      await webext.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['fiber.js'] });
+      await webext.scripting.executeScript({ target: { tabId: id }, files: ['content.js'] });
+      await webext.scripting.insertCSS({ target: { tabId: id }, files: ['overlay.css'] });
     } catch {
       // The tab can close or navigate between query and injection. Static content scripts
       // cover the next eligible document, so there is nothing useful to retry here.
@@ -2673,15 +2676,15 @@ async function restoreOpenChatgptTabs() {
   }
 }
 
-chrome.runtime.onInstalled.addListener(() => {
+webext.runtime.onInstalled.addListener(() => {
   void restoreOpenChatgptTabs().then(() => recoverDeferredRevivals()).catch(() => undefined);
   void load().then(() => {
     if (journal.length > 0 || closeOutbox.length > 0 || commandAckOutbox.length > 0) scheduleRetry();
   });
 });
 
-if (chrome.runtime.onStartup && typeof chrome.runtime.onStartup.addListener === 'function') {
-  chrome.runtime.onStartup.addListener(() => {
+if (webext.runtime.onStartup && typeof webext.runtime.onStartup.addListener === 'function') {
+  webext.runtime.onStartup.addListener(() => {
     void load()
       .then(() => drainCommandAcks())
       .then(() => drain())
@@ -2691,8 +2694,8 @@ if (chrome.runtime.onStartup && typeof chrome.runtime.onStartup.addListener === 
   });
 }
 
-if (chrome.alarms && chrome.alarms.onAlarm && typeof chrome.alarms.onAlarm.addListener === 'function') {
-  chrome.alarms.onAlarm.addListener((alarm) => {
+if (webext.alarms && webext.alarms.onAlarm && typeof webext.alarms.onAlarm.addListener === 'function') {
+  webext.alarms.onAlarm.addListener((alarm) => {
     if (!alarm || alarm.name !== RETRY_ALARM) return;
     void drainCommandAcks()
       .then(() => drain())

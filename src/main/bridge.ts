@@ -12,7 +12,7 @@
  *     that deliberately does and does not buy
  *   · every other route needs the bearer token issued by /pair, compared in
  *     constant time, and stored encrypted rather than in config.json
- *   · the Origin must be a chrome-extension:// origin, so a web page cannot drive it
+ *   · the Origin must be a chrome-extension:// or moz-extension:// origin, so a web page cannot drive it
  *   · bodies are capped and requests are rate limited
  *
  * It is deliberately not a general control API. It accepts observations about a
@@ -105,12 +105,15 @@ import {
   continuationForSession,
   openContinuationNow,
   repairPrimeFromResumeShadow,
-  resetContinuationsForTests
+  resetContinuationsForTests,
+  touchContinuation
 } from './session/continuation.js';
 import { noteResumeOpening } from './session/resume-gate.js';
 import { readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
 import { APP_VERSION, BRIDGE_PROTOCOL } from './version.js';
 import { requestCorrelation } from './session/correlation.js';
+import { execProcessIdsForConversation } from './codex/ownership.js';
+import { unifiedExecManager } from './codex/manager.js';
 import { bindAgentWorkspace } from './workspace.js';
 import { MAX_GOAL_OBJECTIVE_CHARS } from '../shared/goal.js';
 
@@ -484,7 +487,7 @@ function json(res: http.ServerResponse, status: number, body: unknown, origin: s
 function originOf(req: http.IncomingMessage): { ok: boolean; origin: string | null } {
   const origin = req.headers.origin;
   if (typeof origin !== 'string' || origin === '') return { ok: true, origin: null };
-  if (origin.startsWith('chrome-extension://')) return { ok: true, origin };
+  if (origin.startsWith('chrome-extension://') || origin.startsWith('moz-extension://')) return { ok: true, origin };
   return { ok: false, origin: null };
 }
 
@@ -841,6 +844,25 @@ function chatIsWorking(conversationId: string): boolean {
   return Boolean(current && (current.generating || current.activeTurnId));
 }
 
+function backgroundExecForConversation(conversationId: string): {
+  running: number;
+  exitedUnread: number;
+  lastTransitionAt: number | null;
+} {
+  let running = 0;
+  let exitedUnread = 0;
+  let lastTransitionAt: number | null = null;
+  for (const processId of execProcessIdsForConversation(conversationId)) {
+    const state = unifiedExecManager.backgroundState(processId);
+    if (!state) continue;
+    if (state.running) running += 1;
+    if (state.exitedUnread) exitedUnread += 1;
+    lastTransitionAt =
+      lastTransitionAt === null ? state.changedAt : Math.max(lastTransitionAt, state.changedAt);
+  }
+  return { running, exitedUnread, lastTransitionAt };
+}
+
 async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const { ok: originAllowed, origin } = originOf(req);
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -920,7 +942,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     // user can obtain the token, and with it read recorded ChatGPT activity and queue an
     // "open a fresh chat" command. It can still not read a file, run anything, or change
     // a permission — the bridge has no route that does. A web page cannot: originOf
-    // refuses anything that is not a chrome-extension:// origin, above.
+    // refuses anything that is not a browser-extension origin, above.
     const token = randomBytes(32).toString('base64url');
     await setSecret('bridgeToken', token);
     noteBrowserSeen();
@@ -1156,6 +1178,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const id = conversationId(url.searchParams.get('conversationId'));
     const since = Number(url.searchParams.get('since') ?? 0);
     const goalClient = (url.searchParams.get('goalClient') ?? '').slice(0, 100);
+    const compactToken = (url.searchParams.get('compactToken') ?? '').slice(0, 128);
     if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
     const retiredWorker = retiredWorkerForConversation(id);
     // Every open ChatGPT tab polls this for its own conversation every few seconds, so
@@ -1213,6 +1236,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       }
     }
     const summary = await getSession(live.sessionId);
+    // A browser may legitimately spend longer than the fixed continuation TTL generating a
+    // large handoff. Only the exact armed capture token for this same session/chat can renew it.
+    if (compactToken) touchContinuation(compactToken, live.sessionId, id);
     const workerBlocked = goalWorkerChat(id);
     const requestedSince = Number.isFinite(since) ? Math.max(0, since) : 0;
     // A page reload begins at cursor zero. Never turn that into a full JSONL parse/response:
@@ -1400,6 +1426,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // REQUEST_ID_GRACE_MS to file its history cannot change the workspace and must not add
         // a cross-chat 15-second tax to the machine-settle barrier.
         pendingTools: runningToolCalls(live.conversationId),
+        // Returned async exec sessions outlive their MCP handler. Keep this separate from
+        // pendingTools so a long-lived TTY never blocks quiescence/compaction.
+        backgroundExec: backgroundExecForConversation(live.conversationId),
         // Diagnostic only. A finished unattributed call is still being placed into durable
         // history; unknown ownership is conservatively projected onto every chat until that
         // attribution finishes, but this number never gates the compaction prompt.

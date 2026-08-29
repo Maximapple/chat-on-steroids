@@ -348,6 +348,14 @@ describe('who is allowed to talk to it', () => {
     expect(reply.headers['access-control-allow-private-network']).toBe('true');
   });
 
+  it('answers a Firefox extension preflight without opening the bridge to web pages', async () => {
+    const firefoxOrigin = 'moz-extension://01234567-89ab-cdef-0123-456789abcdef';
+    const reply = await request('OPTIONS', '/events', { origin: firefoxOrigin, auth: null });
+    expect(reply.status).toBe(204);
+    expect(reply.headers['access-control-allow-origin']).toBe(firefoxOrigin);
+    expect(reply.headers['access-control-allow-private-network']).toBe('true');
+  });
+
   it('refuses a preflight that arrives without an Origin', async () => {
     const reply = await request('OPTIONS', '/events', { origin: null, auth: null });
     expect(reply.status).toBe(403);

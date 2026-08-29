@@ -26,6 +26,17 @@ function runGit(args, { allowFailure = false, encoding = 'utf8' } = {}) {
   return result;
 }
 
+function repositoryOwner() {
+  const fromActions = String(process.env.GITHUB_REPOSITORY ?? '').split('/')[0]?.trim();
+  if (fromActions) return fromActions;
+
+  const remote = runGit(['config', '--get', 'remote.origin.url'], { allowFailure: true });
+  if (remote.status !== 0) return null;
+  const value = String(remote.stdout ?? '').trim();
+  const match = /(?:github\.com[/:])([^/:\s]+)\/[^/\s]+(?:\.git)?$/i.exec(value);
+  return match?.[1] ?? null;
+}
+
 function findBlockedText(text, location) {
   const normalized = text.toLowerCase();
   return blockedText
@@ -79,9 +90,19 @@ function checkMessageFile(messagePath) {
 
 function checkHistory() {
   const failures = [];
-  const commits = String(runGit(['rev-list', '--all']).stdout)
-    .split(/\r?\n/)
-    .filter(Boolean);
+  const head = runGit(['rev-parse', '--verify', 'HEAD'], { allowFailure: true });
+  const commits =
+    head.status === 0
+      ? String(runGit(['rev-list', 'HEAD']).stdout)
+          .split(/\r?\n/)
+          .filter(Boolean)
+      : [];
+  // The maintainer's already-public upstream identity is inherited by every fork. It remains
+  // strict in the upstream repository, while fork CI still checks current author, messages,
+  // tracked content, and fork-reachable history for blocked text.
+  const owner = repositoryOwner();
+  const enforceHistoricalMaintainerIdentity =
+    owner === null || owner.toLowerCase() === maintainerLogin;
   // pull_request jobs default to a GitHub-generated merge object that can never enter
   // public history. Its identity belongs to GitHub's test ref, not to the proposed tree.
   const syntheticPullRequestCommit =
@@ -96,15 +117,22 @@ function checkHistory() {
       record.split('\0');
     const location = `commit ${commit}`;
     failures.push(
-      ...checkMaintainerIdentity(authorName, authorEmail, `${location} author`),
-      ...checkMaintainerIdentity(committerName, committerEmail, `${location} committer`),
+      ...(enforceHistoricalMaintainerIdentity
+        ? checkMaintainerIdentity(authorName, authorEmail, `${location} author`)
+        : []),
+      ...(enforceHistoricalMaintainerIdentity
+        ? checkMaintainerIdentity(committerName, committerEmail, `${location} committer`)
+        : []),
       ...findBlockedText(body.join('\0'), `${location} message`),
     );
   }
 
-  const tags = String(runGit(['tag', '--list']).stdout)
-    .split(/\r?\n/)
-    .filter(Boolean);
+  const tags =
+    head.status === 0
+      ? String(runGit(['tag', '--merged', 'HEAD', '--list']).stdout)
+          .split(/\r?\n/)
+          .filter(Boolean)
+      : [];
   for (const tag of tags) {
     const type = String(runGit(['cat-file', '-t', tag]).stdout).trim();
     if (type !== 'tag') continue;
@@ -117,12 +145,13 @@ function checkHistory() {
     );
     const [taggerName = '', taggerEmail = '', ...body] = record.split('\0');
     failures.push(
-      ...checkMaintainerIdentity(taggerName, taggerEmail, `tag ${tag} tagger`),
+      ...(enforceHistoricalMaintainerIdentity
+        ? checkMaintainerIdentity(taggerName, taggerEmail, `tag ${tag} tagger`)
+        : []),
       ...findBlockedText(body.join('\0'), `tag ${tag} message`),
     );
   }
 
-  const head = runGit(['rev-parse', '--verify', 'HEAD'], { allowFailure: true });
   if (head.status === 0) failures.push(...checkIndexedOrCommittedFiles('HEAD'));
   return { failures, commits: commits.length, tags: tags.length };
 }
