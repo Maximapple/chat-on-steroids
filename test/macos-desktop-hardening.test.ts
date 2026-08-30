@@ -14,9 +14,43 @@ describe('macOS desktop safety hardening', () => {
     expect(swift).toContain('private func assertInputTarget');
     expect(swift).toContain('private func assertFrameTarget');
     expect(swift).toMatch(/private func inputTargetMatches[\s\S]*frontmostPID\(\) == row\.pid/);
-    expect(swift).toMatch(/private func inputTargetMatches[\s\S]*windowServerFrontWindowID\(rows: rows\) == row\.id/);
+    expect(swift).toMatch(/private func inputTargetMatches[\s\S]*frontWindowID\(rows: rows\) == row\.id/);
     expect(swift).toMatch(/private func inputTargetMatches[\s\S]*focusedAXWindowID\(for: row\.pid, rows: rows\) == row\.id/);
     expect(swift).toMatch(/private func inputTargetMatches[\s\S]*guard focusedAXElementWindowID\(for: row\.pid, rows: rows\) == row\.id/);
+    // frontWindowID is still WindowServer z-order; it only resolves which of one app's own
+    // windows is front. All four clauses above still have to agree.
+    expect(swift).toMatch(/private func frontWindowID[\s\S]*windowServerFrontWindowID\(rows: rows\)/);
+  });
+
+  /**
+   * QA hit `No foreground window` while Chrome was plainly the active application, twice in a
+   * row, with Chrome's link-preview bubble (`175x22` at the screen edge) and its omnibox popup
+   * on top. Both are ordinary layer-0 windows of the browser, so WindowServer's topmost window
+   * was the bubble while AX focus — and the user's typing — was the real window. The mismatch
+   * was read as "an app transition is in flight" and everything was refused, which also made
+   * `focusWindow` poll `inputTargetMatches` for a condition it could never satisfy.
+   *
+   * Only that intra-application case is resolved, and only in the frontmost application:
+   * a covering window owned by *another* process must still refuse.
+   */
+  it('resolves one app\'s transient child windows without relaxing cross-app refusal', () => {
+    expect(swift).toContain('private func frontWindowID(rows: [WindowRow]) -> CGWindowID?');
+    // Another app on top: returned as-is, so the caller's frontmostPID check still refuses.
+    expect(swift).toContain(
+      'guard let topRow = rows.first(where: { $0.id == top }), frontmostPID() == topRow.pid else { return top }'
+    );
+    // AX only wins when it names a different window this same scan already saw and admitted.
+    expect(swift).toContain(
+      'guard let focused = focusedAXWindowID(for: topRow.pid, rows: rows), focused != top else { return top }'
+    );
+    expect(swift).toContain(
+      'guard rows.contains(where: { $0.id == focused && $0.pid == topRow.pid }) else { return top }'
+    );
+    // Both readers go through it, so observation and input can never disagree about which
+    // window is front.
+    expect(swift).toMatch(/private func foregroundWindowID[\s\S]*guard let frontID = frontWindowID\(rows: rows\)/);
+    expect(swift).toMatch(/private func inputTargetMatches[\s\S]*guard frontWindowID\(rows: rows\) == row\.id/);
+    expect(swift).not.toMatch(/private func inputTargetMatches[\s\S]{0,200}windowServerFrontWindowID/);
   });
 
   it('revalidates a window-bound frame at every physical mutation boundary', () => {
