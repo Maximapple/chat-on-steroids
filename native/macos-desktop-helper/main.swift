@@ -799,12 +799,64 @@ private struct ResolvedKey {
     let requiredFlags: CGEventFlags
 }
 
-private func currentLayoutKey(for logicalName: String) -> ResolvedKey? {
-    let source = TISCopyCurrentKeyboardLayoutInputSource().takeRetainedValue()
-    guard let rawData = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return nil }
-    let data = unsafeBitCast(rawData, to: CFData.self)
-    guard let bytes = CFDataGetBytePtr(data) else { return nil }
-    let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
+/** The active layout, copied out of the input source so it can be used off the main queue. */
+private struct KeyboardLayoutSnapshot {
+    let data: Data
+    let kbdType: UInt32
+}
+
+/** Carries the main-queue result back to the requesting thread. */
+private final class KeyboardLayoutBox {
+    var snapshot: KeyboardLayoutSnapshot?
+}
+
+/** How long a request will wait for the main queue before refusing rather than hanging. */
+private let keyboardLayoutMainQueueTimeout: TimeInterval = 2.0
+
+/**
+ * Reads the active Unicode key layout, on the main queue.
+ *
+ * Text Services input-source lookups are main-queue-affine. Reached from anywhere else,
+ * macOS does not return an error: `dispatch_assert_queue` fails and raises EXC_BREAKPOINT,
+ * which takes the whole host process down. Nothing above this — not Swift, not the addon,
+ * not any JS layer — can catch that. Node enters this addon on a worker thread, so the hop
+ * has to live here; the public entry points stay safe to call from an arbitrary thread.
+ *
+ * Deliberately not `DispatchQueue.main.sync`: that deadlocks if this is already the main
+ * thread, and it waits forever if the main thread is busy or blocked, trading a crash for a
+ * hang. Running inline when already on main covers the first, and the bounded wait covers
+ * the second by surfacing an ordinary refusal instead.
+ *
+ * Only the input-source read is marshalled. UCKeyTranslate is a pure function over the
+ * layout bytes, so the 128-keycode search stays off the main queue and off the UI thread.
+ */
+private func currentKeyboardLayout() -> KeyboardLayoutSnapshot? {
+    func read() -> KeyboardLayoutSnapshot? {
+        guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue() else { return nil }
+        guard let rawData = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return nil }
+        let data = unsafeBitCast(rawData, to: CFData.self)
+        guard let bytes = CFDataGetBytePtr(data) else { return nil }
+        // Copied on purpose: those bytes belong to the input source, which is released as
+        // soon as this returns. The search below then reads our own copy.
+        return KeyboardLayoutSnapshot(
+            data: Data(bytes: bytes, count: CFDataGetLength(data)),
+            kbdType: UInt32(LMGetKbdType())
+        )
+    }
+
+    if Thread.isMainThread { return read() }
+
+    let box = KeyboardLayoutBox()
+    let done = DispatchSemaphore(value: 0)
+    DispatchQueue.main.async {
+        box.snapshot = read()
+        done.signal()
+    }
+    guard done.wait(timeout: .now() + keyboardLayoutMainQueueTimeout) == .success else { return nil }
+    return box.snapshot
+}
+
+private func currentLayoutKey(for logicalName: String, in snapshot: KeyboardLayoutSnapshot) -> ResolvedKey? {
     let modifierCandidates: [(carbon: UInt32, event: CGEventFlags)] = [
         (0, []),
         (UInt32(shiftKey >> 8), .maskShift),
@@ -812,40 +864,47 @@ private func currentLayoutKey(for logicalName: String) -> ResolvedKey? {
         (UInt32((shiftKey | optionKey) >> 8), [.maskShift, .maskAlternate])
     ]
 
-    for candidate in modifierCandidates {
-        for rawCode in 0..<128 {
-            var deadKeyState: UInt32 = 0
-            var actualLength = 0
-            var characters = Array<UniChar>(repeating: 0, count: 8)
-            let status = characters.withUnsafeMutableBufferPointer { buffer in
-                UCKeyTranslate(
-                    layout,
-                    UInt16(rawCode),
-                    UInt16(kUCKeyActionDisplay),
-                    candidate.carbon,
-                    UInt32(LMGetKbdType()),
-                    OptionBits(kUCKeyTranslateNoDeadKeysMask),
-                    &deadKeyState,
-                    buffer.count,
-                    &actualLength,
-                    buffer.baseAddress!
-                )
-            }
-            guard status == noErr, actualLength > 0 else { continue }
-            let rendered = characters.withUnsafeBufferPointer {
-                String(utf16CodeUnits: $0.baseAddress!, count: Int(actualLength))
-            }
-            if rendered.lowercased() == logicalName.lowercased() {
-                return ResolvedKey(code: CGKeyCode(rawCode), requiredFlags: candidate.event)
+    return snapshot.data.withUnsafeBytes { raw -> ResolvedKey? in
+        guard let base = raw.baseAddress else { return nil }
+        let layout = base.assumingMemoryBound(to: UCKeyboardLayout.self)
+        for candidate in modifierCandidates {
+            for rawCode in 0..<128 {
+                var deadKeyState: UInt32 = 0
+                var actualLength = 0
+                var characters = Array<UniChar>(repeating: 0, count: 8)
+                let status = characters.withUnsafeMutableBufferPointer { buffer in
+                    UCKeyTranslate(
+                        layout,
+                        UInt16(rawCode),
+                        UInt16(kUCKeyActionDisplay),
+                        candidate.carbon,
+                        snapshot.kbdType,
+                        OptionBits(kUCKeyTranslateNoDeadKeysMask),
+                        &deadKeyState,
+                        buffer.count,
+                        &actualLength,
+                        buffer.baseAddress!
+                    )
+                }
+                guard status == noErr, actualLength > 0 else { continue }
+                let rendered = characters.withUnsafeBufferPointer {
+                    String(utf16CodeUnits: $0.baseAddress!, count: Int(actualLength))
+                }
+                if rendered.lowercased() == logicalName.lowercased() {
+                    return ResolvedKey(code: CGKeyCode(rawCode), requiredFlags: candidate.event)
+                }
             }
         }
+        return nil
     }
-    return nil
 }
 
-private func resolveKey(_ name: String) throws -> ResolvedKey {
+private func resolveKey(_ name: String, in snapshot: KeyboardLayoutSnapshot?) throws -> ResolvedKey {
     if name.count == 1 {
-        guard let resolved = currentLayoutKey(for: name) else {
+        guard let snapshot else {
+            throw fail("INPUT_FAILED", "the active keyboard layout could not be read in time")
+        }
+        guard let resolved = currentLayoutKey(for: name, in: snapshot) else {
             throw fail("BAD_KEY", "active keyboard layout does not expose logical key \(name)")
         }
         return resolved
@@ -856,7 +915,11 @@ private func resolveKey(_ name: String) throws -> ResolvedKey {
 
 private func pressKeys(_ names: [String], targetWindow: CGWindowID? = nil) throws {
     let normalized = names.map(normalizedKeyName)
-    let resolved = try normalized.map(resolveKey)
+    // One snapshot for the whole chord, taken before any window authority is resolved: every
+    // key resolves against the same input source, and the main queue is entered at most once
+    // per request. Named keys never need it, so an ordinary shortcut does not hop at all.
+    let layout = normalized.contains { $0.count == 1 } ? currentKeyboardLayout() : nil
+    let resolved = try normalized.map { try resolveKey($0, in: layout) }
     let globalShortcut = isSystemShortcut(normalized)
     guard targetWindow != nil || globalShortcut else {
         throw fail("INPUT_TARGET_REQUIRED", "application keyboard input requires targetWindow")
