@@ -3442,17 +3442,35 @@ function waitingForRevivalReadiness(command: Command): boolean {
   return command.spec.type === 'revive' && command.claimedAt !== null && command.owner === null;
 }
 
+/**
+ * How long the current browser lease may stay silent before it is abandoned.
+ *
+ * A fresh worker/resume open attempt still gets the short deadline: no page has proved it owns
+ * the marker yet, so a dead browser must not block later commands. A redeemed resume is
+ * different. The exact document already owns the single-use continuation and may have the brief
+ * in its composer or may already have crossed ChatGPT's irreversible Send boundary while the
+ * background tab is timer-throttled. Expiring that proven owner after 90 seconds can abort A→B
+ * just before the same page finally reports B's conversation id, leaving an orphan resumed chat.
+ * Keep that one document lease only for the existing transport TTL instead; this adds no hot-path
+ * round trip and still bounds a genuinely dead page.
+ */
+function commandLeaseWindow(command: Command): number {
+  if (command.spec.type === 'resume' && command.owner !== null) return COMMAND_TTL_MS;
+  return COMMAND_DEADLINE_MS;
+}
+
 function commandDeadlineDelay(command: Command, now = Date.now()): number | null {
   // A revival's first lease belongs to the *browser-open attempt*, not yet to a document. The
   // exact worker chat may still be rendering the assistant message that contains agents.finish,
   // so the content script deliberately refuses to redeem until that page is submit-ready. That
   // wait must survive a tab reload/browser restart without turning ordinary ChatGPT busyness into
   // a failed broker revival. Once a document actually redeems (`owner !== null`), the ordinary
-  // short acknowledgement deadline applies again: text may be about to cross the irreversible
-  // send boundary and a dead document must not own it indefinitely.
+  // short acknowledgement deadline applies again. Redeemed resumes are the exception: their
+  // exact document keeps the single-use continuation through the transport TTL, because ChatGPT
+  // may delay exposing the new conversation id after the page has already accepted the send.
   if (waitingForRevivalReadiness(command)) return null;
   const claimedAt = command.claimedAt ?? now;
-  return claimedAt + COMMAND_DEADLINE_MS - now;
+  return claimedAt + commandLeaseWindow(command) - now;
 }
 
 function armDeadline(command: Command, delay = commandDeadlineDelay(command)): void {
@@ -3729,7 +3747,7 @@ function tidyCommands(): void {
 const isLeased = (command: Command): boolean => {
   if (command.claimedAt === null) return false;
   if (waitingForRevivalReadiness(command)) return true;
-  if (Date.now() - command.claimedAt < COMMAND_DEADLINE_MS) return true;
+  if (Date.now() - command.claimedAt < commandLeaseWindow(command)) return true;
   if (command.spec.type !== 'resume') return false;
   const state = continuationByToken(command.spec.token)?.state;
   return state === 'committing' || state === 'committed';
