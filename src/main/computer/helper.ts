@@ -55,6 +55,8 @@ public static class Clf {
   const uint MOUSEEVENTF_LEFTDOWN = 0x0002, MOUSEEVENTF_LEFTUP = 0x0004;
   const uint MOUSEEVENTF_RIGHTDOWN = 0x0008, MOUSEEVENTF_RIGHTUP = 0x0010;
   const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020, MOUSEEVENTF_MIDDLEUP = 0x0040;
+  const uint MOUSEEVENTF_XDOWN = 0x0080, MOUSEEVENTF_XUP = 0x0100;
+  const uint XBUTTON1 = 0x0001, XBUTTON2 = 0x0002;
   const uint MOUSEEVENTF_WHEEL = 0x0800, MOUSEEVENTF_HWHEEL = 0x1000;
   const uint KEYEVENTF_KEYUP = 0x0002, KEYEVENTF_UNICODE = 0x0004;
 
@@ -118,22 +120,29 @@ public static class Clf {
     Send(new INPUT[] { Mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny, 0) });
   }
 
-  static void ButtonFlags(string button, out uint down, out uint up) {
+  /**
+   * The side buttons are one event pair distinguished by mouseData, not their own flags,
+   * which is why the data word has to travel with the flags rather than being zero.
+   */
+  static void ButtonFlags(string button, out uint down, out uint up, out uint data) {
+    data = 0;
     switch (button) {
       case "right": down = MOUSEEVENTF_RIGHTDOWN; up = MOUSEEVENTF_RIGHTUP; break;
       case "middle": case "wheel": down = MOUSEEVENTF_MIDDLEDOWN; up = MOUSEEVENTF_MIDDLEUP; break;
+      case "back": down = MOUSEEVENTF_XDOWN; up = MOUSEEVENTF_XUP; data = XBUTTON1; break;
+      case "forward": down = MOUSEEVENTF_XDOWN; up = MOUSEEVENTF_XUP; data = XBUTTON2; break;
       default: down = MOUSEEVENTF_LEFTDOWN; up = MOUSEEVENTF_LEFTUP; break;
     }
   }
 
   public static void Click(int x, int y, string button, int times) {
     Move(x, y);
-    uint down, up;
-    ButtonFlags(button, out down, out up);
+    uint down, up, data;
+    ButtonFlags(button, out down, out up, out data);
     List<INPUT> batch = new List<INPUT>();
     for (int n = 0; n < times; n++) {
-      batch.Add(Mouse(down, 0, 0, 0));
-      batch.Add(Mouse(up, 0, 0, 0));
+      batch.Add(Mouse(down, 0, 0, data));
+      batch.Add(Mouse(up, 0, 0, data));
     }
     Send(batch.ToArray());
   }
@@ -149,12 +158,12 @@ public static class Clf {
   }
 
   public static void Drag(int[] xs, int[] ys, string button) {
-    uint down, up;
-    ButtonFlags(button, out down, out up);
+    uint down, up, data;
+    ButtonFlags(button, out down, out up, out data);
     Move(xs[0], ys[0]);
-    Send(new INPUT[] { Mouse(down, 0, 0, 0) });
+    Send(new INPUT[] { Mouse(down, 0, 0, data) });
     for (int i = 1; i < xs.Length; i++) { Move(xs[i], ys[i]); System.Threading.Thread.Sleep(12); }
-    Send(new INPUT[] { Mouse(up, 0, 0, 0) });
+    Send(new INPUT[] { Mouse(up, 0, 0, data) });
   }
 
   static INPUT Key(ushort vk, bool up) {

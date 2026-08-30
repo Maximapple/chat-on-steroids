@@ -57,6 +57,40 @@ describe('desktop helper overhaul contract', () => {
     expect(HELPER_SCRIPT).toContain('if (info.hbmColor != IntPtr.Zero) DeleteObject(info.hbmColor);');
   });
 
+  /**
+   * Back and forward, the two buttons a browser actually navigates with.
+   *
+   * They are one event pair told apart by a data word rather than by their own flags, which
+   * is why the flags helper had to start carrying it. Posted as real side-button events on
+   * both platforms rather than as synthetic Alt+Arrow shortcuts: a shortcut goes to whatever
+   * happens to be focused, a button goes to the window under the pointer.
+   *
+   * Verified against the compiled helper on Windows: left 0x0002/0x0004, right 0x0008/0x0010
+   * and middle 0x0020/0x0040 all still carry data 0, back and forward both post XDOWN 0x0080
+   * and XUP 0x0100 with XBUTTON1 and XBUTTON2, and an unknown name still falls back to left.
+   */
+  it('posts the back and forward side buttons as real button events', () => {
+    expect(HELPER_SCRIPT).toContain('const uint MOUSEEVENTF_XDOWN = 0x0080, MOUSEEVENTF_XUP = 0x0100;');
+    expect(HELPER_SCRIPT).toContain('const uint XBUTTON1 = 0x0001, XBUTTON2 = 0x0002;');
+    expect(HELPER_SCRIPT).toContain('case "back": down = MOUSEEVENTF_XDOWN; up = MOUSEEVENTF_XUP; data = XBUTTON1; break;');
+    expect(HELPER_SCRIPT).toContain('case "forward": down = MOUSEEVENTF_XDOWN; up = MOUSEEVENTF_XUP; data = XBUTTON2; break;');
+    // The data word has to reach the event, or both side buttons would post as button 0.
+    expect(HELPER_SCRIPT).toContain('ButtonFlags(button, out down, out up, out data);');
+    expect(HELPER_SCRIPT).toMatch(/public static void Click[\s\S]*Mouse\(down, 0, 0, data\)[\s\S]*Mouse\(up, 0, 0, data\)/);
+    expect(HELPER_SCRIPT).toMatch(/public static void Drag[\s\S]*Mouse\(down, 0, 0, data\)[\s\S]*Mouse\(up, 0, 0, data\)/);
+  });
+
+  /** And the same two buttons on macOS, by button number on an other-mouse event. */
+  it('numbers the macOS side buttons instead of inventing shortcuts', () => {
+    const swift = readFileSync(path.join(process.cwd(), 'native/macos-desktop-helper/main.swift'), 'utf8');
+    expect(swift).toContain('case "back": return CGMouseButton(rawValue: 3) ?? .center');
+    expect(swift).toContain('case "forward": return CGMouseButton(rawValue: 4) ?? .center');
+    // Left and right stay on their own event types; everything else is an other-mouse event.
+    expect(swift).toMatch(/private func mouseTypes[\s\S]*case \.left: return \(\.leftMouseDown/);
+    expect(swift).toMatch(/private func mouseTypes[\s\S]*case \.right: return \(\.rightMouseDown/);
+    expect(swift).toMatch(/private func mouseTypes[\s\S]*default: return \(\.otherMouseDown/);
+  });
+
   /** And the same guarantee on the macOS side, where the capture API does it for us. */
   it('keeps the pointer in every macOS capture path', () => {
     const swift = readFileSync(path.join(process.cwd(), 'native/macos-desktop-helper/main.swift'), 'utf8');

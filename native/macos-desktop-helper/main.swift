@@ -681,15 +681,23 @@ private func mouseButton(_ name: String) -> CGMouseButton {
     switch name.lowercased() {
     case "right": return .right
     case "middle", "wheel": return .center
+    // Buttons 3 and 4 are the conventional back/forward side buttons. AppKit and every
+    // browser read them from the button number on an other-mouse event, so they are posted
+    // exactly like the middle button with a different number — not as synthetic shortcuts,
+    // which would go to whatever happens to be focused rather than to the pointer's window.
+    case "back": return CGMouseButton(rawValue: 3) ?? .center
+    case "forward": return CGMouseButton(rawValue: 4) ?? .center
     default: return .left
     }
 }
 
 private func mouseTypes(_ button: CGMouseButton) -> (CGEventType, CGEventType, CGEventType) {
     switch button {
+    case .left: return (.leftMouseDown, .leftMouseUp, .leftMouseDragged)
     case .right: return (.rightMouseDown, .rightMouseUp, .rightMouseDragged)
-    case .center: return (.otherMouseDown, .otherMouseUp, .otherMouseDragged)
-    default: return (.leftMouseDown, .leftMouseUp, .leftMouseDragged)
+    // The middle button and both side buttons are all other-mouse events, told apart only
+    // by the button number carried on the event itself.
+    default: return (.otherMouseDown, .otherMouseUp, .otherMouseDragged)
     }
 }
 
