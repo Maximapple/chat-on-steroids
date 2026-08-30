@@ -3317,15 +3317,16 @@ describe('targeted open', () => {
     );
   });
 
-  it('renews the command deadline when the opened page finally redeems it', async () => {
+  it('keeps a redeemed resume alive past the short ACK deadline, then expires it at the transport TTL', async () => {
     vi.useFakeTimers();
     try {
       setBrowserOpener(async (url) => {
         opened.push(url);
       });
       await pair();
+      const sourceConversation = '44444444-5555-6666-7777-888888888888';
       const { sessionId, token } = await compactedSession(
-        '44444444-5555-6666-7777-888888888888',
+        sourceConversation,
         'the slow-start brief'
       );
       const command = queueResume(sessionId, token)!;
@@ -3334,11 +3335,20 @@ describe('targeted open', () => {
       await vi.advanceTimersByTimeAsync(60_000);
       expect((await redeem(command.id, 'slow-tab')).text).toContain('the slow-start brief');
 
-      // content.js can still legitimately be waiting for the composer/conversation id here.
-      // The original timer would fire 30s after redeem despite `claimedAt` having been renewed.
-      await vi.advanceTimersByTimeAsync(60_000);
+      // content.js can still legitimately be waiting for ChatGPT to expose the new conversation
+      // id here. Hidden Chromium tabs can stretch its 500ms polling far beyond wall-clock 90s;
+      // aborting the continuation at that point can strand a real resumed chat that reports back
+      // seconds later. A redeemed resume therefore uses the existing 30m transport TTL.
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
       expect(pendingCommands().map((entry) => entry.what)).toEqual([`resume:${sessionId}`]);
       expect(continuationByToken(token)?.state).not.toBe('aborted');
+
+      // The longer lease is still bounded: a genuinely dead document is eventually retired and
+      // the continuation remains safely attached to its source chat.
+      await vi.advanceTimersByTimeAsync(28 * 60_000);
+      expect(pendingCommands()).toEqual([]);
+      expect(continuationByToken(token)).toBeNull();
+      expect((await getSession(sessionId))?.conversationId).toBe(sourceConversation);
     } finally {
       vi.useRealTimers();
     }
