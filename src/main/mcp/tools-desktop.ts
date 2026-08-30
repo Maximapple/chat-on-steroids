@@ -50,15 +50,15 @@ const MAX_CLIPBOARD_LINE_CHARS = 16_000;
 const MAX_CLIPBOARD_OUTPUT_CHARS = 64_000;
 
 const computerActionArg = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('click_ref'), ref: z.string().min(1).max(64) }).strict().describe('Click ref.'),
+  z.object({ type: z.literal('click_ref'), ref: z.string().min(1).max(64) }).strict().describe('Click a control by ref from observe.'),
   z
     .object({ type: z.literal('set_value'), ref: z.string().min(1).max(64), text: z.string().max(20_000) })
     .strict()
-    .describe('Set text by ref.'),
+    .describe('Set a text control’s value directly by ref.'),
   z
     .object({ type: z.literal('click'), x: imageCoordinateArg, y: imageCoordinateArg, button: mouseButtonArg.optional() })
     .strict()
-    .describe('Click image point.'),
+    .describe('Click at image coordinates.'),
   z
     .object({
       type: z.literal('double_click'),
@@ -67,12 +67,12 @@ const computerActionArg = z.discriminatedUnion('type', [
       button: mouseButtonArg.optional()
     })
     .strict()
-    .describe('Double-click image point.'),
-  z.object({ type: z.literal('move'), x: imageCoordinateArg, y: imageCoordinateArg }).strict().describe('Move pointer.'),
+    .describe('Double-click at image coordinates.'),
+  z.object({ type: z.literal('move'), x: imageCoordinateArg, y: imageCoordinateArg }).strict().describe('Move the pointer.'),
   z
     .object({ type: z.literal('drag'), path: z.array(pointArg).min(2).max(64), button: mouseButtonArg.optional() })
     .strict()
-    .describe('Drag path.'),
+    .describe('Press, follow the path, release.'),
   z
     .object({
       type: z.literal('scroll'),
@@ -82,19 +82,19 @@ const computerActionArg = z.discriminatedUnion('type', [
       scroll_y: z.number().int().min(-10_000).max(10_000).optional()
     })
     .strict()
-    .describe('Scroll at point.'),
-  z.object({ type: z.literal('type'), text: z.string().max(4000) }).strict().describe('Type in targetWindow.'),
+    .describe('Scroll at a point.'),
+  z.object({ type: z.literal('type'), text: z.string().max(4000) }).strict().describe('Type text into target.'),
   z
     .object({ type: z.literal('keypress'), keys: z.array(z.string().max(20)).min(1).max(6) })
     .strict()
-    .describe('Press keys together.'),
-  z.object({ type: z.literal('focus'), window: windowIdArg }).strict().describe('Focus window.'),
+    .describe('Press keys together, e.g. ["ctrl","s"] on Windows or ["command","s"] on macOS.'),
+  z.object({ type: z.literal('focus'), window: windowIdArg }).strict().describe('Bring a window to the front.'),
   z.object({ type: z.literal('wait'), ms: z.number().int().min(0).max(10_000).optional() }).strict().describe('Pause.'),
-  z.object({ type: z.literal('read_clipboard') }).strict().describe('Read clipboard.'),
+  z.object({ type: z.literal('read_clipboard') }).strict().describe('Return the clipboard text.'),
   z
     .object({ type: z.literal('write_clipboard'), text: z.string().max(100_000) })
     .strict()
-    .describe('Write clipboard.')
+    .describe('Replace the clipboard text; paste with command+v on macOS or ctrl+v on Windows/Linux.')
 ]);
 
 const verificationArg = z
@@ -286,7 +286,6 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
             `bounds: ${state.window.x},${state.window.y} ${state.window.width}x${state.window.height}`
           ];
           if (state.snapshotId !== null) lines.push(`snapshot: ${state.snapshotId}`);
-          if (state.note) lines.push(`note: ${state.note}`);
           if (state.screenshot) {
             lines.push(
               `frame: ${state.screenshot.frameId}  ${state.screenshot.width}x${state.screenshot.height} — pass frameId ${state.screenshot.frameId} with any coordinates you read off it`
@@ -305,6 +304,8 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
               const flags = `${element.enabled ? '' : ' disabled'}${element.offscreen ? ' offscreen' : ''}`;
               lines.push(`${element.ref}  ${element.role} ${JSON.stringify(element.name)}${automation}${image}${flags}`);
             }
+          } else if (state.uiUnavailable) {
+            lines.push(`controls: unavailable (${state.uiUnavailable.code}) — ${state.uiUnavailable.message}`);
           } else {
             lines.push('controls: none exposed by the platform accessibility API');
           }
@@ -331,8 +332,7 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
       {
         title: 'Control mouse and keyboard',
         description:
-          'Act on one desktop state. Prefer refs; pixels need frameId; keyboard needs targetWindow. ' +
-          'One mutation per call; inspect the returned capture before the next.',
+          'One desktop decision. Prefer refs; pixels need frameId. Pointer/text needs a target; system keys stay global.',
         inputSchema: z
           .object({
             actions: z.array(computerActionArg).min(1).max(20),
@@ -341,37 +341,34 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
               .int()
               .min(1)
               .optional()
-              .describe('Required for pixel actions/crops.'),
-            targetWindow: windowIdArg.optional().describe(
-              'Window expected to receive input; fails closed if focus differs.'
-            ),
+              .describe('Required for coordinate actions or captureCrop.'),
+            targetWindow: windowIdArg.optional(),
             verify: verificationArg.optional(),
-            captureAfter: z.boolean().optional().describe('Fresh screenshot after mutations; default true with screen access.'),
-            captureWindow: windowIdArg.optional().describe('Capture this window.'),
-            captureFull: z.boolean().optional().describe('Capture all monitors.'),
+            captureAfter: z.boolean().optional().describe('Capture result; default on for mutations.'),
+            captureWindow: windowIdArg.optional().describe('Result capture: this window.'),
+            captureFull: z.boolean().optional().describe('Result capture: all monitors.'),
             captureMaxWidth: z
               .number()
               .int()
               .min(320)
               .max(MAX_SCREENSHOT_WIDTH)
               .optional()
-              .describe(`Capture width; default ${DEFAULT_SCREENSHOT_WIDTH}.`),
-            captureCrop: cropArg.optional().describe('Crop in input frame.')
+              .describe(`Result capture width. Default ${DEFAULT_SCREENSHOT_WIDTH}.`),
+            captureCrop: cropArg.optional().describe('Result crop in the input frame.')
           })
           .superRefine((input, ctx) => {
-            const decisionActions = input.actions.filter(
-              (action) =>
-                action.type !== 'wait' &&
-                action.type !== 'read_clipboard' &&
-                action.type !== 'write_clipboard' &&
-                action.type !== 'move' &&
-                action.type !== 'focus'
+            const decisionActions = input.actions.filter((action) =>
+              action.type !== 'wait' &&
+              action.type !== 'read_clipboard' &&
+              action.type !== 'write_clipboard' &&
+              action.type !== 'move' &&
+              action.type !== 'focus'
             );
             if (decisionActions.length > 1) {
               ctx.addIssue({
                 code: 'custom',
                 path: ['actions'],
-                message: 'Closed-loop desktop control allows one UI-changing action per computer call (plus focus/move/wait/clipboard setup). Inspect the returned screenshot before the next mutation.'
+                message: 'Use one UI-changing decision per computer call; focus/move/wait/clipboard setup may accompany it.'
               });
             }
             if (input.verify) {
@@ -398,8 +395,8 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
             const autoCapture =
               caps.screen &&
               input.captureAfter !== false &&
-              input.actions.some(
-                (action) => action.type !== 'wait' && action.type !== 'read_clipboard' && action.type !== 'write_clipboard'
+              input.actions.some((action) =>
+                action.type !== 'wait' && action.type !== 'read_clipboard' && action.type !== 'write_clipboard' && action.type !== 'move'
               );
             const willCapture = input.captureAfter === true || verifyCapture || autoCapture;
             const captureFields = ['captureWindow', 'captureFull', 'captureMaxWidth', 'captureCrop'] as const;
@@ -491,8 +488,8 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
           logInfo(`tool computer ${parsed.map((a) => a.type).join(', ')}`);
           noteDetail(parsed.map((a) => a.type).join(', '));
           const verifyCapture = verify?.capture === 'always' || verify?.capture === 'on_change';
-          const mutatesDesktop = parsed.some(
-            (action) => action.type !== 'wait' && action.type !== 'read_clipboard' && action.type !== 'write_clipboard'
+          const mutatesDesktop = parsed.some((action) =>
+            action.type !== 'wait' && action.type !== 'read_clipboard' && action.type !== 'write_clipboard' && action.type !== 'move'
           );
           const autoCapture = caps.screen && captureAfter !== false && mutatesDesktop;
           const wantsCapture = captureAfter === true || verifyCapture || autoCapture;
@@ -521,13 +518,13 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
             capture:
               wantsCapture
                 ? {
-                    window: captureWindow,
+                    window: captureWindow ?? (captureFull === true || captureCrop !== undefined ? undefined : targetWindow),
                     full: captureFull,
                     maxWidth: captureMaxWidth ?? (autoCapture ? 1600 : undefined),
                     crop: captureCrop,
                     preferActiveWindow:
                       ctx.privacyScreenshots ||
-                      (autoCapture && captureWindow === undefined && captureFull !== true && captureCrop === undefined)
+                      (autoCapture && captureWindow === undefined && targetWindow === undefined && captureFull !== true && captureCrop === undefined)
                   }
                 : undefined
           });
