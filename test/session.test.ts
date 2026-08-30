@@ -275,29 +275,34 @@ describe('session store', () => {
     const conversationId = `conv-deep-catalog-${Date.now()}`;
     const names = Array.from({ length: 5001 }, (_, index) => `catalog-${String(index).padStart(5, '0')}`);
     const targetId = names[names.length - 1] as string;
-    const realReaddir = fs.readdir.bind(fs);
-    const realReadFile = fs.readFile.bind(fs);
     const rootPath = sessionsRoot();
-    const readdirSpy = vi.spyOn(fs, 'readdir').mockImplementation(
-      (async (target: Parameters<typeof fs.readdir>[0], ...args: unknown[]) => {
-        if (String(target) === rootPath) return names;
-        return (realReaddir as (...callArgs: unknown[]) => ReturnType<typeof fs.readdir>)(target, ...args);
+    // This is a synthetic catalog: mock exactly the authoritative root scan and the synthetic
+    // metadata it discovers. Falling back through a saved fs.readdir/readFile function while
+    // Vitest owns the same export can re-enter the spy on Windows and recurse until stack
+    // exhaustion, which then starves unrelated helper/process tests running in parallel.
+    const readdirSpy = vi.spyOn(fs, 'readdir').mockImplementationOnce(
+      (async (target: Parameters<typeof fs.readdir>[0]) => {
+        if (String(target) !== rootPath) {
+          throw new Error(`synthetic catalog expected root readdir, got ${String(target)}`);
+        }
+        return names;
       }) as typeof fs.readdir
     );
     const readSpy = vi.spyOn(fs, 'readFile').mockImplementation(
-      (async (target: Parameters<typeof fs.readFile>[0], ...args: unknown[]) => {
+      (async (target: Parameters<typeof fs.readFile>[0]) => {
         const file = String(target);
         const id = path.basename(path.dirname(file));
-        if (file.endsWith('meta.json') && id.startsWith('catalog-')) {
-          return JSON.stringify({
-            ...seedSummary,
-            id,
-            title: id,
-            conversationId: id === targetId ? conversationId : null,
-            chatIds: id === targetId ? [conversationId] : []
-          });
+        if (!file.endsWith('meta.json') || !id.startsWith('catalog-')) {
+          throw new Error(`synthetic catalog expected catalog meta.json, got ${file}`);
         }
-        return (realReadFile as (...callArgs: unknown[]) => ReturnType<typeof fs.readFile>)(target, ...args);
+        return JSON.stringify({
+          ...seedSummary,
+          __historySeq: seedSummary!.events,
+          id,
+          title: id,
+          conversationId: id === targetId ? conversationId : null,
+          chatIds: id === targetId ? [conversationId] : []
+        });
       }) as typeof fs.readFile
     );
 
@@ -316,15 +321,12 @@ describe('session store', () => {
     resetSessionStoreForTests();
 
     const rootPath = sessionsRoot();
-    const realReaddir = fs.readdir.bind(fs);
-    let failedOnce = false;
-    const readdirSpy = vi.spyOn(fs, 'readdir').mockImplementation(
-      (async (target: Parameters<typeof fs.readdir>[0], ...args: unknown[]) => {
-        if (!failedOnce && String(target) === rootPath) {
-          failedOnce = true;
-          throw Object.assign(new Error('transient session-root read failure'), { code: 'EBUSY' });
+    const readdirSpy = vi.spyOn(fs, 'readdir').mockImplementationOnce(
+      (async (target: Parameters<typeof fs.readdir>[0]) => {
+        if (String(target) !== rootPath) {
+          throw new Error(`transient catalog test expected root readdir, got ${String(target)}`);
         }
-        return (realReaddir as (...callArgs: unknown[]) => ReturnType<typeof fs.readdir>)(target, ...args);
+        throw Object.assign(new Error('transient session-root read failure'), { code: 'EBUSY' });
       }) as typeof fs.readdir
     );
 
@@ -332,10 +334,11 @@ describe('session store', () => {
       await expect(findSessionByConversation(conversationId, { requireUnique: true })).rejects.toMatchObject({
         code: 'EBUSY'
       });
-      expect((await findSessionByConversation(conversationId, { requireUnique: true }))?.id).toBe(created.id);
     } finally {
+      // The retry below must exercise the real filesystem implementation, not a spy fallback.
       readdirSpy.mockRestore();
     }
+    expect((await findSessionByConversation(conversationId, { requireUnique: true }))?.id).toBe(created.id);
   });
 
   it('numbers events in append order and reads them back unchanged', async () => {
