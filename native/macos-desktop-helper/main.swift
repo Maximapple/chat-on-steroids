@@ -318,7 +318,21 @@ private func axString(_ element: AXUIElement, _ attribute: CFString) -> String? 
 }
 
 private func axBool(_ element: AXUIElement, _ attribute: CFString, default fallback: Bool) -> Bool {
-    (axAttribute(element, attribute) as? NSNumber)?.boolValue ?? fallback
+    axOptionalBool(element, attribute) ?? fallback
+}
+
+/** Nil when the control publishes no readable boolean, which is not the same as false. */
+private func axOptionalBool(_ element: AXUIElement, _ attribute: CFString) -> Bool? {
+    (axAttribute(element, attribute) as? NSNumber)?.boolValue
+}
+
+/** Whether accessibility itself says this control's value can be written. */
+private func axValueIsSettable(_ element: AXUIElement) -> Bool {
+    var settable = DarwinBoolean(false)
+    guard AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success else {
+        return false
+    }
+    return settable.boolValue
 }
 
 private func axPoint(_ element: AXUIElement, _ attribute: CFString) -> CGPoint? {
@@ -1043,17 +1057,24 @@ private func actUI(_ request: JSONObject) throws -> JSONObject {
             "the referenced accessibility control no longer belongs to snapshot window \(snapshot.window)"
         )
     }
+    let action = string(request["action"])
     // Mutation requires an explicitly readable true value. Missing, untyped or timed-out
     // AXEnabled evidence is not permission to click through the uncertainty.
-    guard axBool(element, kAXEnabledAttribute as CFString, default: false) else {
+    //
+    // A value write has a second and stronger authority available: accessibility answers
+    // directly whether AXValue can be written. Some genuinely editable controls publish no
+    // AXEnabled attribute at all — TextEdit's document AXTextArea is one — and treating that
+    // silence as "disabled" made a visibly editable document unwritable while physical typing
+    // into the same control worked. An explicit AXEnabled=false still refuses either way: a
+    // control that says it is disabled is disabled, whatever it reports about settability.
+    let enabled = axOptionalBool(element, kAXEnabledAttribute as CFString)
+    let permitted = action == "set_value" ? (enabled ?? axValueIsSettable(element)) : (enabled ?? false)
+    guard permitted else {
         throw fail("UI_ACTION_DISABLED", "the referenced accessibility control is disabled")
     }
-    let action = string(request["action"])
     var route = "uia"
     if action == "set_value" {
-        var settable = DarwinBoolean(false)
-        guard AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success,
-              settable.boolValue,
+        guard axValueIsSettable(element),
               AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, string(request["value"]) as CFTypeRef) == .success else {
             throw fail("UI_ACTION_FAILED", "the control does not expose a settable value")
         }
