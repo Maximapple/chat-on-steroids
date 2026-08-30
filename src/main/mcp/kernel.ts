@@ -739,7 +739,7 @@ export const cropArg = z
     height: z.number().int().min(1).max(100_000)
   })
   .strict();
-export const mouseButtonArg = z.enum(['left', 'right', 'middle']);
+export const mouseButtonArg = z.enum(['left', 'right', 'middle', 'back', 'forward']);
 // ------------------------------------------------------------------ registration
 
 export interface ToolAnnotations {
