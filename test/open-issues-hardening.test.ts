@@ -6,11 +6,18 @@ const root = process.cwd();
 const source = (rel: string) => readFileSync(path.join(root, ...rel.split('/')), 'utf8');
 
 describe('open upstream issue hardening bundle', () => {
+  /**
+   * Both parsers keep the same shape, so a tab URL and the page's own route can never
+   * disagree about which conversation a document is on. What each pattern accepts and
+   * rejects is covered behaviourally in extension.test.ts and content-script.test.ts;
+   * this only holds the two copies together.
+   */
   it('recognises normal and Project ChatGPT conversation routes', () => {
     const dom = source('extension/chatgpt-dom.js');
     const worker = source('extension/background.js');
-    expect(dom).toContain("(?:^|\\/)c\\/([0-9a-f-]{8,64})(?:\\/|$)");
-    expect(worker).toContain("(?:^|\\/)c\\/([0-9a-f-]{8,64})(?:\\/|$)");
+    expect(dom).toContain("/^\\/(?:g\\/[^/]+\\/)?c\\/([0-9a-f-]{8,64})(?:\\/|$)/i");
+    expect(worker).toContain("/^\\/(?:g\\/[^/]+\\/)?c\\/([0-9a-f-]{8,64})(?:\\/|$)/i");
+    expect(source('extension/content.js')).toContain('CLF_DOM.conversationFromPath(path)');
   });
 
   it('keeps the Chrome MV3 manifest valid while retaining Firefox runtime compatibility hooks', () => {
