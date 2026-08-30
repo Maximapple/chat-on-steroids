@@ -43,7 +43,7 @@
   //
   // So: publish a handle instead of a flag and let a replacement supersede a dead one. A
   // *healthy* incumbent still wins, so the ordinary static/recovery race is unchanged.
-  const RECORDER_VERSION = 10;
+  const RECORDER_VERSION = 11;
   const recorderHandle = {
     version: RECORDER_VERSION,
     healthy: () => false,
@@ -116,6 +116,7 @@
   const RENDER_STREAM_KEY = 'renderStreamEnabled';
   /** Timestamps are useful for debugging, but too noisy for the normal transcript. */
   const SHOW_TIMES_KEY = 'showStreamTimes';
+  const REPLACE_WORKER_DRAFTS_KEY = 'replaceWorkerDrafts';
   /**
    * Production now starts with transcript overwrite enabled. Tests deliberately start off
    * and opt in case-by-case so renderer regressions do not contaminate unrelated capture
@@ -150,6 +151,17 @@
 
   function presentationScrollActive() {
     return Date.now() - lastPresentationScrollInputAt < PRESENTATION_SCROLL_IDLE_MS;
+  }
+
+  async function replaceWorkerDraftsEnabled() {
+    if (TEST_MODE || !webext || !webext.storage || !webext.storage.local) return false;
+    try {
+      const stored = await webext.storage.local.get([REPLACE_WORKER_DRAFTS_KEY]);
+      return stored[REPLACE_WORKER_DRAFTS_KEY] === true;
+    } catch {
+      // Storage failure is fail-closed: preserve the draft and let the bootstrap fail visibly.
+      return false;
+    }
   }
 
   async function loadRenderPreference() {
@@ -8264,22 +8276,31 @@
     };
     if (await failIfRetargeted()) return;
 
-    // Fresh worker/resume commands still have the old one-shot draft rule. A revival never gets
-    // this far with a draft: its pre-redeem readiness wait preserves the user's text and waits
-    // for the exact chat to become safe without consuming browser ownership.
-    const existing = CLF_DOM.composer();
-    if (existing && (existing.textContent || '').trim()) {
-      return void (await fail('the composer already holds something the user was writing'));
-    }
-
     // The composer is the readiness signal. Page-level `readyState` says whether every
-    // resource finished loading, not whether this editing host is usable, and waiting on it
-    // is what turned a fresh resume tab into a blank tab for a minute on a throttled page.
+    // resource finished loading, not whether this editing host is usable.
     const readyComposer = await waitForComposer();
     if (!readyComposer) return void (await fail('ChatGPT never exposed a usable composer for bootstrap'));
     if (await failIfRetargeted()) return;
 
-    if (!CLF_DOM.insertPrompt(boot.text)) return void (await fail('ChatGPT refused the inserted text'));
+    const hasExistingDraft = (readyComposer.textContent || '').trim() !== '';
+    let replaceExistingDraft = false;
+    if (hasExistingDraft) {
+      // Only a fresh app-opened command page is eligible. Existing-chat revivals already went
+      // through waitForRevivalSubmitReady(), so their drafts remain protected regardless of
+      // this preference. Redeem + marker/onTarget checks above prove this fresh page belongs
+      // to the app command before any user text may be discarded.
+      const eligibleFreshBootstrap =
+        fromUrl && !openedConversation && !target && (boot.type === 'worker' || boot.type === 'resume');
+      if (eligibleFreshBootstrap) replaceExistingDraft = await replaceWorkerDraftsEnabled();
+      if (await failIfRetargeted()) return;
+      if (!replaceExistingDraft) {
+        return void (await fail('the composer already holds something the user was writing'));
+      }
+    }
+
+    if (!CLF_DOM.insertPrompt(boot.text, replaceExistingDraft)) {
+      return void (await fail('ChatGPT refused the inserted text'));
+    }
     // Give synchronous React/input work one microtask turn to replace the editing host, then
     // re-prove the exact draft before the irreversible send. This used to sleep for 100 ms.
     // Long-hidden Chrome tabs throttle wall-clock timers, so that tiny "stability" delay became

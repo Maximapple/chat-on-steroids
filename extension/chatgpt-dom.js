@@ -1318,15 +1318,29 @@ var CLF_DOM = (() => {
     }, false);
   }
 
-  /** Types into the composer. Refuses if the user already has a draft there. */
-  function insertPrompt(value) {
+  /**
+   * Types into the composer. Existing text is preserved unless the caller has already
+   * proven this is an app-owned fresh bootstrap and the persistent replace-drafts option
+   * is enabled. Selection is confined to the composer; the caller still verifies the
+   * exact resulting text before the irreversible Send.
+   */
+  function insertPrompt(value, replaceExisting = false) {
     return safe(() => {
       const box = composer();
       if (!box) return false;
-      if ((box.textContent || '').trim() !== '') return false;
+      const existing = (box.textContent || '').trim();
+      if (existing !== '' && !replaceExisting) return false;
       box.focus();
+      if (existing !== '' && replaceExisting) {
+        const selection = window.getSelection();
+        if (!selection) return false;
+        const range = document.createRange();
+        range.selectNodeContents(box);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
       // execCommand still produces the native editing path ChatGPT listens for. Newer
-      // composer builds occasionally ignore its return value, so verify the DOM and
+      // composer builds occasionally ignore its return value, so verify in the caller and
       // also emit input so React cannot miss the mutation.
       document.execCommand('insertText', false, value);
       box.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
