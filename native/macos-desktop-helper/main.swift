@@ -818,10 +818,17 @@ private let modifierFlags: [String: CGEventFlags] = [
 
 private func normalizedKeyName(_ name: String) -> String {
     switch name.lowercased() {
-    case "cmd", "meta": return "command"
+    case "cmd", "meta", "super", "win": return "command"
     case "alt": return "option"
     case "ctrl": return "control"
     case "esc": return "escape"
+    // The DOM names for the arrow keys. A model that has learned browser key vocabulary
+    // emits these, and refusing them for the sake of four shorter synonyms is a needless
+    // BAD_KEY on the single most common navigation keys there are.
+    case "arrowleft": return "left"
+    case "arrowright": return "right"
+    case "arrowup": return "up"
+    case "arrowdown": return "down"
     default: return name.lowercased()
     }
 }

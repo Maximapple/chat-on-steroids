@@ -91,6 +91,39 @@ describe('desktop helper overhaul contract', () => {
     expect(swift).toMatch(/private func mouseTypes[\s\S]*default: return \(\.otherMouseDown/);
   });
 
+  /**
+   * The vocabulary a computer-use model actually emits.
+   *
+   * Two names were refused before they ever reached code that knew what to do with them:
+   * `wheel` for the middle button, which both native layers have always accepted while the
+   * schema rejected it, and the DOM arrow names, which are what browser key vocabulary uses.
+   *
+   * Checked against the shipped `Vk` on this machine: ArrowLeft/Right/Up/Down resolve to
+   * 0x25/0x27/0x26/0x28, Enter, Return, Escape, Backspace, Delete, Tab, Space, Home, End,
+   * PageUp, PageDown, ctrl, alt, shift, cmd, meta, super, win, option, F5 and plain
+   * letters/digits all resolve, and an unknown name is still refused.
+   */
+  it('accepts the button and key names computer use emits', () => {
+    expect(HELPER_SCRIPT).toContain("'ARROWUP'=0x26; 'ARROWDOWN'=0x28; 'ARROWLEFT'=0x25; 'ARROWRIGHT'=0x27;");
+    expect(HELPER_SCRIPT).toContain("'WIN'=0x5B; 'SUPER'=0x5B; 'CMD'=0x5B; 'META'=0x5B;");
+    expect(HELPER_SCRIPT).toContain("'CTRL'=0x11; 'CONTROL'=0x11; 'ALT'=0x12; 'OPTION'=0x12; 'SHIFT'=0x10;");
+    // An unrecognised name must still fail rather than resolving to something arbitrary.
+    expect(HELPER_SCRIPT).toContain('throw "BAD_KEY: Unknown key: $name"');
+
+    const swift = readFileSync(path.join(process.cwd(), 'native/macos-desktop-helper/main.swift'), 'utf8');
+    expect(swift).toContain('case "arrowleft": return "left"');
+    expect(swift).toContain('case "arrowright": return "right"');
+    expect(swift).toContain('case "arrowup": return "up"');
+    expect(swift).toContain('case "arrowdown": return "down"');
+    expect(swift).toContain('case "cmd", "meta", "super", "win": return "command"');
+
+    const kernel = readFileSync(path.join(process.cwd(), 'src/main/mcp/kernel.ts'), 'utf8');
+    expect(kernel).toContain("z.enum(['left', 'right', 'middle', 'wheel', 'back', 'forward'])");
+    // Both native layers already routed wheel to the middle button; only the schema refused.
+    expect(HELPER_SCRIPT).toContain('case "middle": case "wheel":');
+    expect(swift).toContain('case "middle", "wheel": return .center');
+  });
+
   /** And the same guarantee on the macOS side, where the capture API does it for us. */
   it('keeps the pointer in every macOS capture path', () => {
     const swift = readFileSync(path.join(process.cwd(), 'native/macos-desktop-helper/main.swift'), 'utf8');
