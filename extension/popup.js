@@ -16,10 +16,12 @@ const webext = globalThis.browser ?? globalThis.chrome;
 const $ = (id) => document.getElementById(id);
 const RENDER_STREAM_KEY = 'renderStreamEnabled';
 const SHOW_TIMES_KEY = 'showStreamTimes';
+const REPLACE_WORKER_DRAFTS_KEY = 'replaceWorkerDrafts';
 const POLL_MS = 1500;
 
 let overwriteEnabled = true;
 let showTimes = false;
+let replaceWorkerDrafts = false;
 let latest = { status: null, tab: null };
 let openedOnFailure = false;
 
@@ -358,11 +360,13 @@ function syncOverwrite() {
 }
 
 async function loadPreferences() {
-  const stored = await webext.storage.local.get([RENDER_STREAM_KEY, SHOW_TIMES_KEY]);
+  const stored = await webext.storage.local.get([RENDER_STREAM_KEY, SHOW_TIMES_KEY, REPLACE_WORKER_DRAFTS_KEY]);
   overwriteEnabled = stored[RENDER_STREAM_KEY] !== false;
   showTimes = stored[SHOW_TIMES_KEY] === true;
+  replaceWorkerDrafts = stored[REPLACE_WORKER_DRAFTS_KEY] === true;
   syncOverwrite();
   $('timeToggle').checked = showTimes;
+  $('replaceDraftToggle').checked = replaceWorkerDrafts;
 }
 
 /** Puts one value on the clipboard and says so in place, without moving anything. */
@@ -420,6 +424,17 @@ $('overwriteToggle').addEventListener('change', async () => {
   } catch {
     overwriteEnabled = previous;
     syncOverwrite();
+  }
+});
+
+$('replaceDraftToggle').addEventListener('change', async () => {
+  const previous = replaceWorkerDrafts;
+  replaceWorkerDrafts = $('replaceDraftToggle').checked === true;
+  try {
+    await webext.storage.local.set({ [REPLACE_WORKER_DRAFTS_KEY]: replaceWorkerDrafts });
+  } catch {
+    replaceWorkerDrafts = previous;
+    $('replaceDraftToggle').checked = replaceWorkerDrafts;
   }
 });
 

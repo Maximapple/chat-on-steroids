@@ -167,7 +167,10 @@ let helperGeneration = 0;
 let helperStopping = false;
 const helperRetirements = new Set<Promise<void>>();
 
-function helperTimeoutMs(request: Record<string, unknown>): number {
+export function helperTimeoutMs(
+  request: Record<string, unknown>,
+  platform: NodeJS.Platform = process.platform
+): number {
   switch (request['op']) {
     case 'windows':
     case 'active':
@@ -177,16 +180,17 @@ function helperTimeoutMs(request: Record<string, unknown>): number {
     case 'find_ui':
       return 8_000;
     case 'capture':
-      // macOS can spend 12s enumerating plus 10s starting a pre-14 stream and 15s waiting
-      // for its first frame. Leave bounded protocol/serialization headroom outside that budget.
-      return process.platform === 'darwin' ? 60_000 : 10_000;
     case 'snapshot':
-      // snapshot may perform the same capture and then a bounded Accessibility traversal.
-      return process.platform === 'darwin' ? 70_000 : 10_000;
+      // ScreenCaptureKit can enumerate for 12s, start a pre-14 stream for 10s and wait
+      // 15s for a frame, potentially across multiple displays. Snapshot may then traverse AX.
+      return platform === 'darwin' ? 120_000 : 10_000;
     case 'warm':
       return 10_000;
     case 'act':
-      return 15_000;
+      if (platform !== 'darwin') return 15_000;
+      // v12 intentionally allows up to 2.5s for an explicit focus proof. Preserve enough
+      // parent headroom for the complete permitted batch so partial evidence is returned.
+      return 15_000 + Math.min(20, Array.isArray(request['actions']) ? request['actions'].length : 1) * 3_000;
     default:
       return HELPER_TIMEOUT_MS;
   }

@@ -32,8 +32,9 @@ describe('macOS Desktop PR #28 hardening', () => {
   });
 
   it('preserves capture geometry and has an honest visible-screen fallback', () => {
-    expect(swift).toContain('configuration.width = width');
-    expect(swift).toContain('configuration.height = height');
+    expect(swift).toContain('configureCaptureDimensions(configuration, width: width, height: height)');
+    expect(swift).toContain('NSSelectorFromString("setWidth:")');
+    expect(swift).toContain('NSSelectorFromString("setHeight:")');
     expect(swift).toContain('captureMode = "screen_fallback"');
     expect(swift).toContain('moved or resized during capture');
     expect(swift).toContain('MAX_CAPTURE_PIXELS = 8_000_000');
@@ -48,8 +49,9 @@ describe('macOS Desktop PR #28 hardening', () => {
   });
 
   it('gives ScreenCaptureKit enough bounded parent time to finish its own budgets', () => {
-    expect(computer).toContain("return process.platform === 'darwin' ? 60_000 : 10_000;");
-    expect(computer).toContain("return process.platform === 'darwin' ? 70_000 : 10_000;");
+    expect(computer).toContain("return platform === 'darwin' ? 120_000 : 10_000;");
+    expect(computer).toContain('* 3_000');
+    expect(computer).toContain('export function helperTimeoutMs');
   });
 
   it('explains the macOS 12.3 Desktop floor instead of calling old Monterey unsupported', () => {
