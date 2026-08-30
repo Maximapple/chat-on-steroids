@@ -52,7 +52,9 @@ describe('macOS desktop safety hardening', () => {
     expect(swift).toContain('if globalShortcut { event.post(tap: .cghidEventTap) }');
     expect(swift).toContain('UI_ACTION_DISABLED');
     expect(swift).toContain('the referenced accessibility control is disabled');
-    expect(swift).toContain('axBool(element, kAXEnabledAttribute as CFString, default: false)');
+    // An explicit AXEnabled=false refuses every action, and silence still refuses a click.
+    expect(swift).toContain('let enabled = axOptionalBool(element, kAXEnabledAttribute as CFString)');
+    expect(swift).toContain(': (enabled ?? false)');
     expect(swift).toContain('["volumeup", "volumedown", "mute"]');
     expect(swift).toContain('(1...20).contains(value)');
   });
@@ -197,6 +199,31 @@ describe('macOS desktop safety hardening', () => {
     expect(swift).toMatch(
       /private func currentLayoutKey\(for logicalName: String, in snapshot: KeyboardLayoutSnapshot\)[\s\S]*UCKeyTranslate/
     );
+  });
+
+  /**
+   * QA found a blank TextEdit document refused with UI_ACTION_DISABLED while physical typing
+   * into the same control worked. TextEdit's document AXTextArea publishes no AXEnabled
+   * attribute at all, and the gate read that silence as false.
+   *
+   * A value write has a stronger authority available — accessibility says directly whether
+   * AXValue can be written — so silence defers to that. Silence still refuses a click, and an
+   * explicit AXEnabled=false still refuses everything: a control that says it is disabled is
+   * disabled whatever it reports about settability.
+   */
+  it('lets a settable value speak for a control that publishes no AXEnabled', () => {
+    expect(swift).toContain('private func axOptionalBool');
+    expect(swift).toContain('private func axValueIsSettable');
+    expect(swift).toContain(
+      'let permitted = action == "set_value" ? (enabled ?? axValueIsSettable(element)) : (enabled ?? false)'
+    );
+    // Read once, before the branch, so the refusal cannot disagree with the write below it.
+    expect(swift).toMatch(
+      /let enabled = axOptionalBool\(element, kAXEnabledAttribute as CFString\)[\s\S]*guard permitted else \{[\s\S]*UI_ACTION_DISABLED/
+    );
+    expect(swift).toMatch(/if action == "set_value" \{\s*\n\s*guard axValueIsSettable\(element\),/);
+    // The generic helper keeps its old meaning for every other caller.
+    expect(swift).toContain('axOptionalBool(element, attribute) ?? fallback');
   });
 
   /**
