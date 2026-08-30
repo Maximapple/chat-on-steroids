@@ -79,8 +79,16 @@ public static class Clf {
   [DllImport("user32.dll")] static extern bool AttachThreadInput(uint from, uint to, bool attach);
   [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint flags);
   [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] static extern bool GetCursorInfo(ref CURSORINFO ci);
+  [DllImport("user32.dll")] static extern bool GetIconInfo(IntPtr icon, out ICONINFO info);
+  [DllImport("user32.dll")] static extern bool DrawIconEx(IntPtr hdc, int x, int y, IntPtr icon, int w, int h, uint step, IntPtr brush, uint flags);
+  [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
 
   public struct POINT { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public POINT ptScreenPos; }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct ICONINFO { public bool fIcon; public int xHotspot; public int yHotspot; public IntPtr hbmMask; public IntPtr hbmColor; }
   public struct RECT { public int Left, Top, Right, Bottom; }
   delegate bool EnumProc(IntPtr h, IntPtr lp);
 
@@ -312,10 +320,48 @@ public static class Clf {
     return outW + "," + outH;
   }
 
+  /**
+   * Paints the live pointer into a shot whose top-left is at screen (originX, originY).
+   *
+   * Neither CopyFromScreen nor PrintWindow composites the cursor, while ScreenCaptureKit does
+   * it for us on macOS. Without this the model cannot see where the pointer is, cannot read a
+   * hover state, and cannot confirm from the picture that a move actually landed.
+   *
+   * Drawn at the hotspot rather than the icon origin, because the hotspot is the pixel the
+   * pointer actually addresses — an I-beam or a resize arrow is centred, not top-left, and
+   * drawing at the raw position would put the tip a few pixels off exactly when a coordinate
+   * is being read off the image. Failure here is never fatal: a screenshot without the
+   * pointer is still a screenshot.
+   */
+  static void PaintCursor(Graphics g, int originX, int originY, int w, int h) {
+    CURSORINFO ci = new CURSORINFO();
+    ci.cbSize = Marshal.SizeOf(typeof(CURSORINFO));
+    if (!GetCursorInfo(ref ci)) return;
+    // CURSOR_SHOWING. A hidden pointer — full-screen video, a text field mid-typing — must
+    // not be invented into the picture.
+    if ((ci.flags & 0x00000001) == 0 || ci.hCursor == IntPtr.Zero) return;
+    ICONINFO info;
+    if (!GetIconInfo(ci.hCursor, out info)) return;
+    try {
+      int x = ci.ptScreenPos.X - originX - info.xHotspot;
+      int y = ci.ptScreenPos.Y - originY - info.yHotspot;
+      // Cheap reject only for a pointer nowhere near the shot; DrawIconEx clips the rest.
+      if (x < -256 || y < -256 || x > w + 256 || y > h + 256) return;
+      IntPtr dc = g.GetHdc();
+      try { DrawIconEx(dc, x, y, ci.hCursor, 0, 0, 0, IntPtr.Zero, 0x0003); }
+      finally { g.ReleaseHdc(dc); }
+    } finally {
+      // GetIconInfo hands over two bitmap copies; hCursor itself is shared and is not ours.
+      if (info.hbmMask != IntPtr.Zero) DeleteObject(info.hbmMask);
+      if (info.hbmColor != IntPtr.Zero) DeleteObject(info.hbmColor);
+    }
+  }
+
   public static string Capture(int x, int y, int w, int h, int maxW, string file) {
     using (Bitmap shot = new Bitmap(w, h))
     using (Graphics g = Graphics.FromImage(shot)) {
       g.CopyFromScreen(x, y, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
+      PaintCursor(g, x, y, w, h);
       return SavePng(shot, maxW, file);
     }
   }
@@ -334,6 +380,9 @@ public static class Clf {
       try { ok = PrintWindow(h, dc, 2); }
       finally { g.ReleaseHdc(dc); }
       if (!ok) return "";
+      // The window was rendered off-screen, so the pointer is placed by the window's own
+      // screen rect. Outside it, PaintCursor's bounds check drops it.
+      PaintCursor(g, r.Left, r.Top, w, height);
       return SavePng(shot, maxW, file);
     }
   }

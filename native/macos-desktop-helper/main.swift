@@ -265,7 +265,7 @@ private func windowServerFrontWindowID(rows suppliedRows: [WindowRow]? = nil) ->
 private func foregroundWindowID() -> CGWindowID? {
     guard let pid = frontmostPID() else { return nil }
     let rows = allWindowRows(includeMinimized: false)
-    guard let frontID = windowServerFrontWindowID(rows: rows),
+    guard let frontID = frontWindowID(rows: rows),
           let front = rows.first(where: { $0.id == frontID }),
           front.pid == pid else { return nil }
     // Screen-only observation must still work without Accessibility. When AX is available,
@@ -454,10 +454,35 @@ private func focusedAXElementWindowID(for pid: pid_t, rows suppliedRows: [Window
     return owningAXWindowID(element, pid: pid, rows: suppliedRows)
 }
 
+/**
+ * The front window, with one application's own transient child windows resolved by AX.
+ *
+ * WindowServer z-order answers "what is on top", which is not the same question as "which
+ * window receives keyboard input". Chrome's link-preview bubble and its omnibox popup are
+ * ordinary layer-0 windows of the browser that legitimately sit above the window the user is
+ * typing in. Reading the topmost one as the front window made `observe` report no foreground
+ * window at all while Chrome was plainly active, and made `focusWindow` poll a condition it
+ * could never satisfy until the bubble happened to disappear.
+ *
+ * Across applications nothing is relaxed. A window owned by another process still wins the
+ * z-order comparison, and every caller separately requires the answer to belong to
+ * `frontmostPID()`, so a covering window from another app still refuses input. The
+ * resolution applies only inside the frontmost application, where `AXFocusedWindow` is by
+ * definition the authority on where that application's keyboard input goes — and it is only
+ * trusted when it names a window this scan already saw and admitted.
+ */
+private func frontWindowID(rows: [WindowRow]) -> CGWindowID? {
+    guard let top = windowServerFrontWindowID(rows: rows) else { return nil }
+    guard let topRow = rows.first(where: { $0.id == top }), frontmostPID() == topRow.pid else { return top }
+    guard let focused = focusedAXWindowID(for: topRow.pid, rows: rows), focused != top else { return top }
+    guard rows.contains(where: { $0.id == focused && $0.pid == topRow.pid }) else { return top }
+    return focused
+}
+
 private func inputTargetMatches(_ row: WindowRow) -> Bool {
     guard frontmostPID() == row.pid else { return false }
     let rows = allWindowRows(includeMinimized: false)
-    guard windowServerFrontWindowID(rows: rows) == row.id else { return false }
+    guard frontWindowID(rows: rows) == row.id else { return false }
     guard focusedAXWindowID(for: row.pid, rows: rows) == row.id else { return false }
     // Missing focused-control evidence is not agreement. AX can return nil on a timeout,
     // an untyped value or an app transition; accepting that would turn an unprovable
