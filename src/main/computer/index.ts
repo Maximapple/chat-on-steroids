@@ -53,14 +53,21 @@ function publishMacOSDesktopAccess(status: MacOSDesktopAccessStatus): void {
   for (const listener of macOSDesktopAccessListeners) listener(status);
 }
 
+export type ActionRoute = 'uia' | 'sendinput' | 'focus' | 'local';
+
 export class ComputerError extends Error {
   readonly completedCount: number | null;
   readonly failedIndex: number | null;
+  readonly completedRoutes: ActionRoute[] | null;
 
-  constructor(message: string, details: { completedCount?: number; failedIndex?: number } = {}) {
+  constructor(
+    message: string,
+    details: { completedCount?: number; failedIndex?: number; completedRoutes?: ActionRoute[] } = {}
+  ) {
     super(message);
     this.completedCount = details.completedCount ?? null;
     this.failedIndex = details.failedIndex ?? null;
+    this.completedRoutes = details.completedRoutes ? [...details.completedRoutes] : null;
   }
 }
 
@@ -126,7 +133,7 @@ export interface ActionResult {
   cursor: PointerResult | null;
   clipboard: string[];
   completedCount: number;
-  routes: Array<'uia' | 'sendinput' | 'focus' | 'local'>;
+  routes: ActionRoute[];
   /** Exact single-window lease proven before this batch, when one exists. */
   targetWindow: number | null;
 }
@@ -354,10 +361,12 @@ async function startHelper(): Promise<HelperRuntime> {
           const message = String(reply['message'] ?? 'Desktop helper failed');
           const completed = Number(reply['completed_count']);
           const failed = Number(reply['failed_index']);
+          const completedRoutes = completedHelperRoutes(reply, completed);
           pending.reject(
             new ComputerError(`${code}: ${message}`, {
               ...(Number.isInteger(completed) && completed >= 0 ? { completedCount: completed } : {}),
-              ...(Number.isInteger(failed) && failed >= 0 ? { failedIndex: failed } : {})
+              ...(Number.isInteger(failed) && failed >= 0 ? { failedIndex: failed } : {}),
+              ...(completedRoutes ? { completedRoutes } : {})
             })
           );
         } else {
@@ -493,15 +502,27 @@ const MACOS_ADDON_WORKER_SOURCE = String.raw`
   }
 `;
 
+function completedHelperRoutes(reply: Record<string, any>, completed: number): ActionRoute[] | undefined {
+  const raw = reply['routes'];
+  if (!Number.isInteger(completed) || completed < 0 || !Array.isArray(raw) || raw.length !== completed) {
+    return undefined;
+  }
+  const routes = raw.map(String);
+  if (!routes.every((route) => route === 'uia' || route === 'sendinput' || route === 'focus')) return undefined;
+  return routes as ActionRoute[];
+}
+
 function protocolFailure(reply: Record<string, any>): ComputerError | null {
   if (reply['ok'] !== false) return null;
   const completed = Number(reply['completed_count']);
   const failed = Number(reply['failed_index']);
+  const completedRoutes = completedHelperRoutes(reply, completed);
   return new ComputerError(
     `${String(reply['error_code'] ?? 'HELPER_ERROR')}: ${String(reply['message'] ?? 'Desktop helper failed')}`,
     {
       ...(Number.isInteger(completed) && completed >= 0 ? { completedCount: completed } : {}),
-      ...(Number.isInteger(failed) && failed >= 0 ? { failedIndex: failed } : {})
+      ...(Number.isInteger(failed) && failed >= 0 ? { failedIndex: failed } : {}),
+      ...(completedRoutes ? { completedRoutes } : {})
     }
   );
 }
@@ -888,6 +909,8 @@ async function findUiLocked(
     let imageCenter: { x: number; y: number } | null = null;
     if (
       frame &&
+      // A visible fallback can contain an occluder even though semantic refs belong to the requested window.
+      frame.captureMode !== 'screen_fallback' &&
       bounds.x >= frame.region.x &&
       bounds.y >= frame.region.y &&
       bounds.x + bounds.width <= frame.region.x + frame.region.width &&
@@ -1076,6 +1099,9 @@ async function screenshotFromReply(
   const rawMode = String(reply['captureMode'] ?? (requestedWindow === null ? 'screen' : 'screen_fallback'));
   const captureMode: Screenshot['captureMode'] =
     rawMode === 'window' || rawMode === 'screen_fallback' ? rawMode : 'screen';
+  // Only an actual background-window bitmap can authorize later input against that window.
+  // Visible screen fallbacks may contain an occluding app and therefore remain screen-bound.
+  const frameWindow = captureMode === 'window' ? requestedWindow : null;
   const scale = size.width / region.width;
   const replyWindowGeometry = reply['windowGeometry'] as Rect | undefined;
   const rawDisplays = reply['displays'];
@@ -1091,7 +1117,7 @@ async function screenshotFromReply(
   )
     ? (rawDisplays as Rect[]).map((value) => ({ ...value }))
     : null;
-  if (process.platform === 'darwin' && requestedWindow === null && !displayTopology) {
+  if (process.platform === 'darwin' && frameWindow === null && !displayTopology) {
     throw new ComputerError('The macOS desktop helper returned a screen frame without exact display topology.');
   }
   const frame: Frame = {
@@ -1100,14 +1126,14 @@ async function screenshotFromReply(
     scale,
     width: size.width,
     height: size.height,
-    windowId: requestedWindow,
+    windowId: frameWindow,
     windowGeometry:
-      inheritedWindowGeometry === undefined
-        ? requestedWindow === null
-          ? null
-          : replyWindowGeometry ?? { ...region }
-        : inheritedWindowGeometry,
-    displayTopology: requestedWindow === null ? displayTopology : null,
+      frameWindow === null
+        ? null
+        : inheritedWindowGeometry === undefined
+          ? replyWindowGeometry ?? { ...region }
+          : inheritedWindowGeometry,
+    displayTopology: frameWindow === null ? displayTopology : null,
     captureMode
   };
   rememberFrame(frame);
@@ -1123,9 +1149,9 @@ async function screenshotFromReply(
     height: frame.height,
     region: frame.region,
     scale: frame.scale,
-    focused: requestedWindow === null ? null : reply['focused'] === true,
+    focused: frameWindow === null ? null : reply['focused'] === true,
     captureMode,
-    windowId: requestedWindow
+    windowId: frameWindow
   };
 }
 
@@ -1473,8 +1499,15 @@ async function actLocked(
       }
     }
   }
-  const toScreenX = (x: number): number => Math.round(frame.region.x + x / frame.scale);
-  const toScreenY = (y: number): number => Math.round(frame.region.y + y / frame.scale);
+  const clampMappedCoordinate = (mapped: number, origin: number, extent: number): number => {
+    const lower = Math.ceil(origin);
+    const upper = Math.max(lower, Math.ceil(origin + extent) - 1);
+    return Math.min(upper, Math.max(lower, mapped));
+  };
+  const toScreenX = (x: number): number =>
+    clampMappedCoordinate(Math.round(frame.region.x + x / frame.scale), frame.region.x, frame.region.width);
+  const toScreenY = (y: number): number =>
+    clampMappedCoordinate(Math.round(frame.region.y + y / frame.scale), frame.region.y, frame.region.height);
 
   // Resolve every semantic ref before the first side effect in the batch. Clipboard and wait
   // actions run locally and can occur before a later click_ref/set_value; resolving refs lazily
@@ -1519,6 +1552,12 @@ async function actLocked(
   if (requiresWindowLease && inferredTargetWindow === undefined) {
     throw new ComputerError(
       'INPUT_TARGET_REQUIRED: physical pointer and application text mutations require targetWindow, a window-bound frame, a semantic ref, or focus(window) in the same batch.'
+    );
+  }
+
+  if (needsFrame && frame.captureMode === 'screen_fallback' && inferredTargetWindow !== undefined) {
+    throw new ComputerError(
+      'INPUT_TARGET_UNPROVEN: visible screen_fallback pixels cannot authorize window-bound coordinate input. Focus the target and observe it again before pointing.'
     );
   }
 
@@ -1625,16 +1664,25 @@ async function actLocked(
     } catch (err) {
       const partial = err instanceof ComputerError ? (err.completedCount ?? 0) : 0;
       const failedBatchIndex = err instanceof ComputerError ? (err.failedIndex ?? partial) : partial;
-      for (let index = 0; index < partial; index++) {
-        const action = sending[index];
-        routes.push(action?.['type'] === 'click_ui' || action?.['type'] === 'set_value_ui' ? 'uia' : 'sendinput');
-      }
+      const helperRoutes = err instanceof ComputerError ? err.completedRoutes : null;
+      const hasExactPartialRoutes = helperRoutes !== null && helperRoutes.length === partial;
+      if (hasExactPartialRoutes) routes.push(...helperRoutes);
       const totalCompleted = completedCount + partial;
       const originalFailed = sendingIndices[failedBatchIndex] ?? sendingIndices[partial] ?? totalCompleted;
       const message = err instanceof Error ? err.message : String(err);
+      const exactRoutes = hasExactPartialRoutes ? [...routes] : null;
+      const routeEvidence = exactRoutes
+        ? exactRoutes.length > 0
+          ? exactRoutes.join('+')
+          : 'none'
+        : 'unavailable';
       throw new ComputerError(
-        `PARTIAL_BATCH: completed_count=${totalCompleted} failed_index=${originalFailed}. ${message}`,
-        { completedCount: totalCompleted, failedIndex: originalFailed }
+        `PARTIAL_BATCH: completed_count=${totalCompleted} failed_index=${originalFailed} routes=${routeEvidence}. ${message}`,
+        {
+          completedCount: totalCompleted,
+          failedIndex: originalFailed,
+          ...(exactRoutes ? { completedRoutes: exactRoutes } : {})
+        }
       );
     }
   };

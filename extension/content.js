@@ -100,6 +100,17 @@
   const ACTIVITY_MS = 2000;
   const IDLE_ACTIVITY_MS = 10_000;
   const HIDDEN_ACTIVITY_MS = 30_000;
+  /** Do not flicker a wait panel for ordinary sub-second/short model pauses. */
+  const WAIT_STATUS_MS = 2500;
+  /** A completed hidden turn gets a short live-cadence window to converge app-owned prose. */
+  const TERMINAL_ACTIVITY_CONVERGENCE_MS = 10_000;
+  /** Hidden is an idle throttle, not permission to starve live/finalizing work. */
+  function activityPollDelay(input) {
+    if (input.drafting || input.generating || input.finalizing) return LIVE_ACTIVITY_MS;
+    if (input.active) return ACTIVITY_MS;
+    if (input.hidden) return HIDDEN_ACTIVITY_MS;
+    return IDLE_ACTIVITY_MS;
+  }
   /** Keep a previously proven full replacement through brief Fiber/feed disagreement. */
   const REPLACEMENT_GRACE_MS = 8000;
   /**
@@ -578,6 +589,12 @@
   /** Exact request id -> one durable local turn, null when the retained stream conflicts. */
   const streamRequestTurnOwners = new Map();
   let pulling = false;
+  /** Hidden turn-end refresh that waits behind any activity request already in flight. */
+  let terminalActivityRefreshReady = false;
+  /** End of the bounded live-cadence convergence window for a hidden completed turn. */
+  let terminalActivityConvergeUntil = 0;
+  /** Exact final ChatGPT assistant revision the app-owned stream must converge to. */
+  let terminalActivityExpected = null;
 
   /**
    * `'resume' | 'worker' | null` — whether this chat was opened by the app, and how.
@@ -588,6 +605,8 @@
 
   /** The live state of this chat's Compact & resume job, straight from the app. */
   let job = null;
+  /** Caller-scoped multi-agent state; the bridge only sends this to the owning prime chat. */
+  let swarm = null;
   /** Local tool calls the app still has running. Only ever a hint from /activity. */
   let pendingTools = 0;
   /** Returned async exec sessions are not in-flight tools; they have their own lifecycle. */
@@ -1117,6 +1136,10 @@
     streamRequestTurnOwners.clear();
     since = 0;
     job = null;
+    swarm = null;
+    terminalActivityRefreshReady = false;
+    terminalActivityConvergeUntil = 0;
+    terminalActivityExpected = null;
     pendingTools = 0;
     backgroundExec = { running: 0, exitedUnread: 0, lastTransitionAt: null };
     lastBackgroundExecTransitionAt = 0;
@@ -1584,6 +1607,23 @@
       });
     }
     if (endedTurnId) emit({ kind: 'turn_end', turnId: endedTurnId, ...result });
+    if (endedTurnId && result.outcome === 'completed' && typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      // There are two independent durability boundaries here. First, flushWork can already own
+      // an older queue snapshot while this terminal Fiber scan appends the final revision. Second,
+      // the service worker may answer `durable` once it has journal custody while another drain is
+      // still delivering to the app. Keep the exact final {messageId,text} independent of queue
+      // removal and do not declare convergence until /activity returns that same revision as final.
+      terminalActivityExpected = finalAssistantSnapshot(ended, corroboratedTerminalMessageId);
+      if (terminalActivityExpected) {
+        terminalActivityConvergeUntil = Date.now() + TERMINAL_ACTIVITY_CONVERGENCE_MS;
+        void drainTerminalPageQueue()
+          .then(() => {
+            terminalActivityRefreshReady = true;
+            runTerminalActivityRefresh();
+          })
+          .catch(() => undefined);
+      }
+    }
     // The compaction turn settling is the moment the brief exists. Read here, from this
     // generation's own section, while `ended` still names it — a tick later the page is just
     // a transcript again and this answer is indistinguishable from any other.
@@ -4316,9 +4356,40 @@
     return false;
   }
 
-  function completeReplacementForTurn(turn, entries) {
+  /**
+   * Whether the app has the right stable message id but an older text revision than Fiber.
+   *
+   * One ChatGPT message id grows in place while streaming. Identity-complete therefore is not
+   * revision-complete. Positive text disagreement means our replacement is stale, so native
+   * ChatGPT prose must be visible immediately rather than hidden behind replacement grace.
+   */
+  function hasStaleAssistantRevision(turn, entries) {
     const descriptor = fiberTurnFor(turn);
     if (!descriptor) return false;
+    for (const message of descriptor.messages || []) {
+      if (!message || message.role === 'user' || !message.messageId) continue;
+      const pageText = typeof message.rawText === 'string' ? message.rawText : '';
+      if (!pageText) continue;
+      const app = (entries || []).find(
+        (entry) => entry && entry.kind === 'assistant_message' && entry.messageId === message.messageId
+      );
+      if (!app || typeof app.text !== 'string') continue;
+      // Only a *positive* disagreement counts: the page proves more prose for this same id
+      // than the app currently owns, so the replacement is behind the answer it replaces.
+      // The opposite direction is the sticky-overwrite case — one transient Fiber scan that
+      // still describes the previous revision while the app already holds the final one —
+      // and dropping a proven replacement for that would put ChatGPT's own copy back on the
+      // page for a frame and remount the stream root below the reader's position.
+      const pageRevision = terminalRevisionText(pageText);
+      const appRevision = terminalRevisionText(app.text);
+      if (pageRevision !== appRevision && pageRevision.length > appRevision.length) return true;
+    }
+    return false;
+  }
+
+  function completeReplacementForTurn(turn, entries) {
+    const descriptor = fiberTurnFor(turn);
+    if (!descriptor || hasStaleAssistantRevision(turn, entries)) return false;
     const expected = [];
     let assistantModelMessages = 0;
     for (const message of descriptor.messages || []) {
@@ -4738,8 +4809,10 @@
         // produced the visible full-overwrite -> native -> full-overwrite snap on reload and
         // during tool phases. Persistent incompleteness still falls back after the grace.
         const currentCallMissing = hasUnrepresentedFiberCall(turn, rendered);
+        const staleAssistantRevision = hasStaleAssistantRevision(turn, rendered);
         if (
           !currentCallMissing &&
+          !staleAssistantRevision &&
           existing &&
           Number.isFinite(lastComplete) &&
           Date.now() - lastComplete < REPLACEMENT_GRACE_MS
@@ -4849,6 +4922,86 @@
     } finally {
       settingsPulling = false;
     }
+  }
+
+  function terminalRevisionText(value) {
+    return typeof value === 'string' ? value.replace(/\r\n?/g, '\n').trim() : '';
+  }
+
+  function finalAssistantSnapshot(turn, corroborated = null) {
+    const descriptor = turn ? fiberTurnFor(turn) : null;
+    const fiberMessages = descriptor && Array.isArray(descriptor.messages) ? descriptor.messages : [];
+    for (let index = fiberMessages.length - 1; index >= 0; index--) {
+      const message = fiberMessages[index];
+      if (!message || message.role === 'user' || !message.messageId || !message.rawText) continue;
+      if (corroborated && message.messageId !== corroborated && message.rawMessageId !== corroborated) continue;
+      return { messageId: String(message.messageId), text: terminalRevisionText(message.rawText) };
+    }
+
+    const messages = turn ? CLF_DOM.messagesIn(turn) : [];
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index];
+      if (!message || message.role !== 'assistant' || !message.id || !message.text) continue;
+      if (corroborated && message.id !== corroborated) continue;
+      return { messageId: String(message.id), text: terminalRevisionText(message.text) };
+    }
+    return null;
+  }
+
+  function clearTerminalActivityConvergence() {
+    terminalActivityConvergeUntil = 0;
+    terminalActivityExpected = null;
+  }
+
+  function terminalActivityCaughtUp() {
+    if (!terminalActivityExpected || !terminalActivityExpected.messageId) return false;
+    const seq = streamMessageSeq.get(terminalActivityExpected.messageId);
+    if (!Number.isFinite(Number(seq))) return false;
+    const entry = streamBySeq.get(seq);
+    return Boolean(
+      entry &&
+        entry.kind === 'assistant_message' &&
+        (entry.final === true || entry.state === 'final') &&
+        terminalRevisionText(entry.text) === terminalActivityExpected.text
+    );
+  }
+
+  function terminalActivityFinalizing() {
+    if (terminalActivityConvergeUntil <= 0) return false;
+    if (terminalActivityCaughtUp() || Date.now() >= terminalActivityConvergeUntil) {
+      clearTerminalActivityConvergence();
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Drain snapshots that arrived while an older flushWork was already in flight.
+   *
+   * flush() snapshots queue.slice(0, 200). A final assistant revision can replace that message
+   * in the live queue after the old batch has already crossed into runtime.sendMessage. Awaiting
+   * the old flush is therefore not enough: once it settles, take a fresh batch until the page has
+   * handed over everything it currently owns. Count-bounded because the page queue itself is.
+   */
+  async function drainTerminalPageQueue() {
+    for (let attempt = 0; attempt < 8 && queue.length > 0; attempt++) {
+      const handedOff = await flush();
+      if (!handedOff) return false;
+    }
+    return queue.length === 0;
+  }
+
+  function runTerminalActivityRefresh() {
+    if (!terminalActivityRefreshReady || pulling) return;
+    terminalActivityRefreshReady = false;
+    void pullActivity()
+      .then(() => {
+        if (!alive || !sameChat()) return;
+        paint();
+        renderStreams();
+        injectStage();
+      })
+      .catch(() => undefined);
   }
 
   async function pullActivity() {
@@ -4998,6 +5151,7 @@
       const nextSince = Number(data.nextSince);
       if (Number.isFinite(nextSince) && nextSince > since) since = nextSince;
       job = data.job || null;
+      swarm = data.swarm && typeof data.swarm === 'object' ? data.swarm : null;
       pendingTools = Number.isFinite(Number(data.pendingTools)) ? Number(data.pendingTools) : 0;
       const rawBackgroundExec =
         data.backgroundExec && typeof data.backgroundExec === 'object' ? data.backgroundExec : {};
@@ -5069,6 +5223,7 @@
       injectStage();
     } finally {
       pulling = false;
+      runTerminalActivityRefresh();
     }
     // A settled compaction brief is durable page state until the app acknowledges it. A
     // successful activity round trip is also our recovery clock after a transient capture
@@ -6281,7 +6436,7 @@
    * idle beside a chat that is compacting shows nothing.
    */
   function stageView(input) {
-    const { job, goal } = input;
+    const { job, goal, swarm: swarmState, pendingTools: toolCount, backgroundExec: execState, generating: isGenerating, quietMs } = input;
     if (job && job.busy) {
       const stage =
         job.stage === 'opening'
@@ -6293,7 +6448,95 @@
       // empty track under it would say there are stages nobody is being shown.
       return { stage, detail: '', body: '', kind: 'none', steps: [], at: 0, done: false };
     }
-    return goalStageView(goal);
+    const goalView = goalStageView(goal);
+    if (goalView) return goalView;
+
+    const quiet = Number.isFinite(Number(quietMs)) ? Math.max(0, Number(quietMs)) : 0;
+    if (quiet < WAIT_STATUS_MS) return null;
+
+    const tools = Number.isFinite(Number(toolCount)) ? Math.max(0, Number(toolCount)) : 0;
+    if (tools > 0) {
+      return {
+        stage: tools === 1 ? 'Waiting for a tool call' : `Waiting for ${tools} tool calls`,
+        detail: tools === 1 ? 'The current operation has not returned yet' : 'Current operations have not returned yet',
+        body: '',
+        kind: 'none',
+        steps: [],
+        at: 0,
+        done: false
+      };
+    }
+
+    if (swarmState && swarmState.running && Array.isArray(swarmState.agents)) {
+      const workers = swarmState.agents.filter((entry) => entry && entry.role === 'worker');
+      const liveStates = new Set(['invited', 'active', 'detached', 'waking']);
+      const activeWorkers = workers.filter((entry) => liveStates.has(entry.state));
+      if (activeWorkers.length > 0) {
+        const finished = workers.filter((entry) => entry.state === 'sleeping' || entry.state === 'finished').length;
+        const failed = workers.filter((entry) => entry.state === 'failed').length;
+        const name = (entry) => String(entry.label || entry.id || 'worker').replace(/\s+/g, ' ').trim().slice(0, 60);
+        const labels = activeWorkers.map(name).filter(Boolean);
+        const summary = [`${finished} finished`, `${activeWorkers.length} running`];
+        if (failed > 0) summary.splice(1, 0, `${failed} failed`);
+        return {
+          stage:
+            activeWorkers.length === 1
+              ? `Worker still running: ${labels[0] || 'worker'}`
+              : `${activeWorkers.length} workers still running`,
+          detail: summary.join(' · '),
+          body: activeWorkers.length > 1 && labels.length > 0 ? `Still working: ${labels.slice(0, 3).join(', ')}` : '',
+          kind: 'none',
+          steps: [],
+          at: 0,
+          done: false
+        };
+      }
+    }
+
+    const unreadProcesses = Number(execState && execState.exitedUnread);
+    if (Number.isFinite(unreadProcesses) && unreadProcesses > 0) {
+      return {
+        stage:
+          unreadProcesses === 1
+            ? '1 completed background result waiting'
+            : `${unreadProcesses} completed background results waiting`,
+        detail: 'Read the final output with write_stdin before starting more background work',
+        body: '',
+        kind: 'none',
+        steps: [],
+        at: 0,
+        done: false
+      };
+    }
+
+    const runningProcesses = Number(execState && execState.running);
+    if (Number.isFinite(runningProcesses) && runningProcesses > 0) {
+      return {
+        stage: runningProcesses === 1 ? 'Background process still running' : `${runningProcesses} background processes still running`,
+        detail: 'The process is still active even though its tool call already returned',
+        body: '',
+        kind: 'none',
+        steps: [],
+        at: 0,
+        done: false
+      };
+    }
+
+    // The page proves only that ChatGPT still owns an open turn and has made no visible
+    // progress through the quiet threshold. Say exactly that; never invent a server/queue.
+    if (isGenerating) {
+      return {
+        stage: 'ChatGPT is still working',
+        detail: 'Waiting for the current response to make visible progress',
+        body: '',
+        kind: 'none',
+        steps: [],
+        at: 0,
+        done: false
+      };
+    }
+
+    return null;
   }
 
   /**
@@ -6554,6 +6797,11 @@
     }
     const view = stageView({
       job,
+      swarm,
+      pendingTools,
+      backgroundExec,
+      generating,
+      quietMs: Math.max(0, Date.now() - lastChangeAt),
       goal: goalConfig
         ? { phase: goalPhase, error: goalError, model: goalConfig.model, draft: goalDraft, opening }
         : null
@@ -8424,7 +8672,17 @@
         // The next scheduled pass retries after worker/app recovery.
       }
       const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
-      const active = generating || nativeBusy || Boolean(compactCapture) || Boolean(job && job.busy) || pendingTools > 0;
+      const finalizing = terminalActivityFinalizing();
+      const active =
+        generating ||
+        nativeBusy ||
+        Boolean(compactCapture) ||
+        Boolean(job && job.busy) ||
+        pendingTools > 0 ||
+        finalizing ||
+        (!hidden && Boolean(swarm && swarm.running)) ||
+        (!hidden && Number(backgroundExec && backgroundExec.running) > 0) ||
+        (!hidden && Number(backgroundExec && backgroundExec.exitedUnread) > 0);
       // A goal draft lives entirely on this feed — its streamed text is what the stage panel
       // shows, and the finished message only arrives here — so it polls at the live cadence
       // even in a hidden tab, which is exactly the tab this feature runs in.
@@ -8437,17 +8695,7 @@
       // microtask chain that starved the event loop. The next test then waited forever for a
       // window 'load' event that no macrotask could ever deliver.
       if (!TEST_MODE) {
-        scheduleActivityPull(
-          drafting
-            ? LIVE_ACTIVITY_MS
-            : hidden
-              ? HIDDEN_ACTIVITY_MS
-              : generating
-                ? LIVE_ACTIVITY_MS
-                : active
-                  ? ACTIVITY_MS
-                  : IDLE_ACTIVITY_MS
-        );
+        scheduleActivityPull(activityPollDelay({ drafting, hidden, generating, active, finalizing }));
       }
     }, Math.max(0, delay));
   }
@@ -8721,6 +8969,8 @@
       foldBootstrap,
       injectControl,
       injectStage,
+      activityPollDelay,
+      terminalActivityFinalizing,
       pullActivity,
       runCommand,
       startCompact,

@@ -769,7 +769,9 @@ describe('surface boundaries', () => {
     // discriminated action variants, each spelling out its own arguments, is what keeps
     // its validation errors small and its action set explicit. `exec_command` earns a narrow
     // exception for the `cmds` contract that removes whole connector round trips, including
-    // the one-shell and per-command-exit semantics. `agents` is the other exception: its description is where the prime learns to write
+    // the one-shell and per-command-exit semantics, and since issue #36 for the sentence that
+    // makes draining a returned session ID to its terminal exit part of the tool contract:
+    // those bytes are what stops a completed background result from being silently dropped. `agents` is the other exception: its description is where the prime learns to write
     // shared context once instead of per worker, to batch messages into one call, and to
     // hand back RESULT/CHANGES/VALIDATION/BLOCKERS — bytes spent once at discovery to save
     // a great many in every run that follows.
@@ -783,7 +785,7 @@ describe('surface boundaries', () => {
             : tool.name === 'agents'
               ? 3_400
               : tool.name === 'exec_command'
-                ? 3_500
+                ? 3_700
                 : 3_000;
       expect(bytes, `${tool.name} schema is ${bytes} bytes`).toBeLessThan(budget);
     }
@@ -3219,4 +3221,146 @@ describe('the outcome a shell command is recorded with', () => {
     });
     expect(context.outcome).toBe('error');
   });
+});
+
+describe('issue #36 completed exec result drain guard', () => {
+  beforeEach(() => {
+    ctx.readOnly = false;
+    ctx.caps = withCaps({ command: true });
+    resetExecOwnershipForTests();
+  });
+
+  const prove = (requestId: string, conversationId: string) =>
+    observeRequestCorrelation({
+      requestId,
+      conversationId,
+      sessionId: '2026-08-30-exec-drain',
+      messageId: `msg-${requestId}`,
+      tool: 'exec_command',
+      observedAt: Date.now()
+    });
+
+  const asChat = (requestId: string, name: string, args: Record<string, unknown>) =>
+    modern('tools/call', { name, arguments: args }, { 'x-request-id': `${requestId}/att1` });
+
+  const callAs = async (
+    conversationId: string,
+    requestId: string,
+    name: string,
+    args: Record<string, unknown>
+  ) => {
+    expect(prove(requestId, conversationId)).toBe('stored');
+    return asChat(requestId, name, args);
+  };
+
+  it('bounds new fan-out, keeps results lossless, and isolates another chat', async () => {
+    const owner = 'conv-exec-drain-owner';
+    const stranger = 'conv-exec-drain-stranger';
+    const threshold = 4;
+    await fs.writeFile(
+      path.join(approved, 'issue36-delayed-exit.cjs'),
+      "setTimeout(() => { console.log('done=' + process.argv[2]); }, 600);\n",
+      'utf8'
+    );
+    await fs.writeFile(path.join(approved, 'issue36-quick.cjs'), "console.log('quick-ok');\n", 'utf8');
+
+    const ids: number[] = [];
+    for (let index = 0; index < threshold; index++) {
+      const started = await callAs(owner, `wfr_issue36_start_${index}`, 'exec_command', {
+        cmd: `node issue36-delayed-exit.cjs ${index}`,
+        workdir: '/workspace',
+        yield_time_ms: 25
+      });
+      expect(started.body.result?.isError, textOf(started)).not.toBe(true);
+      const id = Number(textOf(started).match(/Process running with session ID (\d+)/)?.[1]);
+      expect(Number.isInteger(id)).toBe(true);
+      ids.push(id);
+    }
+
+    await vi.waitFor(
+      () => {
+        for (const id of ids) expect(unifiedExecManager.backgroundState(id)?.exitedUnread).toBe(true);
+      },
+      { timeout: 10_000, interval: 25 }
+    );
+
+    const blocked = await callAs(owner, 'wfr_issue36_blocked', 'exec_command', {
+      cmd: 'node issue36-quick.cjs',
+      workdir: '/workspace',
+      yield_time_ms: 5_000
+    });
+    expect(blocked.body.result?.isError).toBe(true);
+    expect(textOf(blocked)).toContain('EXEC_RESULTS_PENDING');
+    expect(textOf(blocked)).toContain('No command was run');
+    for (const id of ids) expect(textOf(blocked)).toContain(String(id));
+
+    // Correlation can arrive shortly after the MCP request starts. The circuit breaker must
+    // use the same bounded attribution path as ownership instead of treating that call as anonymous.
+    const delayedRequestId = 'wfr_issue36_delayed_blocked';
+    const delayedBlockedPromise = asChat(delayedRequestId, 'exec_command', {
+      cmd: 'node issue36-quick.cjs',
+      workdir: '/workspace',
+      yield_time_ms: 5_000
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(prove(delayedRequestId, owner)).toBe('stored');
+    const delayedBlocked = await delayedBlockedPromise;
+    expect(delayedBlocked.body.result?.isError).toBe(true);
+    expect(textOf(delayedBlocked)).toContain('EXEC_RESULTS_PENDING');
+    expect(textOf(delayedBlocked)).toContain('No command was run');
+
+    // If page attribution never arrives, an existing unread backlog makes anonymous fallback
+    // unsafe: it could bypass the owner's circuit breaker. Fail closed without spawning.
+    const unproven = await asChat('wfr_issue36_unproven_blocked', 'exec_command', {
+      cmd: 'node issue36-quick.cjs',
+      workdir: '/workspace',
+      yield_time_ms: 5_000
+    });
+    expect(unproven.body.result?.isError).toBe(true);
+    expect(textOf(unproven)).toContain('CALLER_IDENTITY_REQUIRED');
+    expect(textOf(unproven)).toContain('no command was run');
+    expect(textOf(unproven)).not.toContain('quick-ok');
+
+    // A different proven conversation has no access to, and is not throttled by, this chat's ids.
+    const other = await callAs(stranger, 'wfr_issue36_stranger', 'exec_command', {
+      cmd: 'node issue36-quick.cjs',
+      workdir: '/workspace',
+      yield_time_ms: 5_000
+    });
+    expect(other.body.result?.isError, textOf(other)).not.toBe(true);
+    expect(textOf(other)).toContain('quick-ok');
+    expect(textOf(other)).not.toContain('EXEC_RESULTS_PENDING');
+
+    const first = await callAs(owner, 'wfr_issue36_drain_0', 'write_stdin', {
+      session_id: ids[0],
+      chars: '',
+      yield_time_ms: 1_000
+    });
+    expect(first.body.result?.isError, textOf(first)).not.toBe(true);
+    expect(textOf(first)).toContain('done=0');
+    expect(textOf(first)).toContain('Process exited with code 0');
+    expect(unifiedExecManager.backgroundState(ids[0]!)).toBeNull();
+
+    // Below the bound, work may continue, but the model is reminded to drain the remaining ids.
+    const allowed = await callAs(owner, 'wfr_issue36_allowed', 'exec_command', {
+      cmd: 'node issue36-quick.cjs',
+      workdir: '/workspace',
+      yield_time_ms: 5_000
+    });
+    expect(allowed.body.result?.isError, textOf(allowed)).not.toBe(true);
+    expect(textOf(allowed)).toContain('quick-ok');
+    expect(textOf(allowed)).toContain('3 completed background exec results are still waiting to be consumed');
+    for (const id of ids.slice(1)) expect(textOf(allowed)).toContain(String(id));
+
+    for (let index = 1; index < ids.length; index++) {
+      const drained = await callAs(owner, `wfr_issue36_drain_${index}`, 'write_stdin', {
+        session_id: ids[index],
+        chars: '',
+        yield_time_ms: 1_000
+      });
+      expect(drained.body.result?.isError, textOf(drained)).not.toBe(true);
+      expect(textOf(drained)).toContain(`done=${index}`);
+      expect(textOf(drained)).toContain('Process exited with code 0');
+    }
+  }, 45_000);
 });

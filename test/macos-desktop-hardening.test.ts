@@ -16,6 +16,7 @@ describe('macOS desktop safety hardening', () => {
     expect(swift).toMatch(/private func inputTargetMatches[\s\S]*frontmostPID\(\) == row\.pid/);
     expect(swift).toMatch(/private func inputTargetMatches[\s\S]*windowServerFrontWindowID\(rows: rows\) == row\.id/);
     expect(swift).toMatch(/private func inputTargetMatches[\s\S]*focusedAXWindowID\(for: row\.pid, rows: rows\) == row\.id/);
+    expect(swift).toMatch(/private func inputTargetMatches[\s\S]*guard focusedAXElementWindowID\(for: row\.pid, rows: rows\) == row\.id/);
   });
 
   it('revalidates a window-bound frame at every physical mutation boundary', () => {
@@ -51,6 +52,7 @@ describe('macOS desktop safety hardening', () => {
     expect(swift).toContain('if globalShortcut { event.post(tap: .cghidEventTap) }');
     expect(swift).toContain('UI_ACTION_DISABLED');
     expect(swift).toContain('the referenced accessibility control is disabled');
+    expect(swift).toContain('axBool(element, kAXEnabledAttribute as CFString, default: false)');
     expect(swift).toContain('["volumeup", "volumedown", "mute"]');
     expect(swift).toContain('(1...20).contains(value)');
   });
@@ -107,5 +109,51 @@ describe('macOS desktop safety hardening', () => {
     expect(swift).toContain('Electron owns prompting through systemPreferences');
     expect(swift).not.toContain('AXIsProcessTrustedWithOptions');
     expect(swift).not.toContain('older unsigned/ad-hoc build');
+  });
+
+  it('keeps the fork targetWindow lease while preserving exact partial route evidence', () => {
+    expect(swift).toContain('var leasedWindow = frameWindow ?? requestedTargetWindow');
+    expect(swift).toContain('INPUT_TARGET_REQUIRED');
+    expect(computer).toContain('targetWindow: number | null');
+    expect(computer).toContain('readonly completedRoutes: ActionRoute[] | null');
+    expect(computer).toContain('function completedHelperRoutes');
+    expect(computer).toContain('const routeEvidence = exactRoutes');
+  });
+
+  it('bounds AX window copies and shares one native find_ui deadline', () => {
+    expect(swift).toContain('private func axElementValues');
+    expect(swift).toContain('axElementValues(app, attribute: kAXWindowsAttribute as CFString, limit: 64)');
+    expect(swift).not.toContain('windows.prefix(64)');
+    expect(swift).toContain('matchingAXWindow(_ row: WindowRow, deadline suppliedDeadline: TimeInterval? = nil)');
+    expect(swift).toContain('let root = try matchingAXWindow(row, deadline: deadline)');
+  });
+
+  it('keeps visible fallback pixels screen-bound and clamps edge coordinates', () => {
+    expect(computer).toContain("const frameWindow = captureMode === 'window' ? requestedWindow : null");
+    expect(computer).toContain("frame.captureMode !== 'screen_fallback'");
+    expect(computer).toContain('const clampMappedCoordinate =');
+    expect(computer).toContain('INPUT_TARGET_UNPROVEN: visible screen_fallback pixels cannot authorize window-bound coordinate input');
+  });
+
+  it('bounds WindowServer strings and revalidates screen topology throughout long drags', () => {
+    expect(swift).toContain('let process = boundedAXString(string(item[kCGWindowOwnerName as String]');
+    expect(swift).toContain('let displayTitle = boundedAXString(title.isEmpty ?');
+    expect(swift).toContain('expectedDisplays: [CGRect]? = nil');
+    expect(swift).toContain('active display topology changed during the drag');
+    expect(swift).toContain('targetWindow: target,');
+    expect(swift).toContain('expectedDisplays: frameWindow == nil ? displayTopology(frame?["displays"]) : nil');
+    expect(swift).toMatch(/func assertDragTarget[\s\S]*assertInputTarget\(targetWindow\)[\s\S]*sameDisplayTopology\(expectedDisplays, currentDisplays\)/);
+  });
+
+  it('keeps valid screenshots when only AX semantic traversal is unavailable', () => {
+    expect(swift).toContain('error.code == "ACCESSIBILITY_PERMISSION_REQUIRED" ||');
+    expect(swift).toContain('error.code == "UIA_FAILED" ||');
+    expect(swift).toContain('error.code == "UIA_TIMEOUT"');
+    expect(swift).toContain('throw fail("WINDOW_NOT_FOUND", "no matching visible window is available")');
+  });
+
+  it('retains the documented process-global AX timeout contract', () => {
+    expect(swift).toContain('let system = AXUIElementCreateSystemWide()');
+    expect(swift).toContain('AXUIElementSetMessagingTimeout(system, 1.0)');
   });
 });

@@ -85,6 +85,7 @@ import {
   sleepWorker,
   stageQueuedWorkerRevivals,
   swarmState,
+  swarmStateForCaller,
   swarmTransferActive,
   noteAgentAlive,
   noteAgentContextTokens,
@@ -805,6 +806,35 @@ function goalWorkerChat(id: string): boolean {
   return (agent !== null && agent !== PRIME_ID) || retiredWorkerForConversation(id) !== null;
 }
 
+/**
+ * Caller-scoped worker status for the browser presentation layer.
+ *
+ * The bridge is polled by every open ChatGPT tab, including unrelated chats. Never hand the
+ * global renderer swarm to the browser: only the prime conversation that owns this history may
+ * see its workers. Worker chats do not need sibling/prime topology for their own presentation.
+ */
+function browserSwarmForPrime(id: string) {
+  if (!getConfig().multiAgent.enabled) return null;
+  if (agentForOwnedConversation(id) !== PRIME_ID) return null;
+  try {
+    const state = swarmStateForCaller({ conversationId: id });
+    return {
+      running: state.running,
+      // Presentation needs names and lifecycle only. Do not ship tasks, conversation ids,
+      // queues or other broker details into the page just to explain a wait.
+      agents: state.agents.map((entry) => ({
+        id: entry.id,
+        role: entry.role,
+        label: entry.label,
+        state: entry.state
+      }))
+    };
+  } catch {
+    // No history belongs to this chat (or it was retired between the ownership check and read).
+    return null;
+  }
+}
+
 function goalEnabledFor(id: string): boolean {
   if (goalWorkerChat(id)) return false;
   return getConfig().goal.enabled;
@@ -1203,6 +1233,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         userAnchors: [],
         nextSince: Number.isFinite(since) ? Math.max(0, since) : 0,
         job: null,
+        swarm: browserSwarmForPrime(id),
         ...(workerBlocked
           ? {
               // Worker conversations are never Compact & Resume sources. Keep the page's
@@ -1406,6 +1437,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // How this chat's own Compact & Resume is going, so the page can say what is
         // happening instead of spinning.
         job: resumeJobFor(live.sessionId),
+        // Caller-scoped orchestration state for the mutable status panel. Never another prime's run.
+        swarm: browserSwarmForPrime(id),
         // The goal loop: whether it is on, whether it *can* be on, and whatever draft this
         // chat currently has in flight. The draft's text grows on this feed, which is what
         // the panel above the composer streams — there is no second connection to hold open.

@@ -946,31 +946,17 @@ export class UnifiedExecProcessManager {
   }
 
   /**
-   * The soft cap on stored sessions.
+   * Hard cap on retained sessions without sacrificing completed output.
    *
-   * Protects the eight most recently used, prefers an exited least-recently-used session, and
-   * never evicts one whose interaction lock is held — that lock is what a concurrent
-   * `write_stdin` holds, and evicting under it would delete a session mid-call.
+   * An exited entry is still result-bearing until write_stdin consumes its terminal result.
+   * Evicting one here would silently discard exactly the output issue #36 requires us to keep.
+   * Reservations participate in the cap, so concurrent exec_command calls cannot race past it;
+   * when full, refuse the new launch and leave every existing session available to drain.
    */
   private ensureProcessCapacity(requestProcessId: number): void {
-    // Reservations participate in the hard cap, so concurrent exec_command calls cannot
-    // each observe one free slot and collectively insert a 65th live process.
-    while (this.reservedProcessIds.size > MAX_UNIFIED_EXEC_PROCESSES) {
-      const exited = [...this.processes.values()]
-        .filter((entry) => entry.process.hasExited())
-        .sort((left, right) => left.lastUsed - right.lastUsed);
-      let removed = false;
-      for (const candidate of exited) {
-        const release = candidate.process.interactionLock.tryLock();
-        if (!release) continue;
-        release();
-        this.releaseProcessId(candidate.processId);
-        removed = true;
-        break;
-      }
-      if (removed) continue;
+    if (this.reservedProcessIds.size > MAX_UNIFIED_EXEC_PROCESSES) {
       throw UnifiedExecError.createProcess(
-        `too many active terminal sessions (limit ${MAX_UNIFIED_EXEC_PROCESSES}); close or terminate one before starting another`
+        `too many retained or active terminal sessions (limit ${MAX_UNIFIED_EXEC_PROCESSES}); drain completed results with write_stdin or terminate a running session before starting another`
       );
     }
     if (!this.reservedProcessIds.has(requestProcessId)) {
