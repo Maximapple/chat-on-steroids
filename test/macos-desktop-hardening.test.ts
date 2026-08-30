@@ -156,4 +156,63 @@ describe('macOS desktop safety hardening', () => {
     expect(swift).toContain('let system = AXUIElementCreateSystemWide()');
     expect(swift).toContain('AXUIElementSetMessagingTimeout(system, 1.0)');
   });
+
+  /**
+   * The 2.0.2 release blocker: `pressKeys` read the active input source from the Node worker
+   * thread the addon is entered on. Text Services is main-queue-affine, so macOS did not
+   * return an error — `dispatch_assert_queue` failed and EXC_BREAKPOINT took the whole host
+   * process down, below anything Swift or JS could catch.
+   *
+   * This file cannot execute the addon, so it holds the shape of the fix: the Text Services
+   * calls appear only inside the main-queue read, the wait is bounded rather than
+   * `DispatchQueue.main.sync`, and the search that does not need main affinity stays off it.
+   */
+  it('reads the keyboard input source on the main queue, without sync or an unbounded wait', () => {
+    expect(swift).toContain('private func currentKeyboardLayout() -> KeyboardLayoutSnapshot?');
+    // Both Text Services calls live in that one function and nowhere else.
+    expect(swift.match(/TISCopyCurrentKeyboardLayoutInputSource/g)).toHaveLength(1);
+    expect(swift.match(/TISGetInputSourceProperty/g)).toHaveLength(1);
+    expect(swift).toMatch(
+      /private func currentKeyboardLayout\(\)[\s\S]*TISCopyCurrentKeyboardLayoutInputSource[\s\S]*TISGetInputSourceProperty[\s\S]*if Thread\.isMainThread \{ return read\(\) \}[\s\S]*DispatchQueue\.main\.async/
+    );
+
+    // Already on main runs inline, and a busy main thread refuses instead of hanging.
+    expect(swift).toContain('if Thread.isMainThread { return read() }');
+    // The call, not the prose: the function's own comment names it as the thing to avoid.
+    expect(swift).not.toMatch(/DispatchQueue\.main\.sync\s*[({]/);
+    expect(swift).toContain('private let keyboardLayoutMainQueueTimeout: TimeInterval = 2.0');
+    expect(swift).toContain('done.wait(timeout: .now() + keyboardLayoutMainQueueTimeout) == .success');
+    expect(swift).toContain('"the active keyboard layout could not be read in time"');
+
+    // The layout bytes are copied out: they belong to an input source released on return.
+    expect(swift).toContain('Data(bytes: bytes, count: CFDataGetLength(data))');
+    // UCKeyTranslate is pure over those bytes, so the 128-keycode search — the expensive
+    // half — stays out of the main-queue section and off the UI thread entirely.
+    const mainQueueSection = swift.slice(
+      swift.indexOf('private func currentKeyboardLayout()'),
+      swift.indexOf('private func currentLayoutKey(')
+    );
+    expect(mainQueueSection).toContain('TISGetInputSourceProperty');
+    expect(mainQueueSection).not.toContain('UCKeyTranslate');
+    expect(swift).toMatch(
+      /private func currentLayoutKey\(for logicalName: String, in snapshot: KeyboardLayoutSnapshot\)[\s\S]*UCKeyTranslate/
+    );
+  });
+
+  /**
+   * And the ordering the crash fix must not cost us: the layout is taken before any window
+   * authority is resolved, so the existing revalidations still sit immediately before the
+   * events they guard. Fixing a P1 crash must not open a wrong-window race.
+   */
+  it('takes the layout snapshot once, ahead of every target-window revalidation', () => {
+    expect(swift).toMatch(
+      /let layout = normalized\.contains \{ \$0\.count == 1 \} \? currentKeyboardLayout\(\) : nil\s*\n\s*let resolved = try normalized\.map \{ try resolveKey\(\$0, in: layout\) \}/
+    );
+    expect(swift).toMatch(
+      /let resolved = try normalized\.map \{ try resolveKey\(\$0, in: layout\) \}[\s\S]*if let targetWindow \{ targetPID = try assertInputTarget\(targetWindow\)\.pid \}/
+    );
+    expect(swift).toMatch(
+      /A window transition while modifiers are down must abort before the ordinary key\.\s*\n\s*if let targetWindow \{ targetPID = try assertInputTarget\(targetWindow\)\.pid \}/
+    );
+  });
 });
