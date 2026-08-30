@@ -1,6 +1,9 @@
 import { expect, it } from 'vitest';
 import { UnifiedExecProcessManager, applyUnifiedExecEnv } from '../src/main/codex/unified-exec.js';
-import { DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS } from '../src/main/codex/unified-exec-constants.js';
+import {
+  DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
+  MAX_UNIFIED_EXEC_PROCESSES
+} from '../src/main/codex/unified-exec-constants.js';
 
 const truncationPolicy = { kind: 'tokens' as const, tokens: 10_000 };
 
@@ -51,4 +54,40 @@ it('does not let capacity pruning steal an interaction lock from an already queu
     await initial.catch(() => undefined);
     await manager.terminateAllProcesses();
   }
+});
+
+it('keeps an exited-unread result when the global session cap refuses a new launch', () => {
+  const manager = new UnifiedExecProcessManager(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS);
+  const retainedId = manager.allocateProcessId();
+  const now = Date.now();
+
+  // This tiny fake represents the exact manager state that matters: an exited entry whose
+  // terminal result has not been consumed yet. The old capacity path deleted it to make room.
+  const fakeExitedProcess = {
+    hasExited: () => true,
+    exitedAt: () => now,
+    interactionLock: { tryLock: () => () => {} }
+  };
+  (manager as any).processes.set(retainedId, {
+    process: fakeExitedProcess,
+    processId: retainedId,
+    cwd: '/retained',
+    hookCommand: 'retained completed result',
+    tty: false,
+    initialExecCommandActive: false,
+    startedAt: now,
+    lastUsed: now
+  });
+
+  // retainedId already occupies one reservation. Fill the remaining 63 slots, then reserve
+  // the candidate that would become the 65th. Capacity must reject that candidate rather than
+  // deleting the completed result to make its reservation fit.
+  for (let index = 1; index < MAX_UNIFIED_EXEC_PROCESSES; index++) manager.allocateProcessId();
+  const rejectedId = manager.allocateProcessId();
+
+  expect(() => (manager as any).ensureProcessCapacity(rejectedId)).toThrow(
+    /too many retained or active terminal sessions/
+  );
+  expect(manager.backgroundState(retainedId)?.exitedUnread).toBe(true);
+  expect((manager as any).processes.has(retainedId)).toBe(true);
 });

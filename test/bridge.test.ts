@@ -4226,3 +4226,36 @@ describe('shutting the listener down', () => {
     base = `http://127.0.0.1:${restarted}`;
   });
 });
+
+describe('issue #35 browser wait-status swarm projection', () => {
+  it('exposes only the owning prime\'s minimal worker lifecycle state', async () => {
+    await pair();
+    const prime = '34343434-3434-4343-8343-343434343434';
+    const workerChat = '45454545-4545-4454-8454-454545454545';
+    const secretTask = 'Audit private implementation details that must not be projected to the browser';
+
+    spawn({
+      workers: [{ label: 'Repository audit', task: secretTask }],
+      caller: { conversationId: prime }
+    });
+    expect(bindConversation('worker-1', workerChat)).toBe(true);
+
+    const primeActivity = await request('GET', `/activity?conversationId=${prime}&since=0`);
+    expect(primeActivity.status).toBe(200);
+    expect(primeActivity.body.swarm).toMatchObject({
+      running: true,
+      agents: expect.arrayContaining([
+        expect.objectContaining({ id: 'prime', role: 'prime' }),
+        expect.objectContaining({ id: 'worker-1', role: 'worker', label: 'Repository audit', state: 'active' })
+      ])
+    });
+    expect(JSON.stringify(primeActivity.body.swarm)).not.toContain(secretTask);
+    for (const entry of primeActivity.body.swarm.agents as Array<Record<string, unknown>>) {
+      expect(Object.keys(entry).sort()).toEqual(['id', 'label', 'role', 'state']);
+    }
+
+    const workerActivity = await request('GET', `/activity?conversationId=${workerChat}&since=0`);
+    expect(workerActivity.status).toBe(200);
+    expect(workerActivity.body.swarm).toBeNull();
+  });
+});

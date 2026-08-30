@@ -55,6 +55,11 @@ export function execProcessIdsForConversation(conversationId: string): number[] 
     .map(([processId]) => processId);
 }
 
+/** All process ids still tracked by the ownership fence, including anonymous legacy sessions. */
+export function execTrackedProcessIds(): number[] {
+  return [...owners.keys()];
+}
+
 /**
  * Whether `conversationId` may write to `processId`.
  *

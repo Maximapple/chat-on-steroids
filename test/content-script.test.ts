@@ -119,6 +119,8 @@ interface Hook {
   foldBootstrap(): void;
   injectControl(): void;
   injectStage(): void;
+  activityPollDelay(input: { drafting: boolean; hidden: boolean; generating: boolean; active: boolean; finalizing: boolean }): number;
+  terminalActivityFinalizing(): boolean;
   pullActivity(): Promise<void>;
   runCommand(): Promise<void>;
   startCompact(): Promise<void>;
@@ -10688,5 +10690,239 @@ describe('the goal loop', () => {
       expect(view.objective.summary.endsWith('…')).toBe(true);
       expect(view.objective.summary).not.toMatch(/\s…$/);
     });
+  });
+});
+
+describe('issues #34/#35 hidden worker and proactive wait status', () => {
+  const CHAT = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const MESSAGE = 'hidden-worker-result';
+
+  /** One assistant message in the exact DOM shape this file's global harness expects. */
+  function assistantProse(document: Document, section: HTMLElement, id: string, text: string): HTMLElement {
+    const message = document.createElement('div');
+    message.setAttribute('data-message-id', id);
+    message.setAttribute('data-message-author-role', 'assistant');
+    const body = document.createElement('div');
+    body.className = 'markdown';
+    body.textContent = text;
+    message.append(body);
+    section.append(message);
+    return body;
+  }
+
+  /** Persistent MAIN-world Fiber reply for every scan this test causes, not one hand-made frame. */
+  function installFiberResponder(section: HTMLElement, read: () => { text: string; final: boolean }): () => void {
+    const window = live!.window as any;
+    // Same reason replyFiber() does this: the harness makes the script's own waits instant, so
+    // askFiber()'s give-up timer would fire as a microtask before jsdom could ever deliver the
+    // postMessage this responder answers on. Every scan would time out and no Fiber descriptor
+    // would exist, which is not the behaviour under test. Real timers for the responder's life.
+    const instant = window.setTimeout;
+    window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
+    const onAsk = (event: any) => {
+      if (!event.data || event.data.source !== 'clf-fiber-ask') return;
+      const scanToken = event.data.nonce;
+      const current = read();
+      section.setAttribute('data-clf-fiber-turn', `${scanToken}:0`);
+      window.dispatchEvent(
+        new window.MessageEvent('message', {
+          data: {
+            source: 'clf-fiber-reply',
+            nonce: event.data.nonce,
+            scanToken,
+            v: 10,
+            scanOk: true,
+            rows: [],
+            turns: [
+              {
+                index: 0,
+                turnId: 'hidden-worker-turn',
+                conversationId: CHAT,
+                endMessageId: current.final ? MESSAGE : null,
+                calls: [],
+                activities: [],
+                messages: [
+                  {
+                    messageId: MESSAGE,
+                    rawMessageId: MESSAGE,
+                    role: 'assistant',
+                    // The stale-overwrite regression starts from a revision that was already
+                    // proven safe enough to own presentation. The app entry may still be streaming;
+                    // this mirrors the existing sticky-overwrite regression.
+                    stable: true,
+                    order: 0,
+                    rawText: current.text,
+                    renderedHtml: `<p>${current.text}</p>`
+                  }
+                ]
+              }
+            ]
+          },
+          source: window
+        })
+      );
+    };
+    window.addEventListener('message', onAsk);
+    return () => {
+      window.removeEventListener('message', onAsk);
+      window.setTimeout = instant;
+    };
+  }
+
+  /**
+   * Lets jsdom actually deliver the Fiber postMessage task and the promise chains it feeds.
+   *
+   * settle() only drains microtasks, which is enough for the app's own await chains but never
+   * enough for a page-context message round trip. This is the macrotask equivalent.
+   */
+  const fiberSettle = async (rounds = 40): Promise<void> => {
+    for (let round = 0; round < rounds; round++) {
+      await new Promise<void>((resolve) => { globalThis.setTimeout(resolve, 1); });
+    }
+  };
+
+  it('treats hidden as an idle throttle rather than starving live or finalizing work', async () => {
+    live = await harness();
+    expect(
+      live.hook.activityPollDelay({ drafting: false, hidden: true, generating: true, active: true, finalizing: false })
+    ).toBe(750);
+    expect(
+      live.hook.activityPollDelay({ drafting: false, hidden: true, generating: false, active: true, finalizing: true })
+    ).toBe(750);
+    expect(
+      live.hook.activityPollDelay({ drafting: false, hidden: true, generating: false, active: false, finalizing: false })
+    ).toBe(30_000);
+  });
+
+  it('renders authoritative wait state only after a quiet threshold and never over live prose', async () => {
+    live = await harness();
+    const worker = {
+      enabled: true,
+      running: true,
+      agents: [
+        { id: 'prime', role: 'prime', label: 'Prime', state: 'active' },
+        { id: 'worker-1', role: 'worker', label: 'Repository audit', state: 'sleeping' },
+        { id: 'worker-2', role: 'worker', label: 'macOS validation', state: 'active' },
+        { id: 'worker-3', role: 'worker', label: 'Windows retry', state: 'failed' }
+      ]
+    };
+
+    expect(
+      live.hook.stageView({ job: null, goal: null, swarm: worker, pendingTools: 0, backgroundExec: { running: 0 }, generating: false, quietMs: 1000 })
+    ).toBeNull();
+
+    expect(
+      live.hook.stageView({ job: null, goal: null, swarm: worker, pendingTools: 0, backgroundExec: { running: 0 }, generating: false, quietMs: 5000 })
+    ).toMatchObject({
+      stage: 'Worker still running: macOS validation',
+      detail: '1 finished · 1 failed · 1 running',
+      done: false
+    });
+
+    expect(
+      live.hook.stageView({ job: null, goal: null, swarm: null, pendingTools: 0, backgroundExec: { running: 0 }, generating: true, quietMs: 5000 })
+    ).toMatchObject({
+      stage: 'ChatGPT is still working',
+      detail: 'Waiting for the current response to make visible progress'
+    });
+
+    expect(
+      live.hook.stageView({ job: null, goal: null, swarm: null, pendingTools: 2, backgroundExec: { running: 0 }, generating: true, quietMs: 5000 })
+    ).toMatchObject({
+      stage: 'Waiting for 2 tool calls',
+      detail: 'Current operations have not returned yet',
+      done: false
+    });
+
+
+    expect(
+      live.hook.stageView({ job: null, goal: null, swarm: null, pendingTools: 0, backgroundExec: { running: 0, exitedUnread: 3 }, generating: true, quietMs: 5000 })
+    ).toMatchObject({
+      stage: '3 completed background results waiting',
+      detail: 'Read the final output with write_stdin before starting more background work',
+      done: false
+    });
+  });
+
+  it('releases a stale hidden Overwrite revision, then reconverges without a visibility wake', async () => {
+    let complete = false;
+    let postCompletePulls = 0;
+    const partial = 'First few words';
+    const final = 'First few words and the complete worker result.';
+    const activity = () => {
+      if (complete) postCompletePulls += 1;
+      // The first pull after terminal observation is deliberately stale: service-worker
+      // custody can complete while another app drain is still in flight. The next live-cadence
+      // pull is the convergence this regression requires.
+      const caughtUp = complete && postCompletePulls >= 2;
+      return {
+        ok: true,
+        data: {
+          entries: [],
+          stream: [
+            {
+              seq: caughtUp ? 11 : 10,
+              origin: 10,
+              time: caughtUp ? 200 : 100,
+              kind: 'assistant_message',
+              turnId: null,
+              agent: 'worker-1',
+              messageId: MESSAGE,
+              text: caughtUp ? final : partial,
+              state: caughtUp ? 'final' : 'streaming',
+              final: caughtUp
+            }
+          ],
+          job: null
+        }
+      };
+    };
+
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, { activity });
+    renderingOn();
+    const section = assistantTurn(live.document, 'hidden-worker-turn', []);
+    const body = assistantProse(live.document, section, MESSAGE, partial);
+    const removeFiber = installFiberResponder(section, () => ({ text: complete ? final : partial, final: complete }));
+    try {
+      startGenerating(live.document);
+      // Establish the exact DOM↔Fiber message identity before asking Overwrite to own the turn.
+      await live.hook.refreshFiber();
+      await live.hook.pullActivity();
+      live.hook.renderStreams();
+      expect(overwriteText(section)).toContain(partial);
+
+      Object.defineProperty(live.document, 'visibilityState', { configurable: true, value: 'hidden' });
+      complete = true;
+      body.textContent = final;
+      // Model the hidden native final mutation deterministically. A real MutationObserver causes
+      // this scan; the harness drives the same refresh explicitly so the test does not race it.
+      await live.hook.refreshFiber();
+      live.hook.renderStreams();
+      expect(overwriteText(section)).toBe('');
+      expect(section.textContent).toContain(final);
+      stopGenerating(live.document);
+      live.hook.observe();
+      live.advance(live.hook.TURN_SETTLE_MS * 2);
+      live.hook.observe();
+      await fiberSettle();
+
+      expect(postCompletePulls).toBeGreaterThanOrEqual(1);
+      // Fiber now proves that this same message id contains more prose than the app-owned
+      // revision. Do not keep the stale replacement through REPLACEMENT_GRACE_MS: expose the
+      // native final answer until the app catches up.
+      expect(overwriteText(section)).toBe('');
+      expect(section.textContent).toContain(final);
+      expect(live.hook.terminalActivityFinalizing()).toBe(true);
+
+      // Model the next live-cadence convergence pull. No visibilitychange occurs anywhere.
+      await live.hook.pullActivity();
+      await fiberSettle(4);
+      live.hook.renderStreams();
+      expect(live.hook.terminalActivityFinalizing()).toBe(false);
+      expect(overwriteText(section)).toContain(final);
+      expect(live.document.visibilityState).toBe('hidden');
+    } finally {
+      removeFiber();
+    }
   });
 });

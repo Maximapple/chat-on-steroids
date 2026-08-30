@@ -187,8 +187,8 @@ private func minimizedWindowIDs(in rows: [WindowRow]) -> Set<CGWindowID> {
     pidLoop: for pid in candidatePids {
         if ProcessInfo.processInfo.systemUptime >= deadline { break }
         let app = axApplication(pid)
-        let windows = axAttribute(app, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
-        for window in windows.prefix(64) where axBool(window, kAXMinimizedAttribute as CFString, default: false) {
+        let windows = axElementValues(app, attribute: kAXWindowsAttribute as CFString, limit: 64)
+        for window in windows where axBool(window, kAXMinimizedAttribute as CFString, default: false) {
             if ProcessInfo.processInfo.systemUptime >= deadline { break pidLoop }
             if let id = axWindowNumber(window) { ids.insert(id) }
         }
@@ -214,9 +214,11 @@ private func allWindowRows(includeMinimized: Bool = true) -> [WindowRow] {
         let onScreen = bool(item[kCGWindowIsOnscreen as String])
         let alpha = number(item[kCGWindowAlpha as String])?.doubleValue ?? 1
         guard layer == 0, alpha > 0 else { return nil }
-        let process = string(item[kCGWindowOwnerName as String], default: "Process \(pid)")
-        let title = string(item[kCGWindowName as String]).trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayTitle = title.isEmpty ? "\(process) window" : title
+        let process = boundedAXString(string(item[kCGWindowOwnerName as String], default: "Process \(pid)"))
+        let title = boundedAXString(
+            string(item[kCGWindowName as String]).trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        let displayTitle = boundedAXString(title.isEmpty ? "\(process) window" : title)
         return WindowRow(
             id: id,
             pid: pid,
@@ -345,17 +347,21 @@ private func axBounds(_ element: AXUIElement) -> CGRect? {
     return CGRect(origin: point, size: size)
 }
 
-private func axChildren(_ element: AXUIElement, limit: Int) -> [AXUIElement] {
+private func axElementValues(_ element: AXUIElement, attribute: CFString, limit: Int) -> [AXUIElement] {
     guard limit > 0 else { return [] }
     var values: CFArray?
     guard AXUIElementCopyAttributeValues(
         element,
-        kAXChildrenAttribute as CFString,
+        attribute,
         0,
         limit,
         &values
     ) == .success else { return [] }
     return values as? [AXUIElement] ?? []
+}
+
+private func axChildren(_ element: AXUIElement, limit: Int) -> [AXUIElement] {
+    axElementValues(element, attribute: kAXChildrenAttribute as CFString, limit: limit)
 }
 
 private func axRole(_ element: AXUIElement) -> String {
@@ -439,8 +445,10 @@ private func inputTargetMatches(_ row: WindowRow) -> Bool {
     let rows = allWindowRows(includeMinimized: false)
     guard windowServerFrontWindowID(rows: rows) == row.id else { return false }
     guard focusedAXWindowID(for: row.pid, rows: rows) == row.id else { return false }
-    if let focusedElementWindow = focusedAXElementWindowID(for: row.pid, rows: rows),
-       focusedElementWindow != row.id { return false }
+    // Missing focused-control evidence is not agreement. AX can return nil on a timeout,
+    // an untyped value or an app transition; accepting that would turn an unprovable
+    // keyboard destination into global physical input.
+    guard focusedAXElementWindowID(for: row.pid, rows: rows) == row.id else { return false }
     return true
 }
 
@@ -465,19 +473,23 @@ private func setAXBooleanIfPossible(_ element: AXUIElement, _ attribute: CFStrin
     setAXValueIfPossible(element, attribute, value ? kCFBooleanTrue : kCFBooleanFalse)
 }
 
-private func matchingAXWindow(_ row: WindowRow) throws -> AXUIElement {
+private func matchingAXWindow(_ row: WindowRow, deadline suppliedDeadline: TimeInterval? = nil) throws -> AXUIElement {
     try requireAccessibility()
     let app = axApplication(row.pid)
-    let windows = axAttribute(app, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
-    let deadline = ProcessInfo.processInfo.systemUptime + maxAXTraversalSeconds
-    for window in windows.prefix(64) {
+    let deadline = suppliedDeadline ?? (ProcessInfo.processInfo.systemUptime + maxAXTraversalSeconds)
+    guard ProcessInfo.processInfo.systemUptime < deadline else {
+        throw fail("UIA_TIMEOUT", "accessibility window matching exceeded its bounded native deadline")
+    }
+    // Bound at the native copy boundary; prefixing afterwards would already materialize unbounded provider state.
+    let windows = axElementValues(app, attribute: kAXWindowsAttribute as CFString, limit: 64)
+    for window in windows {
         guard ProcessInfo.processInfo.systemUptime < deadline else {
             throw fail("UIA_TIMEOUT", "exact accessibility window matching exceeded its bounded native deadline")
         }
         if axWindowNumber(window) == row.id { return window }
     }
     var geometryCandidates: [(element: AXUIElement, distance: CGFloat)] = []
-    for window in windows.prefix(64) {
+    for window in windows {
         guard ProcessInfo.processInfo.systemUptime < deadline else {
             throw fail("UIA_TIMEOUT", "accessibility window matching exceeded its bounded native deadline")
         }
@@ -553,6 +565,8 @@ private func findUI(
     _ request: JSONObject,
     suppliedWindow: WindowRow? = nil
 ) throws -> JSONObject {
+    // Window matching and traversal share one native six-second budget.
+    let deadline = ProcessInfo.processInfo.systemUptime + maxAXTraversalSeconds
     let row: WindowRow
     if let suppliedWindow {
         row = suppliedWindow
@@ -569,7 +583,7 @@ private func findUI(
     } else {
         throw fail("WINDOW_NOT_FOUND", "no matching visible window is available")
     }
-    let root = try matchingAXWindow(row)
+    let root = try matchingAXWindow(row, deadline: deadline)
     let query = string(request["query"]).lowercased()
     let roleFilter = string(request["role"]).lowercased()
     let maxResults = min(100, max(1, int(request["maxResults"], default: 30)))
@@ -581,7 +595,6 @@ private func findUI(
     var visited = 0
     var returned: [JSONObject] = []
     var retained: [String: AXUIElement] = [:]
-    let deadline = ProcessInfo.processInfo.systemUptime + maxAXTraversalSeconds
 
     while cursor < queue.count && visited < maxVisited && returned.count < maxResults {
         guard ProcessInfo.processInfo.systemUptime < deadline else {
@@ -677,26 +690,52 @@ private func drag(
     _ xs: [NSNumber],
     _ ys: [NSNumber],
     button: CGMouseButton,
-    targetWindow: CGWindowID? = nil
+    targetWindow: CGWindowID? = nil,
+    expectedDisplays: [CGRect]? = nil
 ) throws {
     guard xs.count == ys.count, xs.count >= 2 else { throw fail("BAD_ACTION", "drag needs at least two points") }
     let points = zip(xs, ys).map { CGPoint(x: $0.0.doubleValue, y: $0.1.doubleValue) }
-    let displays = try activeDisplayRects()
+
+    // Window identity and screen topology are independent leases. A screen-bound frame can
+    // still carry an explicit targetWindow, so never choose one fence at the expense of the
+    // other: re-prove every supplied authority before every physical drag event.
+    let displays: [CGRect]
+    if let expectedDisplays {
+        let currentDisplays = try activeDisplayRects()
+        guard sameDisplayTopology(expectedDisplays, currentDisplays) else {
+            throw fail("STALE_FRAME", "active display topology changed before the drag")
+        }
+        displays = expectedDisplays
+    } else {
+        displays = try activeDisplayRects()
+    }
     for point in points { try requirePointOnActiveDisplay(point, displays: displays) }
+
+    func assertDragTarget() throws {
+        if let targetWindow { _ = try assertInputTarget(targetWindow) }
+        if let expectedDisplays {
+            let currentDisplays = try activeDisplayRects()
+            guard sameDisplayTopology(expectedDisplays, currentDisplays) else {
+                throw fail("STALE_FRAME", "active display topology changed during the drag")
+            }
+        }
+    }
+
     let (down, up, dragged) = mouseTypes(button)
-    if let targetWindow { _ = try assertInputTarget(targetWindow) }
+    try assertDragTarget()
     try postMouse(down, point: points[0], button: button)
     var current = points[0]
     do {
         for point in points.dropFirst() {
-            if let targetWindow { _ = try assertInputTarget(targetWindow) }
+            try assertDragTarget()
             try postMouse(dragged, point: point, button: button)
             current = point
             usleep(12_000)
         }
-        if let targetWindow { _ = try assertInputTarget(targetWindow) }
+        try assertDragTarget()
         try postMouse(up, point: points[points.count - 1], button: button)
     } catch {
+        // A best-effort mouse-up is cleanup, not authorization to continue the drag.
         try? postMouse(up, point: current, button: button)
         throw error
     }
@@ -941,7 +980,9 @@ private func actUI(_ request: JSONObject) throws -> JSONObject {
             "the referenced accessibility control no longer belongs to snapshot window \(snapshot.window)"
         )
     }
-    guard axBool(element, kAXEnabledAttribute as CFString, default: true) else {
+    // Mutation requires an explicitly readable true value. Missing, untyped or timed-out
+    // AXEnabled evidence is not permission to click through the uncertainty.
+    guard axBool(element, kAXEnabledAttribute as CFString, default: false) else {
         throw fail("UI_ACTION_DISABLED", "the referenced accessibility control is disabled")
     }
     let action = string(request["action"])
@@ -1391,7 +1432,13 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                 for key in ["snapshotId", "elements", "visited", "truncated"] {
                     result[key] = ui[key]
                 }
-            } catch let error as HelperFailure where error.code == "ACCESSIBILITY_PERMISSION_REQUIRED" {
+            } catch let error as HelperFailure
+                where error.code == "ACCESSIBILITY_PERMISSION_REQUIRED" ||
+                      error.code == "UIA_FAILED" ||
+                      error.code == "UIA_TIMEOUT" {
+                // Screen capture is an independent capability. If only the AX tree is
+                // unavailable/malformed/slow, keep the already-valid image and report typed
+                // semantic unavailability. Target-identity failures remain fatal.
                 result["uiUnavailable"] = ["code": error.code, "message": error.message]
             }
         }
@@ -1478,7 +1525,8 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                         action["xs"] as? [NSNumber] ?? [],
                         action["ys"] as? [NSNumber] ?? [],
                         button: mouseButton(string(action["button"])),
-                        targetWindow: target
+                        targetWindow: target,
+                        expectedDisplays: frameWindow == nil ? displayTopology(frame?["displays"]) : nil
                     )
                     routes.append("sendinput")
                 case "type":

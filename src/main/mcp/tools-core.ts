@@ -49,6 +49,8 @@ import { formatExecOutputForModel, newStreamOutput } from '../codex/exec-output.
 import { DEFAULT_TRUNCATION_POLICY, EXEC_OUTPUT_CEILING_POLICY, unifiedExecManager } from '../codex/manager.js';
 import {
   execOwnershipDenied,
+  execProcessIdsForConversation,
+  execTrackedProcessIds,
   forgetExecOwner,
   noteExecOwner,
   provenConversation
@@ -598,6 +600,51 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
 
   // ------------------------------------------------------- exec / write_stdin
 
+  /**
+   * Completed exec results are deliberately result-bearing until write_stdin consumes them.
+   * Bound new fan-out once several are already waiting: dropping them would lose output, while
+   * letting the model launch an unbounded replacement wave is the stall reported in issue #36.
+   */
+  const MAX_UNREAD_EXEC_RESULTS_PER_CHAT = 4;
+
+  const execCallerConversation = (): string | null =>
+    provenConversation(currentCaller().requestId, currentCaller().conversationId);
+
+  const unreadExecResultIds = (conversationId: string | null): number[] => {
+    if (!conversationId) return [];
+    return execProcessIdsForConversation(conversationId)
+      .filter((processId) => unifiedExecManager.backgroundState(processId)?.exitedUnread === true)
+      .sort((left, right) => left - right);
+  };
+
+  const anyUnreadExecResults = (): boolean =>
+    execTrackedProcessIds().some(
+      (processId) => unifiedExecManager.backgroundState(processId)?.exitedUnread === true
+    );
+
+  const resolveExecCallerConversation = async (): Promise<string | null> => {
+    let conversationId = execCallerConversation();
+    const call = currentCall();
+    if (!conversationId && anyUnreadExecResults() && call?.caller.requestId) {
+      conversationId = await awaitFreshCallOrigin('exec_command', call.startedAt, IDENTITY_EVIDENCE_MS, {
+        requestId: call.caller.requestId
+      });
+      if (conversationId) call.caller.conversationId = conversationId;
+    }
+    return conversationId;
+  };
+
+  const unreadExecResultNotes = (conversationId: string | null): string[] => {
+    const ids = unreadExecResultIds(conversationId);
+    if (ids.length === 0) return [];
+    const shown = ids.slice(0, 8).join(', ');
+    return [
+      `${ids.length} completed background exec result${ids.length === 1 ? ' is' : 's are'} still waiting to be consumed` +
+        `${shown ? ` (session${ids.length === 1 ? '' : 's'} ${shown})` : ''}. ` +
+        'Use write_stdin on those existing session IDs until each returns its terminal exit before creating more background work.'
+    ];
+  };
+
   if (exposedCaps.command) {
     reg.register(
       'exec_command',
@@ -628,6 +675,20 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
       },
       async (input) =>
         reg.guarded('command', 'exec_command', async () => {
+          const execConversation = await resolveExecCallerConversation();
+          if (!execConversation && anyUnreadExecResults()) {
+            return fail(
+              'CALLER_IDENTITY_REQUIRED: completed background exec results exist, but this request could not yet be proven to a ChatGPT conversation. Retry after the extension reconnects; no command was run.'
+            );
+          }
+          const waitingResults = unreadExecResultIds(execConversation);
+          if (waitingResults.length >= MAX_UNREAD_EXEC_RESULTS_PER_CHAT) {
+            const shown = waitingResults.slice(0, 8).join(', ');
+            return fail(
+              `EXEC_RESULTS_PENDING: ${waitingResults.length} completed background exec results are still waiting to be consumed` +
+                `${shown ? ` (sessions ${shown})` : ''}. Drain them with write_stdin before starting another exec_command. No command was run.`
+            );
+          }
           const dir = await resolveCwd(ctx, input.workdir);
           const rawCommands = input.cmd === undefined ? input.cmds! : [input.cmd];
           const isBatch = input.cmd === undefined;
@@ -816,7 +877,8 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
                     )
                   : [benignExitNote(boundCommand, shell.shellType)]
                 : []),
-              ...execRecoveryHints(rawCommands.join('\n'), responseText, shell.shellType)
+              ...execRecoveryHints(rawCommands.join('\n'), responseText, shell.shellType),
+              ...unreadExecResultNotes(execCallerConversation())
             ];
             return {
               content: [{ type: 'text' as const, text: withExecNotes(responseText, notes) }],
@@ -878,13 +940,19 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               durationMs: output.wallTimeMs
             });
             logInfo(`tool write_stdin ${input.session_id} (${(input.chars ?? '').length} chars)`);
+            const responseText = execCommandResponseText(output);
+            const notes = unreadExecResultNotes(asking);
             return {
-              content: [{ type: 'text' as const, text: execCommandResponseText(output) }],
+              content: [{ type: 'text' as const, text: withExecNotes(responseText, notes) }],
               structuredContent: execCommandStructuredOutput(output)
             };
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            return fail(`write_stdin failed: ${message}`);
+            const terminal = /unknown process|unknown session|not found|no longer exists/i.test(message);
+            const retry = terminal
+              ? ''
+              : ` Retry the same session_id ${input.session_id}; do not replace it with a new exec_command while its terminal result may still be pending.`;
+            return fail(`write_stdin failed: ${message}${retry}`);
           }
         })
     );

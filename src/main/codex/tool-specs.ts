@@ -10,6 +10,10 @@
 
 const IS_WINDOWS = process.platform === 'win32';
 
+/** A returned session id is unfinished work: preserve and drain its terminal result. */
+const EXEC_SESSION_DRAIN_GUIDANCE =
+  'If exec_command returns a session ID, keep polling that same ID with write_stdin until a response no longer returns a session ID and includes the terminal exit. Do not abandon a completed session for a replacement exec_command; its final output remains waiting until consumed.';
+
 /** `windows_shell_guidance()`. */
 export const WINDOWS_SHELL_GUIDANCE = `Windows safety rules:
 - Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to \`cmd /c\`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as \`Remove-Item\` / \`Move-Item\` with \`-LiteralPath\`, and avoid string-built shell commands for file operations.
@@ -17,8 +21,8 @@ export const WINDOWS_SHELL_GUIDANCE = `Windows safety rules:
 - When using \`Start-Process\` to launch a background helper or service, pass \`-WindowStyle Hidden\` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control.`;
 
 export const EXEC_COMMAND_DESCRIPTION = IS_WINDOWS
-  ? `Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n${WINDOWS_SHELL_GUIDANCE}`
-  : 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.';
+  ? `Runs a command in a PTY, returning output or a session ID for ongoing interaction. ${EXEC_SESSION_DRAIN_GUIDANCE}\n\n${WINDOWS_SHELL_GUIDANCE}`
+  : `Runs a command in a PTY, returning output or a session ID for ongoing interaction. ${EXEC_SESSION_DRAIN_GUIDANCE}`;
 
 export const EXEC_COMMAND_CMD_DESCRIPTION = 'Shell command to execute.';
 
@@ -45,9 +49,10 @@ export const EXEC_COMMAND_LOGIN_DESCRIPTION =
     : 'True runs the shell with -l/-i semantics; false disables them. Defaults to true.';
 
 export const WRITE_STDIN_DESCRIPTION =
-  'Writes characters to an existing unified exec session and returns recent output.';
+  'Writes characters to an existing unified exec session and returns recent output. Poll the same session until it returns its terminal exit; a transient wait/read failure is not permission to abandon the session and lose its final output.';
 
-export const WRITE_STDIN_SESSION_ID_DESCRIPTION = 'Identifier of the running unified exec session.';
+export const WRITE_STDIN_SESSION_ID_DESCRIPTION =
+  'Identifier of the unified exec session. Keep using this same ID until its terminal result has been consumed.';
 
 export const WRITE_STDIN_CHARS_DESCRIPTION =
   'Bytes to write to stdin. Defaults to empty, which polls without writing.';
