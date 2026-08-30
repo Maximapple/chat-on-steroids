@@ -369,6 +369,15 @@ export interface BridgeStatus {
   lastSeenAt: number | null;
 }
 
+export type MacOSPermissionState = 'granted' | 'missing' | 'unknown';
+export interface MacOSDesktopAccessStatus {
+  /** Live preflights from the Swift backend executing inside the Electron process. */
+  screen: MacOSPermissionState;
+  accessibility: MacOSPermissionState;
+  checkedAt: number;
+  error: string | null;
+}
+
 /**
  * Whether the enabled product surface currently needs the companion browser extension.
  *
@@ -395,6 +404,8 @@ export interface AppState {
   /** Version of the tunnel-client copy shipped inside the app, for diagnostics. */
   bundledTunnelVersion: string | null;
   bridge: BridgeStatus;
+  /** Present only on macOS once the in-process native backend has reported its live TCC state. */
+  desktopAccess?: MacOSDesktopAccessStatus | null;
 }
 
 export const DEFAULT_CAPABILITIES: Capabilities = {

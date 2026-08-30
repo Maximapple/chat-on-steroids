@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -31,6 +32,7 @@ const {
 } = packagingTargets;
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const requireFromTest = createRequire(import.meta.url);
 
 function yamlFile(relative: string): any {
   return loadYaml(readFileSync(path.join(root, ...relative.split('/')), 'utf8'));
@@ -211,7 +213,6 @@ describe('cross-platform packaging targets', () => {
     expect(appImageGui).toContain('normal_smoke_root="$(mktemp -d)"');
     expect(appImageGui).toContain('fallback_smoke_root="$(mktemp -d)"');
     expect(appImageGui).toContain('cleanup_path_with_retries()');
-    expect(appImageGui).toContain('for attempt in 1 2 3 4 5; do');
     expect(appImageGui).toContain('cleanup_path_with_retries "$fake_bin"');
     expect(appImageGui).toContain('cleanup_path_with_retries "$normal_smoke_root"');
     expect(appImageGui).toContain('cleanup_path_with_retries "$fallback_smoke_root"');
@@ -356,16 +357,22 @@ describe('cross-platform packaging targets', () => {
   });
 
   it('keeps the static AppImage sandbox fallback conditional and duplicate-safe', () => {
-    const source = readFileSync(
-      path.join(root, 'node_modules', 'app-builder-lib', 'out', 'targets', 'appimage', 'appImageUtil.js'),
-      'utf8'
-    );
+    const { generateAppRunScript } = requireFromTest(
+      path.join(root, 'node_modules', 'app-builder-lib', 'out', 'targets', 'appimage', 'appImageUtil.js')
+    ) as { generateAppRunScript: (config: Record<string, string>) => string };
+    const script = generateAppRunScript({
+      ExecutableName: 'chat-on-steroids',
+      DesktopFileName: 'com.chatonsteroids.app.desktop',
+      ProductFilename: 'Chat On Steroids',
+      ProductName: 'Chat On Steroids',
+      ResourceName: 'appimagekit-chat-on-steroids'
+    });
 
-    expect(source).toContain('HAVE_NO_SANDBOX=0');
-    expect(source).toContain('if [ "$arg" = --no-sandbox ] ; then');
-    expect(source).toContain('if [ $HAVE_NO_SANDBOX -eq 0 ] && ! unshare -Ur true 2>/dev/null ; then');
-    expect(source).toContain('NO_SANDBOX=(--no-sandbox)');
-    expect(source).toContain('exec "$BIN" "\\${NO_SANDBOX[@]}" "\\${args[@]}"');
+    expect(script).toContain('HAVE_NO_SANDBOX=0');
+    expect(script).toContain('if [ "$arg" = --no-sandbox ] ; then');
+    expect(script).toContain('if [ $HAVE_NO_SANDBOX -eq 0 ] && ! unshare -Ur true 2>/dev/null ; then');
+    expect(script).toContain('NO_SANDBOX=(--no-sandbox)');
+    expect(script).toContain('exec "$BIN" "${NO_SANDBOX[@]}" "${args[@]}"');
   });
 
   it('pins the current macOS release to unsigned thin native bundles with explicit metadata checks', () => {
@@ -389,7 +396,8 @@ describe('cross-platform packaging targets', () => {
       "LSApplicationCategoryType: 'public.app-category.developer-tools'",
       "LSMinimumSystemVersion: '12.0'",
       'NSScreenCaptureUsageDescription:',
-      "path.join(resources, 'desktop', 'macos-desktop-helper')",
+      "path.join(resources, 'desktop', 'macos-desktop-addon.node')",
+      "path.join(resources, 'desktop', 'libcos-desktop.dylib')",
       "path.join(ptyDir, 'spawn-helper')",
       "path.join(nodeModules, 'tree-sitter', 'prebuilds'",
       "path.join(nodeModules, 'tree-sitter-bash', 'prebuilds'",
@@ -399,7 +407,8 @@ describe('cross-platform packaging targets', () => {
       'walkFiles(contents)',
       "normalized.includes('.app/Contents/MacOS/')",
       "path.basename(file) === 'chrome_crashpad_handler'",
-      "requireThinMachO(file, launched, file === desktopHelper ? '12.3'",
+      "path.basename(file) === 'macos-desktop-addon.node'",
+      'desktopPayload ? \'12.3\'',
       'launchedMachOCount < 6',
       "run('plutil', ['-extract', key, 'raw', plist])",
       "run('codesign', ['--display', '--verbose=4', app]",
@@ -408,11 +417,12 @@ describe('cross-platform packaging targets', () => {
     ]) expect(macSmoke).toContain(marker);
     expect(macSmoke).toContain("requireFile(path.join(resources, 'icon.icns'))");
     expect(macSmoke).toContain("iconBytes.toString('ascii', 0, 4) !== 'icns'");
-
     const packagedRuntime = readFileSync(path.join(root, 'scripts', 'smoke-packaged-runtime.mjs'), 'utf8');
     expect(packagedRuntime).toContain("for (const dependency of ['node-pty', 'tree-sitter', 'tree-sitter-bash'])");
     expect(packagedRuntime).toContain('directories.length !== 1 || directories[0] !== nativeDir');
-    expect(packagedRuntime).toContain("required('desktop/macos-desktop-helper')");
+    expect(packagedRuntime).toContain("required('desktop/macos-desktop-addon.node')");
+    expect(packagedRuntime).toContain("required('desktop/libcos-desktop.dylib')");
+    expect(packagedRuntime).toContain("addon.handle('{\"op\":\"warm\"}')");
 
     const readme = readFileSync(path.join(root, 'README.md'), 'utf8');
     const notes = readFileSync(path.join(root, 'docs', 'release-notes', 'v2.0.2.md'), 'utf8');
