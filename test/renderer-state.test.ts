@@ -131,8 +131,32 @@ it('does not overwrite a focused dirty settings field on an unsolicited state pu
     }
   ];
   stateListener(withTools);
-  expect(w.document.getElementById('facts')!.textContent).toContain('3 available');
+  expect(w.document.getElementById('facts')!.textContent).toContain('Tools across Core + Desktop3 total');
   expect(w.document.getElementById('facts')!.textContent).not.toContain('of 9');
+
+  const withMissingMacAccess = structuredClone(withTools) as any;
+  withMissingMacAccess.platform = { family: 'macos', name: 'macOS', desktopAutomation: true };
+  withMissingMacAccess.config.readOnly = false;
+  withMissingMacAccess.config.capabilities.screen = true;
+  withMissingMacAccess.config.capabilities.control = true;
+  withMissingMacAccess.desktopAccess = {
+    screen: 'granted',
+    accessibility: 'missing',
+    checkedAt: 1,
+    error: null
+  };
+  stateListener(withMissingMacAccess);
+  const accessWarning = w.document.getElementById('desktopAccess')!;
+  expect(accessWarning.hidden).toBe(false);
+  expect(accessWarning.textContent).toContain('Accessibility: missing');
+  expect(accessWarning.textContent).toContain('live verdicts from the native backend');
+  expect((w.document.getElementById('openDesktopScreen') as HTMLButtonElement).hidden).toBe(true);
+  expect((w.document.getElementById('openDesktopAccessibility') as HTMLButtonElement).hidden).toBe(false);
+
+  const withReadOnlyMacAccess = structuredClone(withMissingMacAccess) as any;
+  withReadOnlyMacAccess.config.readOnly = true;
+  stateListener(withReadOnlyMacAccess);
+  expect(accessWarning.hidden).toBe(true);
 });
 
 it('serializes settings intent so rapid toggles and later UI changes cannot undo each other', async () => {
