@@ -274,6 +274,32 @@ describe('macOS desktop safety hardening', () => {
    * names itself, and the reason reaches the response — the only place a person reading a QA
    * report can see it.
    */
+  /**
+   * A drag has to look like a drag to the system that decides what a drag means.
+   *
+   * QA dragged a file in Finder three times, was told "Done" three times, and the file never
+   * moved. The events were posted; nothing read them as a drag. AppKit distinguishes a press
+   * that begins a drag session from one that is merely a click by whether the press settles and
+   * whether the pointer then travels continuously past a threshold — and the old code pressed,
+   * jumped straight to the destination, and released. Two waypoints are a teleport.
+   *
+   * Reported success without effect is worse than a clean failure, because a caller builds its
+   * next decision on a world state that never happened.
+   */
+  it('paces a drag so the system reads it as one, rather than as a click', () => {
+    expect(swift).toContain('private let dragPressHoldMicroseconds');
+    expect(swift).toContain('private let dragDropDwellMicroseconds');
+    expect(swift).toContain('private func dragSteps(from start: CGPoint, to end: CGPoint)');
+    // Hold after the press, travel, then dwell before releasing — in that order.
+    expect(swift).toMatch(
+      /postMouse\(down[\s\S]*usleep\(dragPressHoldMicroseconds\)[\s\S]*dragSteps\(from: current[\s\S]*usleep\(dragDropDwellMicroseconds\)[\s\S]*postMouse\(up/
+    );
+    // Every interpolated event still re-proves the target; pacing must not cost the fence.
+    expect(swift).toMatch(/for step in dragSteps[\s\S]{0,200}try assertDragTarget\(\)/);
+    // And the interpolation is bounded, so a long drag cannot post unbounded events.
+    expect(swift).toMatch(/min\(count, 240\)/);
+  });
+
   it('says why no pointer was drawn, instead of drawing nothing silently', () => {
     for (const reason of ['unavailable', 'outside_region', 'buffer_unavailable', 'drawn']) {
       expect(swift).toContain(`"${reason}"`);
