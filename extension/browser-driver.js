@@ -909,7 +909,47 @@ export const browserDriver = {
     await this.attach(opened.id);
   },
 
+  /**
+   * Refuses to keep driving a page the driver would never have taken.
+   *
+   * The refusal list guarded two doors: attach, and navigate. A click is the third. Follow a
+   * link and the tab lands wherever it points with the debugger session still on it, so the one
+   * refusal this list exists for — the model must not reach the ChatGPT tab it is speaking
+   * from — could be walked around by clicking a link to it. The comment on that list says it is
+   * refused at the lowest level "rather than anywhere it could later be forgotten"; this is
+   * where it had been forgotten. Proven by clicking one, in Chrome, before it was written.
+   *
+   * The address comes from the protocol rather than from `chrome.tabs`, because the protocol
+   * answers whether or not the extension holds permission to read that tab's URL — and a check
+   * that goes blank exactly when permissions are thin is the failure this same list already had.
+   *
+   * Only pages the driver has been holding are checked. A tab attached moments ago was already
+   * judged by `attach`, and a tab this driver just opened passes through about:blank on its way
+   * to the page it was asked for, which is refused and would detach it on arrival.
+   */
+  async assertPageStillAllowed() {
+    if (!session) return;
+    let address = '';
+    try {
+      const history = await send('Page.getNavigationHistory');
+      address = String(history?.entries?.[history.currentIndex]?.url ?? '');
+    } catch {
+      // Unreadable through the protocol means the session is already in trouble; onDetach and
+      // tabs.onRemoved cover a tab that has gone, and the next action will fail on its own.
+      return;
+    }
+    if (!address || !refusedUrl(address)) return;
+    await this.detach().catch(() => {});
+    throw fail(
+      'BROWSER_URL_REFUSED',
+      `the page moved to ${address}, which browser control refuses. The tab has been let go of.`
+    );
+  },
+
   async act(action) {
+    // Whether the page could have moved under us: a session that predates this call has had the
+    // chance, one established by the line below has not.
+    const held = Boolean(session);
     const type = String(action?.type ?? '');
     // navigate is the one action that carries its own destination, so it is the one action that
     // can start from nothing. Its address is judged here, before a tab exists, so that a refused
@@ -923,6 +963,7 @@ export const browserDriver = {
     } else {
       await this.ensureAttached();
     }
+    if (held) await this.assertPageStillAllowed();
     const button = cdpButton(action?.button);
     const modifiers = (action?.modifiers ?? []).reduce(
       (bits, name) => bits | (MODIFIERS[String(name).toLowerCase()] ?? 0),
@@ -1125,6 +1166,9 @@ export const browserDriver = {
 
   /** One look: what the page is, what can be acted on, and a picture of it. */
   async observe({ includeScreenshot = true } = {}) {
+    // Reading a page is as much a use of the session as acting on one — a refused page must not
+    // be readable either, and observe is how anything would be read.
+    if (session) await this.assertPageStillAllowed();
     await this.ensureAttached();
     const tab = await currentTab(session.tabId);
     session.url = tab.url ?? session.url;
