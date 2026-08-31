@@ -862,11 +862,24 @@ private func drag(
 /**
  * How a drag is paced, in microseconds.
  *
- * These are not tuning knobs so much as the cost of being believed by AppKit: a press has to
- * settle before it can become a drag, movement has to be continuous to cross the threshold, and
- * a drop has to hover long enough for the destination to accept it. The previous values — no
- * hold, no interpolation, 12ms between waypoints — produced input the system read as a click,
- * which is how a drag that moved nothing still reported success.
+ * Measured, not assumed. An ablation in Finder — one variable changed per run, three runs each —
+ * says only one of these is load-bearing:
+ *
+ *     control                       3/3 moved
+ *     no press hold                 3/3 moved
+ *     no drop dwell                 3/3 moved
+ *     no interpolation              0/3 moved
+ *     interpolation only            3/3 moved
+ *
+ * Interpolation is necessary and, for Finder, sufficient: two waypoints are a teleport, nothing
+ * crosses the drag threshold, and no drag session begins. The hold and the dwell are kept
+ * anyway — they cost 230ms and the measurement covers one application, while a press that
+ * settles and a destination that is hovered is what every other one is documented to want. They
+ * are insurance, and the comment should not pretend they were proven.
+ *
+ * Two things the same run established about judging a drag: the helper answers ok whether or not
+ * anything moved, so the return value is not evidence; and the filesystem takes 0-11ms to show
+ * the move, so a check with no settle produces false negatives.
  */
 private let dragPressHoldMicroseconds: UInt32 = 90_000
 private let dragStepMicroseconds: UInt32 = 8_000

@@ -465,7 +465,15 @@ function watchDesktopPermissions(next: AppState, settled: boolean): void {
   // While something is outstanding someone is walking between here and System Settings, so the
   // fast cadence earns itself. Once everything is granted nobody is waiting on the answer, and
   // a slow check is enough to stop the list from lying.
-  const period = outstanding ? 2500 : 30_000;
+  // 2.5s while something is outstanding, 6s once everything is granted.
+  //
+  // The slow side used to be 30s, which is the whole of the delay QA measured: a revocation took
+  // 40 seconds to appear against an expectation of about thirty, and nothing was broken — the
+  // helper answers correctly the moment TCC changes, measured at 107 sample points with no
+  // instance of a stale grant. The row was simply not being asked often enough. A warm call is
+  // an in-process request to a backend that is already running, so six seconds costs little and
+  // keeps the promise the list makes about updating on its own.
+  const period = outstanding ? 2500 : 6_000;
   if (!applies) {
     if (desktopPermissionTimer !== null) {
       window.clearInterval(desktopPermissionTimer);
