@@ -2363,6 +2363,19 @@ nav button.is-sel::after {
 .perm-row[data-state='unknown'] .perm-dot { background: var(--amber); }
 .perm-row[data-state='unknown'] .perm-pill { color: var(--amber); }
 
+/*
+ * The action is the whole point of an outstanding row, so it must not be the quietest
+ * thing in it. The base .btn is deliberately faint, which measures 3.1:1 on the amber wash
+ * and 3.0:1 on the red one — under the 4.5:1 that 12px text needs to stay legible. Each
+ * row lends its button the colour its pill already carries: that clears the bar at 5.5:1
+ * and ties the button to the state that put it there. Hover still deepens to --ink, so the
+ * button keeps the feedback every other button in the app gives.
+ */
+.perm-row .btn { border: 1px solid transparent; }
+.perm-row[data-state='unknown'] .btn { color: var(--amber); border-color: var(--amber-line); }
+.perm-row[data-state='missing'] .btn { color: var(--red); border-color: var(--red-line); }
+.perm-row .btn:hover:not(:disabled) { color: var(--ink); }
+
 .perm-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .perm-text strong { font-size: 13px; font-weight: 600; }
 .perm-text span { font-size: 12px; color: var(--soft); line-height: 1.45; }
