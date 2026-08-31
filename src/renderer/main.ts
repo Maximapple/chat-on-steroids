@@ -390,8 +390,13 @@ function paintDesktopPermissions(next: AppState): boolean {
 
     const pill = document.createElement('span');
     pill.className = 'perm-pill';
+    // "Not granted", not "Not allowed". macOS answers CGPreflightScreenCaptureAccess and
+    // AXIsProcessTrusted with a plain boolean and exposes nothing that separates a refusal from
+    // a permission nobody has been asked for — so calling it a refusal asserts something we
+    // cannot know. QA reset the permission entirely and was told it had been refused. The
+    // amber state remains for the case we genuinely have: no answer from the backend yet.
     pill.textContent =
-      state === 'granted' ? 'Granted' : state === 'missing' ? 'Not allowed' : 'Not asked yet';
+      state === 'granted' ? 'Granted' : state === 'missing' ? 'Not granted' : 'Not asked yet';
 
     row.append(dot, body, pill);
 

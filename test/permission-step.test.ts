@@ -78,7 +78,7 @@ function paint(access: Access | null, needs: { screen: boolean; accessibility: b
     const pill = document.createElement('span');
     pill.className = 'perm-pill';
     pill.textContent =
-      state === 'granted' ? 'Granted' : state === 'missing' ? 'Not allowed' : 'Not asked yet';
+      state === 'granted' ? 'Granted' : state === 'missing' ? 'Not granted' : 'Not asked yet';
     row.append(dot, body, pill);
 
     if (state !== 'granted') {
@@ -163,7 +163,7 @@ describe('what the rows say', () => {
       {
         title: 'Accessibility',
         state: 'missing',
-        pill: 'Not allowed',
+        pill: 'Not granted',
         action: 'Open Accessibility',
         link: PERMISSIONS[1]!.pane
       }
