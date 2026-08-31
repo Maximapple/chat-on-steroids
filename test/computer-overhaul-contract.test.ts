@@ -150,8 +150,12 @@ describe('the Windows drag is paced like a real one', () => {
     expect(HELPER_SCRIPT).toMatch(
       /Mouse\(down[\s\S]*Sleep\(DragPressHoldMs\)[\s\S]*Sleep\(DragStepMs\)[\s\S]*Sleep\(DragDropDwellMs\)[\s\S]*Mouse\(up/
     );
-    // Bounded, so a drag across a large desktop cannot post unbounded events.
-    expect(HELPER_SCRIPT).toContain('if (steps > 240) steps = 240;');
+    // Bounded for the whole path, not per hop, so the cost of a drag does not grow with the
+    // number of waypoints it happens to name — and cannot outlast the deadline that would kill
+    // the helper before it releases the button.
+    expect(HELPER_SCRIPT).toContain('const int DragMaxTotalSteps = 180;');
+    expect(HELPER_SCRIPT).toContain('steps = (int)System.Math.Round(DragMaxTotalSteps * distance / total);');
+    expect(HELPER_SCRIPT).not.toContain('if (steps > 240) steps = 240;');
   });
 });
 

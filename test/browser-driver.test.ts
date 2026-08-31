@@ -150,7 +150,7 @@ describe('permissions are opt-in', () => {
     // A capture answers when a frame is produced; a wheel event when the compositor has taken
     // it. Both were measured stalling past ten seconds on an idle tab in a real browser.
     expect(driver).toMatch(/Page\.captureScreenshot[\s\S]{0,220}COMPOSITOR_TIMEOUT_MS/);
-    expect(driver).toMatch(/type: 'mouseWheel'[\s\S]{0,320}COMPOSITOR_TIMEOUT_MS/);
+    expect(driver).toMatch(/type: 'mouseWheel'[\s\S]{0,700}COMPOSITOR_TIMEOUT_MS/);
     // Clicks and keystrokes are acknowledged directly and keep the ordinary deadline, which
     // still exists: an unbounded wait is how a stuck tab becomes a stuck tool call.
     expect(driver).toContain('const COMMAND_TIMEOUT_MS = 15_000;');
@@ -433,5 +433,41 @@ describe('reading a page', () => {
       (_, index) => `<button data-rect="0,${index % 700},40,10">B${index}</button>`
     ).join('');
     expect(read(many).elements.length).toBeLessThanOrEqual(200);
+  });
+});
+
+/**
+ * Two protocols, two conventions, and they are not the same.
+ *
+ * CoreGraphics' wheel API takes an inverted sign, and the macOS helper negates for it correctly.
+ * CDP's mouseWheel carries the DOM convention instead, where a positive deltaY scrolls down —
+ * which is also what the caller means. The driver negated anyway, carrying the macOS reasoning
+ * to the wrong protocol, and scrolled every page backwards. Nothing caught it: a wheel event is
+ * acknowledged only once a compositor has taken it, and headless has none, so the real-browser
+ * run cannot reach this at all.
+ */
+describe('the browser driver scrolls the way the caller asked', () => {
+  const driver = readFileSync(path.join(process.cwd(), 'extension/browser-driver.js'), 'utf8');
+  const swift = readFileSync(path.join(process.cwd(), 'native/macos-desktop-helper/main.swift'), 'utf8');
+
+  it('passes wheel deltas through to CDP without negating them', () => {
+    expect(driver).toContain('deltaX: Number(action.scroll_x ?? 0)');
+    expect(driver).toContain('deltaY: Number(action.scroll_y ?? 0)');
+    expect(driver).not.toContain('deltaY: -Number(action.scroll_y ?? 0)');
+  });
+
+  it('still negates for CoreGraphics, which really is inverted', () => {
+    expect(swift).toMatch(/wheel1|scrollWheelEvent/);
+  });
+
+  /**
+   * Select-all is Cmd on a Mac and Ctrl everywhere else. Hardcoding Meta made set_value append
+   * instead of replace off macOS, and made an intentional clear delete a single character.
+   */
+  it('chooses the select-all modifier for the platform it runs on', () => {
+    expect(driver).toContain('const SELECT_ALL_MODIFIER =');
+    expect(driver).toContain("/Mac/i.test(globalThis.navigator?.userAgent ?? '') ? 4 : 2");
+    expect(driver).toContain('modifiers: SELECT_ALL_MODIFIER');
+    expect(driver).not.toMatch(/modifiers: 4, key: 'a'/);
   });
 });

@@ -24,8 +24,17 @@
  * nobody is watching.
  */
 
-/** How long a command may wait to be collected and answered before the caller gives up. */
-const BROWSER_COMMAND_TIMEOUT_MS = 30_000;
+/**
+ * How long a command may wait to be collected and answered before the caller gives up.
+ *
+ * Has to outlast the driver, not merely match it. The extension allows a navigate or a reload 30
+ * seconds and a screenshot the same, an observe walks up to a dozen frames before it captures,
+ * and none of that starts until the page collects the command on its next activity poll — up to
+ * two seconds later. Sharing the driver's own number meant a slow navigate reported
+ * BROWSER_TIMEOUT for an action that had in fact succeeded, and abandoned the rest of the batch
+ * on the strength of it.
+ */
+const BROWSER_COMMAND_TIMEOUT_MS = 45_000;
 
 export interface BrowserCommandResult {
   ok: boolean;

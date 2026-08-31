@@ -795,12 +795,19 @@ private func drag(
         // file in Finder three times, was told "Done" three times, and the file never moved.
         usleep(dragPressHoldMicroseconds)
 
-        for point in points.dropFirst() {
-            // Interpolate. The caller gives waypoints, not a trajectory, and two of them are a
-            // teleport: nothing crosses the drag threshold, so no drag session ever starts and
-            // no destination is ever hovered. Real pointers move continuously, and the machinery
-            // that decides what a drag means is watching for exactly that.
-            for step in dragSteps(from: current, to: point) {
+        // Interpolate. The caller gives waypoints, not a trajectory, and two of them are a
+        // teleport: nothing crosses the drag threshold, so no drag session ever starts and no
+        // destination is ever hovered. Real pointers move continuously, and the machinery that
+        // decides what a drag means is watching for exactly that.
+        //
+        // The budget is for the whole path, not per hop. Per hop, a 64-waypoint drag — which the
+        // schema permits — could post 15,000 events and spend two minutes inside a 15-second
+        // parent deadline, and being killed there leaves the button logically held down: the
+        // catch below that releases it never runs, because the process is gone. Sized for the
+        // whole path, a drag costs the same bounded time however many waypoints it names.
+        let stepsPerSegment = dragStepBudget(points)
+        for (index, point) in points.dropFirst().enumerated() {
+            for step in dragSteps(from: current, to: point, steps: stepsPerSegment[index]) {
                 try assertDragTarget()
                 try postMouse(dragged, point: step, button: button)
                 usleep(dragStepMicroseconds)
@@ -837,18 +844,44 @@ private let dragStepMicroseconds: UInt32 = 8_000
 private let dragDropDwellMicroseconds: UInt32 = 140_000
 /** Longest jump between two posted drag events; beyond this the motion stops looking like motion. */
 private let dragMaxStepDistance: CGFloat = 8
+/**
+ * Most move events one drag may post, whatever its shape.
+ *
+ * At dragStepMicroseconds each, this bounds the moving part of any drag to about 1.4 seconds —
+ * comfortably inside the parent's deadline for a whole batch of actions, which is the thing that
+ * must never be exceeded: the parent kills the helper on timeout, and a killed helper never runs
+ * the release that would let go of the button.
+ */
+private let dragMaxTotalSteps = 180
+
+/**
+ * How many events each hop of the path gets, sharing one budget for the whole journey.
+ *
+ * Longer paths take longer strides rather than more time. A drag is not made more convincing by
+ * being slower, and a budget spent per hop is not a budget.
+ */
+private func dragStepBudget(_ points: [CGPoint]) -> [Int] {
+    let hops = zip(points, points.dropFirst()).map { start, end -> CGFloat in
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        return (dx * dx + dy * dy).squareRoot()
+    }
+    let total = hops.reduce(0, +)
+    let wanted = hops.map { max(1, Int(($0 / dragMaxStepDistance).rounded(.up))) }
+    let wantedTotal = wanted.reduce(0, +)
+    guard wantedTotal > dragMaxTotalSteps, total > 0 else { return wanted }
+    // Over budget: give each hop its share of the cap, and never fewer than one event, so a
+    // short hop in a long path still happens.
+    return hops.map { max(1, Int((CGFloat(dragMaxTotalSteps) * $0 / total).rounded())) }
+}
 
 /** The points to post between two waypoints so the pointer travels rather than teleports. */
-private func dragSteps(from start: CGPoint, to end: CGPoint) -> [CGPoint] {
+private func dragSteps(from start: CGPoint, to end: CGPoint, steps: Int) -> [CGPoint] {
     let dx = end.x - start.x
     let dy = end.y - start.y
-    let distance = (dx * dx + dy * dy).squareRoot()
-    let count = max(1, Int((distance / dragMaxStepDistance).rounded(.up)))
-    // Capped so a drag across a large display cannot post thousands of events; the cap still
-    // leaves steps small enough to read as continuous motion.
-    let steps = min(count, 240)
-    return (1...steps).map { index in
-        let progress = CGFloat(index) / CGFloat(steps)
+    let count = max(1, steps)
+    return (1...count).map { index in
+        let progress = CGFloat(index) / CGFloat(count)
         return CGPoint(x: start.x + dx * progress, y: start.y + dy * progress)
     }
 }

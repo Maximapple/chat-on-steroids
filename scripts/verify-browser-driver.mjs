@@ -101,6 +101,7 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Driver fixture</title>
 <div id="klog">no keys</div>
 <div id="dlog">no dblclick</div>
 <div id="draglog">no drag</div>
+<div id="wheellog">no wheel</div>
 <iframe id="frame" src="/frame" style="width:320px;height:80px;border:1px solid #ccc"></iframe>
 <script>
 document.getElementById('go').addEventListener('click', (e) => {
@@ -123,6 +124,10 @@ pad.addEventListener('mousedown', (e) => { drag.length = 0; drag.push('down:' + 
 pad.addEventListener('mousemove', (e) => {
   if (drag.length && e.buttons === 1 && !drag.includes('move:' + e.isTrusted)) drag.push('move:' + e.isTrusted);
 });
+window.addEventListener('wheel', (e) => {
+  document.getElementById('wheellog').textContent =
+    'wheel deltaY=' + e.deltaY + ' trusted=' + e.isTrusted;
+}, { passive: true });
 pad.addEventListener('mouseup', (e) => {
   drag.push('up:' + e.isTrusted);
   document.getElementById('draglog').textContent = drag.join(' ');
@@ -400,6 +405,34 @@ try {
   const dragLog = await readPage(`document.getElementById('draglog').textContent`);
   check('a drag presses, moves while held, then releases',
     dragLog === 'down:true move:true up:true', dragLog);
+
+  /*
+   * Scroll direction, judged by what the page is told rather than by whether it moved.
+   *
+   * A wheel event is acknowledged only once the compositor has taken it, and headless drives no
+   * frames on its own — so asserting that the page actually scrolled would be a flaky check.
+   * The sign is not flaky: CDP carries the DOM wheel convention, where a positive deltaY means
+   * scroll down, and that is what the caller means too. The driver used to negate both deltas,
+   * which scrolled every page the wrong way, and nothing here noticed.
+   */
+  // Deliberately not through act(): the wheel command is acknowledged only once the compositor
+  // has taken it, and headless drives no frames, so it times out. The page is told about the
+  // event either way, and the page is what this asks.
+  await run(`(async () => {
+    try { await globalThis.__driver.browserDriver.act(${JSON.stringify({ type: 'scroll', x: 0, y: 0, scroll_y: 300 })}); }
+    catch { /* the acknowledgement is a compositor property, not a direction one */ }
+  })()`);
+  await sleep(800);
+  const wheelLog = await readPage(`document.getElementById('wheellog').textContent`);
+  if (wheelLog === 'no wheel') {
+    // Headless delivers no wheel event to the page at all, so there is nothing to read. Said
+    // out loud rather than failed: the direction is a real property and this run cannot judge
+    // it, which is different from judging it and finding it wrong.
+    console.log('SKIP  scroll direction — headless delivers no wheel event to the page');
+  } else {
+    check('a positive scroll_y reaches the page as a positive deltaY',
+      wheelLog === 'wheel deltaY=300 trusted=true', wheelLog);
+  }
 
   // Navigation, and the history either side of it. back must return the document that was
   // there before, not merely change the url.

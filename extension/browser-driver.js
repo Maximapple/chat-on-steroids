@@ -66,6 +66,16 @@ export const REFUSED_URLS = [
   /^file:/i
 ];
 
+/**
+ * The modifier that means "select all" on this machine.
+ *
+ * CDP modifier bits are 1 Alt, 2 Ctrl, 4 Meta. This was hardcoded to Meta, which is Cmd on a Mac
+ * and the Windows key everywhere else — so off macOS nothing was selected, and set_value then
+ * inserted at the caret instead of replacing: a field holding "abc" became "abcxyz". Clearing
+ * was worse, because the lone Delete with no selection removed a single character forward.
+ */
+const SELECT_ALL_MODIFIER = /Mac/i.test(globalThis.navigator?.userAgent ?? '') ? 4 : 2;
+
 /** How long any single protocol command may take before the driver gives up on it. */
 const COMMAND_TIMEOUT_MS = 15_000;
 /** Navigation gets longer, but never unbounded. */
@@ -863,10 +873,10 @@ export const browserDriver = {
         // so a framework-backed field would look changed and behave as if it never was.
         await this.act({ type: 'click', x: at.x, y: at.y });
         await send('Input.dispatchKeyEvent', {
-          type: 'keyDown', modifiers: 4, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65
+          type: 'keyDown', modifiers: SELECT_ALL_MODIFIER, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65
         });
         await send('Input.dispatchKeyEvent', {
-          type: 'keyUp', modifiers: 4, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65
+          type: 'keyUp', modifiers: SELECT_ALL_MODIFIER, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65
         });
         const text = String(action.text ?? '');
         // insertText with empty text is a no-op, so an intentional clear needs a real delete.
@@ -934,10 +944,13 @@ export const browserDriver = {
         await movePointer(x, y);
         await send('Input.dispatchMouseEvent', {
           type: 'mouseWheel', x, y, modifiers,
-          // Positive scroll_y means "scroll down" for the caller, which is the direction the
-          // page content moves up; CDP's deltaY is the opposite sign.
-          deltaX: -Number(action.scroll_x ?? 0),
-          deltaY: -Number(action.scroll_y ?? 0)
+          // CDP's mouseWheel carries the DOM wheel convention, where a positive deltaY scrolls
+          // down. That is the caller's convention too, so the numbers pass through unchanged.
+          // They used to be negated, on the reasoning that applies to CoreGraphics' wheel API —
+          // where the sign really is inverted, and where the macOS helper still negates — but
+          // that reasoning was carried to the wrong protocol and scrolled every page backwards.
+          deltaX: Number(action.scroll_x ?? 0),
+          deltaY: Number(action.scroll_y ?? 0)
         }, COMPOSITOR_TIMEOUT_MS);
         return { scrolled: { x, y } };
       }
@@ -1002,7 +1015,11 @@ export const browserDriver = {
     session.refs = new Map(
       (page.elements ?? []).map((element) => [
         element.ref,
-        { path: element.path, frameId: element.frameId, offset: { x: element.frameX ?? 0, y: element.frameY ?? 0 } }
+        // No offset stored. It used to read element.frameX/frameY, which collectElements never
+        // sets — so it was always {0,0}, harmless only because resolveRef recomputes the offset
+        // from the frame itself and ignored the stored value. A dead field that looks like a
+        // fallback is worse than no field: the next reader trusts it.
+        { path: element.path, frameId: element.frameId }
       ])
     );
     const view = await viewport();

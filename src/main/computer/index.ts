@@ -232,13 +232,26 @@ export function helperTimeoutMs(
       return platform === 'darwin' ? 120_000 : 10_000;
     case 'warm':
       return 10_000;
-    case 'act':
-      if (platform !== 'darwin') return 15_000;
+    case 'act': {
+      // A drag is paced on purpose — held, travelled and dwelt on — so it costs real time a
+      // click does not. Each is bounded to about 1.7s by the helpers' own step budget, but the
+      // parent must still allow for them: a deadline that fires mid-drag kills the helper
+      // before it releases the button.
+      const drags = Array.isArray(request['actions'])
+        ? (request['actions'] as Array<Record<string, unknown>>).filter((a) => a?.['type'] === 'drag').length
+        : 0;
+      const dragAllowance = Math.min(8, drags) * 2_500;
+      if (platform !== 'darwin') return 15_000 + dragAllowance;
       // Every macOS physical mutation can now re-prove the exact AX/WindowServer input
       // target, and an explicit focus may spend up to two seconds in its bounded poll. Size
       // the parent deadline for the whole permitted batch so the helper can return partial
       // completion evidence instead of being killed after earlier actions already landed.
-      return 15_000 + Math.min(20, Array.isArray(request['actions']) ? request['actions'].length : 1) * 2_100;
+      return (
+        15_000 +
+        Math.min(20, Array.isArray(request['actions']) ? request['actions'].length : 1) * 2_100 +
+        dragAllowance
+      );
+    }
     default:
       return HELPER_TIMEOUT_MS;
   }

@@ -111,7 +111,7 @@ import {
   touchContinuation
 } from './session/continuation.js';
 import { noteResumeOpening } from './session/resume-gate.js';
-import { collectBrowserCommand, settleBrowserCommand } from './browser-control.js';
+import { abandonBrowserCommands, collectBrowserCommand, settleBrowserCommand } from './browser-control.js';
 import { readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
 import { APP_VERSION, BRIDGE_PROTOCOL } from './version.js';
 import { requestCorrelation } from './session/correlation.js';
@@ -1215,6 +1215,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     const id = conversationId(body['conversationId']);
     if (id) {
+      // Anything the browser driver was still waiting on for this conversation is gone with the
+      // page that would have carried it. Given up here rather than left to time out: the wait
+      // was thirty seconds and ended in "the browser took the action but did not report a
+      // result", which describes something that never happened.
+      abandonBrowserCommands(id);
       await closeConversation(id);
       // A browser tab closing is not evidence that the server-side ChatGPT turn has stopped.
       // In particular, after a swarm ends the retired-worker lease is the only authority fence

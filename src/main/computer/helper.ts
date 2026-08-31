@@ -165,10 +165,20 @@ public static class Clf {
   const int DragStepMs = 8;
   const int DragDropDwellMs = 140;
   const double DragMaxStep = 8.0;
+  // One budget for the whole path, not per hop. Per hop, a 64-waypoint drag could post
+  // thousands of events and outlast the parent's deadline, and a helper killed mid-drag never
+  // reaches the release below — leaving the button logically held down. Longer paths take
+  // longer strides instead of more time.
+  const int DragMaxTotalSteps = 180;
 
   public static void Drag(int[] xs, int[] ys, string button) {
     uint down, up, data;
     ButtonFlags(button, out down, out up, out data);
+    double total = 0.0;
+    for (int i = 1; i < xs.Length; i++) {
+      double hx = xs[i] - xs[i - 1], hy = ys[i] - ys[i - 1];
+      total += System.Math.Sqrt(hx * hx + hy * hy);
+    }
     Move(xs[0], ys[0]);
     Send(new INPUT[] { Mouse(down, 0, 0, data) });
     System.Threading.Thread.Sleep(DragPressHoldMs);
@@ -177,8 +187,10 @@ public static class Clf {
       double dx = xs[i] - cx, dy = ys[i] - cy;
       double distance = System.Math.Sqrt(dx * dx + dy * dy);
       int steps = (int)System.Math.Ceiling(distance / DragMaxStep);
+      if (total > 0.0 && total / DragMaxStep > DragMaxTotalSteps) {
+        steps = (int)System.Math.Round(DragMaxTotalSteps * distance / total);
+      }
       if (steps < 1) steps = 1;
-      if (steps > 240) steps = 240;
       for (int s = 1; s <= steps; s++) {
         double progress = (double)s / (double)steps;
         Move((int)System.Math.Round(cx + dx * progress), (int)System.Math.Round(cy + dy * progress));

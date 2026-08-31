@@ -26,7 +26,7 @@ import {
 } from './tunnel/health.js';
 
 import type { Capabilities, Check, Diagnosis, MacOSDesktopAccessStatus } from '../shared/types.js';
-import { surfaceIsUseful } from './mcp/surfaces.js';
+import { surfaceIsUseful, type SurfaceId } from './mcp/surfaces.js';
 import { capabilitiesAddedSinceConnectorSnapshot } from './mcp/server.js';
 import { refreshMacOSDesktopAccess } from './computer/index.js';
 
@@ -177,8 +177,14 @@ export function describeMacOSDesktopAccess(
   return checks;
 }
 
-/** Runs an initialize + tools/list against our own loopback endpoint. */
-async function checkLocalServer(url: string): Promise<Check> {
+/**
+ * Runs an initialize + tools/list against our own loopback endpoint.
+ *
+ * The surface is named because the widening note is per surface: a capability that adds tools to
+ * Core says nothing about Desktop, and reporting it against the wrong connector sends someone to
+ * recreate the one that was never affected.
+ */
+async function checkLocalServer(url: string, surface: SurfaceId): Promise<Check> {
   const init = await fetchJson(url, {
     jsonrpc: '2.0',
     id: 1,
@@ -221,7 +227,7 @@ async function checkLocalServer(url: string): Promise<Check> {
   // tool here that never appears there — QA reported `browser` missing while the app was
   // serving it, and had no way to tell the two apart. If anything has been added since, say so
   // here, where the list it is being compared against is on the same line.
-  const added = capabilitiesAddedSinceConnectorSnapshot();
+  const added = capabilitiesAddedSinceConnectorSnapshot(surface);
   const staleNote =
     added.length > 0
       ? ` Switched on since this endpoint started: ${added.join(', ')}. The tools they add are being served now, but a chat that already loaded this connector keeps the list it saw — start a new chat, and only recreate the connector if that still does not show them.`
@@ -329,7 +335,8 @@ export async function runDiagnostics(): Promise<Diagnosis> {
       detail: 'Not running. Press Connect first.'
     });
   } else {
-    checks.push(await checkLocalServer(status.localUrl));
+    // status.localUrl is Core's endpoint, so this check speaks for Core.
+    checks.push(await checkLocalServer(status.localUrl, 'core'));
   }
 
   // 3. The tunnel process itself.
