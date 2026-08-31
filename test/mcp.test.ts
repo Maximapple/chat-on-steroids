@@ -805,9 +805,12 @@ describe('surface boundaries', () => {
     // ones that never drive a web page. It buys the only way to see inside one — Chromium keeps
     // its renderer accessibility tree off until a real assistive client asks, so without this
     // the OS-level driver has pixels and nothing else in a browser. The action union is already
-    // as small as the capability allows: attach, detach and status were removed because the
-    // driver takes the newest ordinary tab on its own, which is bookkeeping the model should
-    // never have had to carry.
+    // as small as the capability allows: attach was removed because the driver takes the newest
+    // ordinary tab on its own, which is bookkeeping the model should never have had to carry.
+    // detach and status were briefly removed with it and came back, because a model that had
+    // taken a page then had no way to give it back. Saying so in the description costs bytes
+    // here and is worth them: a run was lost to a model looking for an attach action, not
+    // finding one, and reaching for desktop automation to open a tab instead.
     expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(12_800);
 
     // Per tool as well as per surface, so one schema cannot quietly eat the whole budget

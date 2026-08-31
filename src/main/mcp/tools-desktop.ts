@@ -661,7 +661,8 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
         description:
           'Drive a web page. observe first: refs plus a screenshot whose pixels are the coordinates. ' +
           'Prefer refs — re-resolved before use, so a moved element is hit and a vanished one refuses. ' +
-          'Takes the newest ordinary tab; ChatGPT tabs are never driven. Needs browser control on in the extension popup.',
+          'No attach or open-tab action: navigate starts on the newest ordinary tab already ' +
+          'open; ChatGPT tabs are never driven. Needs browser control on in the extension popup.',
         inputSchema: z.object({ actions: z.array(browserActionArg).min(1).max(20) }).strict(),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
       },
