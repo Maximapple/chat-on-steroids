@@ -84,6 +84,7 @@ export type BrowserAction =
 export declare const browserDriver: {
   status(): Promise<BrowserSessionStatus>;
   ensureAttached(openUrl?: string | null): Promise<void>;
+  assertPageStillAllowed(): Promise<void>;
   attach(tabId: number): Promise<BrowserSessionStatus>;
   detach(): Promise<BrowserSessionStatus>;
   forget(tabId: number): void;

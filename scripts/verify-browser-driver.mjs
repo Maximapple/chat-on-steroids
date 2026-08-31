@@ -97,6 +97,7 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Driver fixture</title>
 <button id="dbl" aria-label="Double me">Double</button>
 <div id="pad" style="width:220px;height:70px;border:1px dashed #999">Drag pad</div>
 <a id="onward" href="/second">Go onward</a>
+<a id="leave" href="about:blank">Leave for a refused page</a>
 <div id="log">nothing yet</div>
 <div id="klog">no keys</div>
 <div id="dlog">no dblclick</div>
@@ -539,6 +540,36 @@ try {
     String(detached.value ?? '').includes('"attached":false'), detached.value ?? detached.error);
   check('detach removes the overlay',
     (await readPage(`Boolean(document.getElementById('__cos_pointer__'))`)) === false);
+
+  // The refusal list guards attach and navigate. A click is the third way a driven tab can
+  // change page, and it went through neither: click a link and the tab lands wherever the link
+  // points, with the debugger session still on it. The list exists so the driver can never
+  // reach ChatGPT's own tabs — "refused at the lowest level rather than anywhere it could later
+  // be forgotten" — and a link is exactly where it was forgotten. about:blank stands in for a
+  // refused destination here because it needs no network.
+  const wandered = await run(`(async () => {
+    const driver = globalThis.__driver.browserDriver;
+    await driver.act({ type: 'navigate', url: 'http://127.0.0.1:${pagePort}/' });
+    const view = await driver.observe();
+    const link = (view.elements || []).find((element) => (element.name || '').includes('refused'));
+    if (!link) return JSON.stringify({ error: 'no refused link in the observation' });
+    await driver.act({ type: 'click_ref', ref: link.ref });
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    let refusal = 'NOT REFUSED';
+    try {
+      await driver.act({ type: 'type', text: 'this must not reach a refused page' });
+    } catch (error) {
+      refusal = (error.code || '') + ': ' + error.message;
+    }
+    const status = await driver.status();
+    return JSON.stringify({ refusal, attached: status.attached, url: status.url });
+  })()`);
+  const landed = (() => {
+    try { return JSON.parse(String(wandered.value ?? '{}')); } catch { return {}; }
+  })();
+  check('a driven tab that lands on a refused page is let go of',
+    String(landed.refusal ?? '').startsWith('BROWSER_URL_REFUSED') && landed.attached === false,
+    wandered.value ?? wandered.error);
 
   // An address the extension cannot read must be refused, not allowed. `tab.url` is undefined
   // for every tab the extension has no access to, and the refusal list is written against that
