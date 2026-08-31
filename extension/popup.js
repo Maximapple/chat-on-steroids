@@ -443,22 +443,59 @@ $('overwriteToggle').addEventListener('change', async () => {
  * callback. Waiting only for the callback waits forever on Firefox, which this extension
  * supports, so whichever the browser actually hands back is accepted.
  */
+/*
+ * What browser control still asks for at runtime.
+ *
+ * `debugger` is deliberately absent, and this is the whole reason the switch used to be
+ * unusable: Chrome does not accept `debugger` in optional_permissions. It drops the entry when
+ * the manifest loads, so a later request for it comes back "Only permissions specified in the
+ * manifest may be requested" — verified against Chrome 152. Every request here failed on that
+ * one entry, the failure was swallowed, and the toggle simply snapped back off. `debugger` is a
+ * required permission now; site and tab access stay optional, which is what actually decides
+ * whether this extension can read a page.
+ */
 const BROWSER_CONTROL_PERMISSIONS = {
-  permissions: ['debugger', 'tabs', 'tabGroups'],
+  permissions: ['tabs', 'tabGroups'],
   origins: ['<all_urls>']
 };
 
+/**
+ * Shows why browser control could not be switched on, or clears it.
+ *
+ * A permission refusal used to be invisible: the switch flipped back and said nothing, so a
+ * request Chrome was never going to grant looked like a broken control. The message is the
+ * browser's own wherever there is one, because a summary loses the detail that makes it fixable.
+ */
+function showBrowserControlError(message) {
+  const node = document.getElementById('browserControlError');
+  if (!node) return;
+  node.textContent = message ?? '';
+  node.hidden = !message;
+}
+
+/** The reason the last permission call failed, for the popup to show rather than hide. */
+let lastPermissionError = null;
+
 function browserPermissions(method) {
+  lastPermissionError = null;
   return new Promise((resolve) => {
     const api = webext?.permissions;
     if (!api?.[method]) return resolve(false);
     try {
       const returned = api[method](BROWSER_CONTROL_PERMISSIONS, (granted) => {
-        void webext.runtime.lastError;
+        // Kept, not discarded: a refusal the user cannot see reads as a broken switch, which is
+        // exactly how a permission Chrome would never grant went unnoticed.
+        lastPermissionError = webext.runtime.lastError?.message ?? null;
         resolve(Boolean(granted));
       });
       if (returned && typeof returned.then === 'function') {
-        returned.then((granted) => resolve(Boolean(granted)), () => resolve(false));
+        returned.then(
+          (granted) => resolve(Boolean(granted)),
+          (error) => {
+            lastPermissionError = error?.message ?? String(error);
+            resolve(false);
+          }
+        );
       }
     } catch {
       resolve(false);
@@ -499,8 +536,18 @@ $('browserControlToggle').addEventListener('change', async () => {
   const wanted = $('browserControlToggle').checked === true;
   try {
     if (wanted) {
-      if (!(await browserPermissions('request'))) $('browserControlToggle').checked = false;
+      if (!(await browserPermissions('request'))) {
+        $('browserControlToggle').checked = false;
+        showBrowserControlError(
+          lastPermissionError
+            ? `Browser control could not be enabled: ${lastPermissionError}`
+            : 'Browser control could not be enabled. The browser declined the permission request.'
+        );
+      } else {
+        showBrowserControlError(null);
+      }
     } else {
+      showBrowserControlError(null);
       // Stop first, then revoke: revoking under a live session would leave a debugger
       // attachment this extension can no longer address, and the banner with it.
       await webext.runtime.sendMessage({ type: 'browser_detach' }).catch(() => null);

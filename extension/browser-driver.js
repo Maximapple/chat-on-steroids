@@ -563,7 +563,21 @@ async function currentTab(tabId) {
  * capability most of them will never switch on. As optional permissions they are requested
  * once, from a real click in the popup, by the person who actually wants the feature.
  */
-export const BROWSER_PERMISSIONS = { permissions: ['debugger', 'tabs', 'tabGroups'], origins: ['<all_urls>'] };
+/**
+ * What is actually requested and revoked at runtime.
+ *
+ * `debugger` is not here, and cannot be: Chrome refuses it in optional_permissions, dropping the
+ * entry at manifest load so a later request answers "Only permissions specified in the manifest
+ * may be requested" — measured against Chrome 152. One unavailable entry failed the whole
+ * request, which is why the popup switch could never stay on. It is a required permission now.
+ *
+ * Site and tab access remain optional, and they are what decides whether this extension can
+ * read a page at all, so the opt-in still means something.
+ */
+export const BROWSER_PERMISSIONS = { permissions: ['tabs', 'tabGroups'], origins: ['<all_urls>'] };
+
+/** Held from install, not requestable. Checked, never requested and never removed. */
+const REQUIRED_BROWSER_PERMISSIONS = { permissions: ['debugger'] };
 
 /**
  * One call shape, whichever the browser answers with.
@@ -629,7 +643,30 @@ export function browserControlSupported() {
 
 export async function hasBrowserPermissions() {
   if (!(await browserControlSupported())) return false;
+  // Both halves, because they are granted by different mechanisms: debugger at install, the
+  // rest from the popup. Holding only one is not browser control.
+  if (!(await containsRequired())) return false;
   return askPermissions('contains');
+}
+
+/** Whether the install-time debugger permission is actually present. */
+function containsRequired() {
+  return new Promise((resolve) => {
+    const runtime = globalThis.browser ?? globalThis.chrome;
+    const api = runtime?.permissions;
+    if (!api?.contains) return resolve(false);
+    try {
+      const returned = api.contains(REQUIRED_BROWSER_PERMISSIONS, (held) => {
+        if (runtime?.runtime?.lastError) return resolve(false);
+        resolve(held === true);
+      });
+      if (returned && typeof returned.then === 'function') {
+        returned.then((held) => resolve(held === true), () => resolve(false));
+      }
+    } catch {
+      resolve(false);
+    }
+  });
 }
 
 /** Must be called from a user gesture; the browser refuses the prompt otherwise. */
