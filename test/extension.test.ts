@@ -228,6 +228,106 @@ function turn(role: 'user' | 'assistant', id: string): FakeNode {
   return new FakeNode({ 'data-testid': 'conversation-turn-1', 'data-turn': role, 'data-turn-id': id });
 }
 
+/**
+ * Chrome Memory Saver discards a background tab after a while, and that takes the content
+ * script with it: the recorder stops, activity polling stops, and fresh request-to-conversation
+ * evidence stops being produced. The app is deliberately conservative without that evidence, so
+ * the visible result is safe calls landing in Unattributed activity and identity-sensitive ones
+ * failing closed — in the middle of a run that was working a moment earlier.
+ *
+ * The decision is made from the app's own activity reply, which already passes through the
+ * worker, so nothing page-side has to learn a new job.
+ */
+describe('holding a tab that is still executing', () => {
+  const CONVERSATION = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+  function activityWorker(data: Record<string, unknown>) {
+    const paired = { token: 'token', port: 8765 };
+    const fetch = vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/activity') {
+        return response(200, { sessionId: 'session', entries: [], stream: [], nextSince: 0, ...data });
+      }
+      return response(404, {});
+    });
+    return loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+  }
+
+  /** The flag is written only on a change, so an idle poll loop does not talk to the browser. */
+  async function heldAfter(data: Record<string, unknown>) {
+    const worker = activityWorker(data);
+    await worker.send({ type: 'activity', conversationId: CONVERSATION, since: 0 }, 41);
+    await worker.send({ type: 'activity', conversationId: CONVERSATION, since: 0 }, 41);
+    return worker.tabsUpdate.mock.calls.filter(
+      (call) => call[1] && typeof call[1] === 'object' && 'autoDiscardable' in (call[1] as object)
+    );
+  }
+
+  it('holds the owning prime of a running swarm', async () => {
+    const calls = await heldAfter({ swarm: { running: true, agents: [] } });
+    expect(calls).toEqual([[41, { autoDiscardable: false }]]);
+  });
+
+  it('holds a worker chat while its turn is still going', async () => {
+    expect(await heldAfter({ bootstrap: 'worker', generating: true })).toEqual([
+      [41, { autoDiscardable: false }]
+    ]);
+    // A worker chat that has stopped generating is an ordinary tab again.
+    expect(await heldAfter({ bootstrap: 'worker', generating: false })).toEqual([]);
+  });
+
+  it('holds a compaction, outstanding tool calls and unread background output', async () => {
+    expect(await heldAfter({ job: { busy: true } })).toEqual([[41, { autoDiscardable: false }]]);
+    expect(await heldAfter({ pendingTools: 2 })).toEqual([[41, { autoDiscardable: false }]]);
+    expect(await heldAfter({ backgroundExec: { running: 1, exitedUnread: 0 } })).toEqual([
+      [41, { autoDiscardable: false }]
+    ]);
+    // A finished session whose output nobody has read is exactly the case issue #36 is about.
+    expect(await heldAfter({ backgroundExec: { running: 0, exitedUnread: 1 } })).toEqual([
+      [41, { autoDiscardable: false }]
+    ]);
+  });
+
+  /**
+   * The narrowness is the point. Protecting every ChatGPT tab would switch Memory Saver off
+   * for someone who keeps twenty of them open, which is a worse product than the problem.
+   */
+  it('leaves an idle chat alone, however long it sits there', async () => {
+    expect(await heldAfter({})).toEqual([]);
+    expect(await heldAfter({ swarm: { running: false, agents: [] }, generating: false })).toEqual([]);
+    expect(await heldAfter({ pendingTools: 0, backgroundExec: { running: 0, exitedUnread: 0 } })).toEqual([]);
+  });
+
+  it('gives the tab back to Chrome once the work is over', async () => {
+    let running = true;
+    const paired = { token: 'token', port: 8765 };
+    const fetch = vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/activity') {
+        return response(200, {
+          sessionId: 'session', entries: [], stream: [], nextSince: 0,
+          swarm: { running, agents: [] }
+        });
+      }
+      return response(404, {});
+    });
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+
+    await worker.send({ type: 'activity', conversationId: CONVERSATION, since: 0 }, 41);
+    running = false;
+    await worker.send({ type: 'activity', conversationId: CONVERSATION, since: 0 }, 41);
+    await worker.send({ type: 'activity', conversationId: CONVERSATION, since: 0 }, 41);
+
+    expect(
+      worker.tabsUpdate.mock.calls.filter(
+        (call) => call[1] && typeof call[1] === 'object' && 'autoDiscardable' in (call[1] as object)
+      )
+    ).toEqual([[41, { autoDiscardable: false }], [41, { autoDiscardable: true }]]);
+  });
+});
+
 describe('ChatGPT DOM adapter', () => {
   const CONVERSATION = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
