@@ -188,6 +188,17 @@ These cover behaviour that changed since the last run and was never exercised.
     reopen the app. The window must come back and the connector must answer — desktop actions
     should refuse with a named permission error, not with a dead tunnel.
 
+    **Do this one last, and tell the user before you start.** It revokes a permission the run
+    depends on, and this app deliberately makes its own window unautomatable — so if the
+    connectors do not come back, nothing you can do will restore them. Recovery is manual:
+    re-enable Chat On Steroids under System Settings → Privacy & Security → Accessibility (Device
+    Control on newer macOS), then fully quit and reopen the app. Say this in the report rather
+    than leaving the machine in that state without explanation.
+
+    If the connectors do not return, look in the app's **Activity** panel for a line beginning
+    `automatic connect failed:` — it names which link is broken, which a dead tunnel alone does
+    not.
+
 ---
 
 # The report
