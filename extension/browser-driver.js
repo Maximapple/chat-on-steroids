@@ -385,7 +385,6 @@ export const COLLECT_SOURCE = `(() => {
     if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) continue;
     if (el.getAttribute('aria-hidden') === 'true') continue;
     seen.push({
-      ref: 'e' + seen.length,
       path: pathOf(el),
       role: role(el),
       name: name(el).slice(0, 160),
@@ -407,10 +406,11 @@ export const COLLECT_SOURCE = `(() => {
   });
 })()`;
 
-async function isolatedContext() {
-  const { frameTree } = await send('Page.getFrameTree');
-  const frameId = frameTree?.frame?.id;
-  if (!frameId) throw fail('BROWSER_PROTOCOL_FAILED', 'the page reported no main frame');
+/** Frames one observation will look into, and how deep. A frame bomb is a real page shape. */
+const MAX_FRAMES = 12;
+const MAX_FRAME_DEPTH = 4;
+
+async function isolatedContext(frameId) {
   const { executionContextId } = await send('Page.createIsolatedWorld', {
     frameId,
     worldName: 'chat-on-steroids',
@@ -419,22 +419,104 @@ async function isolatedContext() {
   return executionContextId;
 }
 
-async function collectElements() {
-  const contextId = await isolatedContext();
+async function mainFrameId() {
+  const { frameTree } = await send('Page.getFrameTree');
+  const frameId = frameTree?.frame?.id;
+  if (!frameId) throw fail('BROWSER_PROTOCOL_FAILED', 'the page reported no main frame');
+  return frameId;
+}
+
+/** Evaluates the collector inside one frame, in a world the page cannot see or shadow. */
+async function readFrame(frameId) {
+  const contextId = await isolatedContext(frameId);
   const { result, exceptionDetails } = await send('Runtime.evaluate', {
     expression: COLLECT_SOURCE,
     contextId,
     returnByValue: true,
     awaitPromise: false
   });
-  if (exceptionDetails) {
-    throw fail('BROWSER_OBSERVE_FAILED', exceptionDetails.text || 'the page could not be read');
-  }
+  if (exceptionDetails) return null;
   try {
     return JSON.parse(String(result?.value ?? '{}'));
   } catch {
-    throw fail('BROWSER_OBSERVE_FAILED', 'the page returned an unreadable description');
+    return null;
   }
+}
+
+/**
+ * Where a child frame sits in the page above it.
+ *
+ * An element's rectangle is relative to its own frame, so without this every coordinate
+ * inside an iframe would be wrong by the iframe's position — and wrong coordinates do not
+ * fail, they click somewhere else.
+ */
+async function frameOffset(frameId) {
+  try {
+    const { backendNodeId } = await send('DOM.getFrameOwner', { frameId });
+    if (!backendNodeId) return null;
+    const { model } = await send('DOM.getBoxModel', { backendNodeId });
+    const quad = model?.content;
+    if (!Array.isArray(quad) || quad.length < 2) return null;
+    return { x: quad[0], y: quad[1] };
+  } catch {
+    // A frame that closed between the tree walk and this call. Its elements are dropped
+    // rather than reported at an offset nobody can vouch for.
+    return null;
+  }
+}
+
+/**
+ * Every element on the page, including the ones inside iframes.
+ *
+ * Consent dialogs, payment forms, embedded editors and most login widgets are iframes. Reading
+ * only the main frame reported those pages as having nothing to interact with, which the model
+ * cannot tell apart from a page that genuinely has nothing.
+ *
+ * Each element keeps the frame it came from, because a ref has to be re-resolved in the frame
+ * that owns it, and carries coordinates already translated into the top-level page's space so
+ * that clicking one needs no further arithmetic.
+ */
+async function collectElements() {
+  const root = await mainFrameId();
+  const { frameTree } = await send('Page.getFrameTree');
+
+  const frames = [];
+  const walk = (node, depth, offset) => {
+    if (!node?.frame?.id || frames.length >= MAX_FRAMES) return;
+    frames.push({ id: node.frame.id, depth, offset });
+    if (depth >= MAX_FRAME_DEPTH) return;
+    for (const child of node.childFrames ?? []) walk(child, depth + 1, null);
+  };
+  walk(frameTree, 0, { x: 0, y: 0 });
+
+  const page = (await readFrame(root)) ?? { elements: [] };
+  const elements = [];
+  let index = 0;
+  const take = (list, frameId, offset) => {
+    for (const element of list ?? []) {
+      if (elements.length >= MAX_ELEMENTS) return;
+      elements.push({
+        ...element,
+        ref: 'e' + index++,
+        frameId,
+        x: Math.round(element.x + offset.x),
+        y: Math.round(element.y + offset.y)
+      });
+    }
+  };
+  take(page.elements, root, { x: 0, y: 0 });
+
+  for (const frame of frames) {
+    if (frame.id === root) continue;
+    if (elements.length >= MAX_ELEMENTS) break;
+    const offset = await frameOffset(frame.id);
+    if (!offset) continue;
+    const inner = await readFrame(frame.id);
+    if (!inner) continue;
+    take(inner.elements, frame.id, offset);
+  }
+
+  return { ...page, elements };
 }
 
 /**
@@ -472,12 +554,12 @@ async function currentTab(tabId) {
 export const BROWSER_PERMISSIONS = { permissions: ['debugger', 'tabs', 'tabGroups'], origins: ['<all_urls>'] };
 
 /**
- * One call shape for both extension APIs.
+ * One call shape, whichever the browser answers with.
  *
- * Chrome's `chrome.permissions.*` answers a callback and returns nothing; Firefox's
- * `browser.permissions.*` returns a promise and ignores the callback entirely. Waiting only
- * for the callback waits forever on Firefox, which this extension supports. Accepting
- * whichever the browser actually hands back costs three lines and removes the question.
+ * `permissions.*` answers a callback in the classic API and returns a promise in the MV3 one,
+ * and which you get depends on the browser build rather than on anything visible here. Waiting
+ * only for the callback hangs forever against the promise form, and a permission check that
+ * hangs is indistinguishable from one that denied. Accepting either costs three lines.
  */
 function askPermissions(method) {
   return new Promise((resolve) => {
@@ -498,7 +580,43 @@ function askPermissions(method) {
   });
 }
 
-export function hasBrowserPermissions() {
+/**
+ * Whether this browser can do any of this at all.
+ *
+ * Browser control needs the DevTools protocol. Where an extension cannot reach it — a browser
+ * that never implemented it, or a build where policy has taken it away — this is not a missing
+ * permission but a missing capability, and saying so plainly is the difference between a
+ * feature someone can decide not to use and a switch that silently does nothing.
+ *
+ * Deliberately not a `chrome.debugger` presence check. That object does not exist until the
+ * optional permission is granted, so testing for it would hide the very switch that grants
+ * it — the feature would be permanently unreachable on exactly the browsers that support it.
+ * Proven in a real Edge run, where the popup reported no debugger API at all.
+ */
+export function browserControlSupported() {
+  return new Promise((resolve) => {
+    const runtime = globalThis.browser ?? globalThis.chrome;
+    const api = runtime?.permissions;
+    if (!api?.contains) return resolve(false);
+    // Asking whether the permission is *held* is not the question — it will not be, before it
+    // is granted. Asking whether the browser recognises the name is: one that has never heard
+    // of it rejects the call outright, while one that simply has not granted it answers false.
+    const done = (value) => resolve(value === true || value === false);
+    try {
+      const returned = api.contains({ permissions: ['debugger'] }, (held) => {
+        // A browser that does not know the permission reports it here rather than throwing.
+        if (runtime?.runtime?.lastError) return resolve(false);
+        done(held);
+      });
+      if (returned && typeof returned.then === 'function') returned.then(done, () => resolve(false));
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+export async function hasBrowserPermissions() {
+  if (!(await browserControlSupported())) return false;
   return askPermissions('contains');
 }
 
@@ -519,6 +637,13 @@ export const browserDriver = {
     if (session && session.tabId === tabId) return this.status();
     if (session) await this.detach();
 
+    if (!(await browserControlSupported())) {
+      throw fail(
+        'BROWSER_UNSUPPORTED',
+        'this browser exposes no DevTools protocol to extensions, so a web page cannot be driven ' +
+          'from it. Desktop control still works and can operate the browser window itself.'
+      );
+    }
     if (!(await hasBrowserPermissions())) {
       throw fail(
         'BROWSER_PERMISSION_REQUIRED',
@@ -585,11 +710,15 @@ export const browserDriver = {
    * gone, hidden or off-screen produces a refusal instead of a click somewhere else.
    */
   async resolveRef(ref) {
-    const path = session?.refs?.get(String(ref));
-    if (!path) {
+    const entry = session?.refs?.get(String(ref));
+    if (!entry) {
       throw fail('BROWSER_BAD_REF', `${ref} is not from the most recent observation of this page`);
     }
-    const contextId = await isolatedContext();
+    const { path, frameId } = entry;
+    // Resolved in the frame that owns it. A path from inside an iframe means nothing in the
+    // document above it, and could match something entirely different there.
+    const contextId = await isolatedContext(frameId);
+    const offset = (await frameOffset(frameId)) ?? { x: 0, y: 0 };
     const { result, exceptionDetails } = await send('Runtime.evaluate', {
       expression: `(() => {
         const el = document.querySelector(${JSON.stringify(path)});
@@ -611,7 +740,8 @@ export const browserDriver = {
     const found = JSON.parse(String(result?.value ?? '{}'));
     if (!found.found) throw fail('BROWSER_BAD_REF', `${ref} is no longer on this page`);
     if (!found.usable) throw fail('BROWSER_BAD_REF', `${ref} is on the page but not visible or reachable`);
-    return { x: found.x, y: found.y };
+    // Back into the top-level page's coordinates, which is the space input events use.
+    return { x: Math.round(found.x + offset.x), y: Math.round(found.y + offset.y) };
   },
 
   /**
@@ -819,7 +949,12 @@ export const browserDriver = {
     const page = await collectElements();
     // Only the newest observation's refs are addressable. Keeping older ones alive would let
     // a ref from three pages ago resolve against whatever happens to match now.
-    session.refs = new Map((page.elements ?? []).map((element) => [element.ref, element.path]));
+    session.refs = new Map(
+      (page.elements ?? []).map((element) => [
+        element.ref,
+        { path: element.path, frameId: element.frameId, offset: { x: element.frameX ?? 0, y: element.frameY ?? 0 } }
+      ])
+    );
     const view = await viewport();
     const shot = includeScreenshot ? await screenshot() : null;
     return {
@@ -829,8 +964,9 @@ export const browserDriver = {
       viewport: view,
       scrollY: page.scrollY,
       scrollHeight: page.scrollHeight,
-      // The path is how a ref is resolved, not something the model should reason about.
-      elements: (page.elements ?? []).map(({ path, ...element }) => element),
+      // The path and the frame are how a ref is resolved, not something the model should
+      // reason about: it names a ref and gets coordinates already in the page's own space.
+      elements: (page.elements ?? []).map(({ path, frameId, ...element }) => element),
       screenshot: shot
     };
   }

@@ -20,6 +20,12 @@ describe('open upstream issue hardening bundle', () => {
     expect(source('extension/content.js')).toContain('CLF_DOM.conversationFromPath(path)');
   });
 
+  /**
+   * Firefox stays a target for everything except browser control, which needs the DevTools
+   * protocol Firefox does not expose to extensions. That one feature declares itself
+   * unavailable and hides its own switch there; recording, the bridge, Overwrite and the
+   * relabeller never touch the debugger API and work exactly as they do in Chrome.
+   */
   it('keeps the Chrome MV3 manifest valid while retaining Firefox runtime compatibility hooks', () => {
     const manifest = JSON.parse(source('extension/manifest.json'));
     expect(Number(manifest.minimum_chrome_version)).toBeGreaterThanOrEqual(121);
@@ -28,6 +34,8 @@ describe('open upstream issue hardening bundle', () => {
     expect(manifest.browser_specific_settings.gecko.strict_min_version).toBe('128.0');
     expect(source('extension/background.js')).toContain('globalThis.browser ?? globalThis.chrome');
     expect(source('src/main/bridge.ts')).toContain("origin.startsWith('moz-extension://')");
+    // The one capability that cannot exist there refuses by feature, not by browser name.
+    expect(source('extension/browser-driver.js')).toContain('export function browserControlSupported()');
   });
 
   it('keeps a browser-proven compaction capture out of recursive auto-compaction', () => {
