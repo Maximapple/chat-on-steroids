@@ -221,6 +221,27 @@ app.on('second-instance', windowActivation.request);
 /** Whether startup got as far as bringing up the bridge and connection. */
 let startedControlPlane = false;
 
+/**
+ * Connects, and says so if it cannot.
+ *
+ * `void connect()` discarded the failure: no message, no retry, and from the outside a connector
+ * that answers `tunnel_client_not_connected` forever. QA hit exactly that after restarting with
+ * a permission revoked, and could not press Connect by hand because this app deliberately makes
+ * its own window unautomatable — so an automated run had no way out at all.
+ *
+ * Logged rather than retried here. A failing connect usually needs something a retry cannot
+ * supply, and a silent loop would hide that as thoroughly as the discarded rejection did; the
+ * Activity panel and the Health check are where someone can act on it.
+ */
+function autoConnect(): void {
+  void connect().catch((error: unknown) => {
+    logError(
+      `automatic connect failed: ${(error as Error)?.message ?? String(error)}. ` +
+        'Press Connect in the app, or run the health check to see which link is broken.'
+    );
+  });
+}
+
 void app.whenReady().then(async () => {
   // This guard is intentionally before even app.getPath/init* calls. A secondary instance, or a
   // primary that was told to quit before ready, must never touch the primary's shared userData.
@@ -364,7 +385,7 @@ void app.whenReady().then(async () => {
     onError: (err) => logError(`session pruning failed: ${err.message}`)
   });
 
-  if (getConfig().ui.autoConnect) void connect();
+  if (getConfig().ui.autoConnect) autoConnect();
 })
   /*
    * Startup is one long chain, and it had nothing to catch a throw.
@@ -384,7 +405,7 @@ void app.whenReady().then(async () => {
     if (startedControlPlane || windowActivation.isDisabled()) return;
     try {
       if (getConfig().sessions.record || getConfig().multiAgent.enabled) void startBridge();
-      if (getConfig().ui.autoConnect) void connect();
+      if (getConfig().ui.autoConnect) autoConnect();
     } catch (secondary) {
       logError(`could not start the control plane after a failed startup: ${(secondary as Error)?.message}`);
     }
