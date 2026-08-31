@@ -280,7 +280,7 @@ describe('the live re-read', () => {
     // made the list one-way: it could see a permission appear and never see one go away, so
     // QA revoked Accessibility and the app kept showing desktop access as complete until it was
     // restarted. The timer is only torn down when the step cannot apply at all.
-    expect(main).toContain('const period = outstanding ? 2500 : 30_000;');
+    expect(main).toContain('const period = outstanding ? 2500 : 6_000;');
     expect(main).toMatch(/if \(!applies\) \{[\s\S]{0,220}clearInterval\(desktopPermissionTimer\)/);
     expect(main).toContain('}, period);');
     // A cadence change has to re-arm, or the speed would be whatever it first happened to be.
