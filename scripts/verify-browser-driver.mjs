@@ -528,6 +528,59 @@ try {
     String(detached.value ?? '').includes('"attached":false'), detached.value ?? detached.error);
   check('detach removes the overlay',
     (await readPage(`Boolean(document.getElementById('__cos_pointer__'))`)) === false);
+
+  // An address the extension cannot read must be refused, not allowed. `tab.url` is undefined
+  // for every tab the extension has no access to, and the refusal list is written against that
+  // field, so allowing an unknown value switches the list off exactly where it cannot be
+  // checked — including for the ChatGPT tabs it exists to protect.
+  const unreadable = await run(`(async () => JSON.stringify([
+    globalThis.__driver.refusedUrl(undefined),
+    globalThis.__driver.refusedUrl(''),
+    globalThis.__driver.refusedUrl('https://example.com/')
+  ]))()`);
+  check('an address that cannot be read is refused',
+    unreadable.value === '[true,true,false]', unreadable.value ?? unreadable.error);
+
+  // The dead end QA walked into twice. With no ordinary page open the driver said "open the
+  // page first" and offered no action that opens one, so ten checks were reported as not
+  // performable against a capability that worked. navigate carries its own address, so it is
+  // the one action that can start from nothing. Proven the only way that means anything: by
+  // closing every ordinary tab first and then asking.
+  //
+  // This runs last because it closes the fixture page the checks above are driving.
+  const fromNothing = await run(`(async () => {
+    const closed = [];
+    for (const tab of await chrome.tabs.query({})) {
+      if (/^chrome(-extension)?:/i.test(tab.url || '')) continue;
+      closed.push(tab.id);
+      await chrome.tabs.remove(tab.id);
+    }
+    const before = await globalThis.__driver.browserDriver.status();
+    await globalThis.__driver.browserDriver.act({
+      type: 'navigate',
+      url: 'http://127.0.0.1:${pagePort}/second'
+    });
+    const after = await globalThis.__driver.browserDriver.status();
+    return JSON.stringify({
+      closed,
+      before: before.attached,
+      after: after.attached,
+      tabId: after.tabId,
+      url: after.url
+    });
+  })()`);
+  const opened = (() => {
+    try { return JSON.parse(String(fromNothing.value ?? '{}')); } catch { return {}; }
+  })();
+  check('navigate opens a page when the browser has none open',
+    opened.before === false && opened.after === true &&
+      // A tab it opened, not one it found: every tab that existed was closed above, and the
+      // one being driven must not be among them. Without this the check would pass on a
+      // leftover tab and prove nothing about the path it exists to prove.
+      Array.isArray(opened.closed) && opened.closed.length > 0 &&
+      !opened.closed.includes(opened.tabId) &&
+      String(opened.url ?? '').includes('/second'),
+    fromNothing.value ?? fromNothing.error);
 } catch (error) {
   check('the run completed', false, String(error?.message ?? error));
 } finally {

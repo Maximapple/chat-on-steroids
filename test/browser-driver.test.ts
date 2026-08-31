@@ -75,10 +75,18 @@ describe('what browser control refuses to attach to', () => {
   });
 
   it('treats a missing or malformed url as refusable rather than allowed', () => {
-    expect(refusedUrl(undefined)).toBe(false);
-    // Nothing above matches, so an unknown scheme reaches attach and fails there on the
-    // http(s) check instead. What must never happen is a refused scheme slipping through.
-    expect(refusedUrl('javascript:alert(1)')).toBe(false);
+    // This is what the test has always been called and what it now asserts. It used to assert
+    // the opposite: an unreadable address was allowed, on the reasoning that attach would stop
+    // it on an http(s) check. There is no such check on that path — only navigate has one — so
+    // the reasoning described a gate that did not exist.
+    //
+    // It matters because `tab.url` is undefined for every tab the extension cannot see, and the
+    // whole refusal list is written against that field. Allowing an unknown address turns the
+    // list off exactly where it cannot be checked.
+    expect(refusedUrl(undefined)).toBe(true);
+    expect(refusedUrl('')).toBe(true);
+    expect(refusedUrl('   ')).toBe(true);
+    expect(refusedUrl('javascript:alert(1)')).toBe(true);
   });
 });
 
