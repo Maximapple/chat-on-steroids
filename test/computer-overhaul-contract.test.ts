@@ -291,3 +291,26 @@ describe('a build can be told apart from every other build', () => {
     expect(version).toContain('export function extensionDownloadUrl(version = APP_VERSION)');
   });
 });
+
+/**
+ * A failure has to say whether the thing may already have happened.
+ *
+ * QA clicked through the browser tool, the page visibly changed, and the reply was
+ * BROWSER_TIMEOUT — "the browser took the action but did not report a result". True, and
+ * useless: a caller reading that has no way to know a blind retry would click twice. Whether the
+ * command was ever collected is the whole distinction, and the app already tracks it.
+ */
+describe('a browser failure says whether a retry is safe', () => {
+  const control = readFileSync(path.join(process.cwd(), 'src/main/browser-control.ts'), 'utf8');
+
+  it('separates never-collected from collected-and-silent, in both failure paths', () => {
+    // Never collected: it cannot have run.
+    expect(control).toContain('so it did not run; is the ChatGPT tab still open and paired? Safe to retry.');
+    expect(control).toContain('so it did not run. Safe to retry once a page is back.');
+    // Collected: it may have, so the instruction is not to repeat it blindly.
+    expect(control).toContain('Do NOT retry it — observe first and decide from what the page now shows.');
+    expect(control).toContain('so it may well have happened. Do NOT retry it — observe first.');
+    // Both branches turn on the same recorded fact rather than on a guess.
+    expect(control.match(/command\.collectedAt === null/g)).toHaveLength(2);
+  });
+});

@@ -96,9 +96,13 @@ export function runBrowserCommand(
         finish(command, {
           ok: false,
           error: 'BROWSER_TIMEOUT',
+          // The two cases differ in what the caller may safely do next, and only one of them is
+          // safe to retry. QA hit the second: the click landed, the page changed, and the reply
+          // was a failure — a blind retry would have clicked twice. So the message says what to
+          // do rather than only what went wrong.
           detail: command.collectedAt === null
-            ? 'no browser tab collected the action; is the ChatGPT tab still open and paired?'
-            : 'the browser took the action but did not report a result'
+            ? 'no browser tab collected the action, so it did not run; is the ChatGPT tab still open and paired? Safe to retry.'
+            : 'the browser took the action and did not report back, so it may well have happened. Do NOT retry it — observe first and decide from what the page now shows.'
         });
       }, BROWSER_COMMAND_TIMEOUT_MS)
     };
@@ -145,7 +149,12 @@ export function abandonBrowserCommands(conversationId: string): void {
   finish(command, {
     ok: false,
     error: 'BROWSER_GONE',
-    detail: 'the ChatGPT page carrying browser control closed before the action finished'
+    // Same distinction as the timeout, for the same reason: whether it was collected decides
+    // whether it may have run, and that decides whether a retry is safe.
+    detail:
+      command.collectedAt === null
+        ? 'the ChatGPT page closed before any tab collected the action, so it did not run. Safe to retry once a page is back.'
+        : 'the ChatGPT page closed after a tab took the action, so it may well have happened. Do NOT retry it — observe first.'
   });
 }
 
