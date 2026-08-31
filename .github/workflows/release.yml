@@ -208,12 +208,17 @@ jobs:
             "$deb_smoke_root/data" \
             "$deb_smoke_root/state"
           set +e
+          # 45s, not 12s. The window has to appear under xvfb and the renderer has to report
+          # ready, and one run failed with a log holding nothing but a library warning — the app
+          # had simply not got there yet on a loaded runner. Four runs either side of it passed
+          # with no application change between them, so the budget was the variable. A GUI smoke
+          # that fails for being hurried teaches nobody anything.
           HOME="$deb_smoke_root/home" \
           XDG_CONFIG_HOME="$deb_smoke_root/config" \
           XDG_CACHE_HOME="$deb_smoke_root/cache" \
           XDG_DATA_HOME="$deb_smoke_root/data" \
           XDG_STATE_HOME="$deb_smoke_root/state" \
-          CLF_DEBUG=1 timeout --signal=TERM --kill-after=5s 12s xvfb-run -a /usr/bin/chat-on-steroids >deb-gui.log 2>&1
+          CLF_DEBUG=1 timeout --signal=TERM --kill-after=5s 45s xvfb-run -a /usr/bin/chat-on-steroids >deb-gui.log 2>&1
           status=$?
           set -e
           cat deb-gui.log
@@ -283,7 +288,7 @@ jobs:
             XDG_DATA_HOME="$smoke_root/data" \
             XDG_STATE_HOME="$smoke_root/state" \
             PATH="$launch_path" \
-            CLF_DEBUG=1 timeout --signal=TERM --kill-after=5s 12s xvfb-run -a "$appimage" >"$log" 2>&1
+            CLF_DEBUG=1 timeout --signal=TERM --kill-after=5s 45s xvfb-run -a "$appimage" >"$log" 2>&1
             status=$?
             set -e
             cat "$log"
