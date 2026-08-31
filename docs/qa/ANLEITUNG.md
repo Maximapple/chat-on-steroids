@@ -1,6 +1,23 @@
 # QA am Mac — Anleitung
 
-Von oben nach unten. Nichts überspringen.
+## Was gerade dran ist
+
+Der volle Durchlauf unten ist schon gelaufen. Offen sind nur noch drei Dinge, jedes mit einem
+eigenen Dokument. In dieser Reihenfolge:
+
+| Was | Wo | Wer |
+| --- | --- | --- |
+| Browsersteuerung, Prüfungen 18–25 und 33–34 — nie ausgeführt | `chatgpt-browser-only.md` | ChatGPT, neuer Chat |
+| Warum ein sichtbares Chrome-Fenster nicht fokussiert wird | `focus-failed-debug.md` | Claude Code auf dem Mac |
+| Prüfungen 11 und 38 nachziehen | `chatgpt-desktop-qa-prompt.md`, nur diese zwei | ChatGPT |
+
+Für den ersten Punkt: **neues DMG installieren und die Erweiterung in `chrome://extensions` neu
+laden.** Der Treiber steckt in der Erweiterung, nicht in der App — ohne Neuladen läuft weiter die
+alte Fassung, und die Prüfungen scheitern erneut an etwas, das längst behoben ist.
+
+---
+
+Der vollständige Ablauf, falls du von vorn anfängst. Von oben nach unten, nichts überspringen.
 
 ## 1. Installieren
 
