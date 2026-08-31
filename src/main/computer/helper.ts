@@ -157,12 +157,37 @@ public static class Clf {
     if (batch.Count > 0) Send(batch.ToArray());
   }
 
+  // Paced and interpolated for the same reason as the macOS helper: a press that moves
+  // immediately reads as a click, and two waypoints are a teleport that never crosses the
+  // system drag threshold. QA saw a Finder drag report success three times while the file
+  // stayed put; Explorer's shell drag has the same requirements.
+  const int DragPressHoldMs = 90;
+  const int DragStepMs = 8;
+  const int DragDropDwellMs = 140;
+  const double DragMaxStep = 8.0;
+
   public static void Drag(int[] xs, int[] ys, string button) {
     uint down, up, data;
     ButtonFlags(button, out down, out up, out data);
     Move(xs[0], ys[0]);
     Send(new INPUT[] { Mouse(down, 0, 0, data) });
-    for (int i = 1; i < xs.Length; i++) { Move(xs[i], ys[i]); System.Threading.Thread.Sleep(12); }
+    System.Threading.Thread.Sleep(DragPressHoldMs);
+    int cx = xs[0], cy = ys[0];
+    for (int i = 1; i < xs.Length; i++) {
+      double dx = xs[i] - cx, dy = ys[i] - cy;
+      double distance = System.Math.Sqrt(dx * dx + dy * dy);
+      int steps = (int)System.Math.Ceiling(distance / DragMaxStep);
+      if (steps < 1) steps = 1;
+      if (steps > 240) steps = 240;
+      for (int s = 1; s <= steps; s++) {
+        double progress = (double)s / (double)steps;
+        Move((int)System.Math.Round(cx + dx * progress), (int)System.Math.Round(cy + dy * progress));
+        System.Threading.Thread.Sleep(DragStepMs);
+      }
+      cx = xs[i]; cy = ys[i];
+    }
+    Move(xs[xs.Length - 1], ys[ys.Length - 1]);
+    System.Threading.Thread.Sleep(DragDropDwellMs);
     Send(new INPUT[] { Mouse(up, 0, 0, data) });
   }
 

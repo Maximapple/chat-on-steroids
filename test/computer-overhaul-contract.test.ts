@@ -132,3 +132,25 @@ describe('desktop helper overhaul contract', () => {
     expect(swift).toMatch(/private func captureDisplay[\s\S]*configuration\.showsCursor = true/);
   });
 });
+
+/**
+ * The same drag requirement, on the other platform.
+ *
+ * QA found the macOS drag reporting success while the file never moved, and the Windows helper
+ * had the identical shape: press, jump to the destination, release. Explorer's shell drag makes
+ * the same demands AppKit does — the press has to settle, the pointer has to travel continuously
+ * far enough to cross the system threshold, and the destination needs a moment before the drop.
+ * Fixing one platform and leaving the other is how a defect comes back wearing a different hat.
+ */
+describe('the Windows drag is paced like a real one', () => {
+  it('holds the press, interpolates the path, and dwells before releasing', () => {
+    expect(HELPER_SCRIPT).toContain('const int DragPressHoldMs');
+    expect(HELPER_SCRIPT).toContain('const int DragDropDwellMs');
+    expect(HELPER_SCRIPT).toContain('const double DragMaxStep');
+    expect(HELPER_SCRIPT).toMatch(
+      /Mouse\(down[\s\S]*Sleep\(DragPressHoldMs\)[\s\S]*Sleep\(DragStepMs\)[\s\S]*Sleep\(DragDropDwellMs\)[\s\S]*Mouse\(up/
+    );
+    // Bounded, so a drag across a large desktop cannot post unbounded events.
+    expect(HELPER_SCRIPT).toContain('if (steps > 240) steps = 240;');
+  });
+});

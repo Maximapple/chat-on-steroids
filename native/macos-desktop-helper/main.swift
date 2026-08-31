@@ -773,18 +773,66 @@ private func drag(
     try postMouse(down, point: points[0], button: button)
     var current = points[0]
     do {
+        // Hold before moving. AppKit decides whether a press begins a drag session or is just a
+        // click, and a press followed immediately by movement reads as the latter. QA dragged a
+        // file in Finder three times, was told "Done" three times, and the file never moved.
+        usleep(dragPressHoldMicroseconds)
+
         for point in points.dropFirst() {
-            try assertDragTarget()
-            try postMouse(dragged, point: point, button: button)
+            // Interpolate. The caller gives waypoints, not a trajectory, and two of them are a
+            // teleport: nothing crosses the drag threshold, so no drag session ever starts and
+            // no destination is ever hovered. Real pointers move continuously, and the machinery
+            // that decides what a drag means is watching for exactly that.
+            for step in dragSteps(from: current, to: point) {
+                try assertDragTarget()
+                try postMouse(dragged, point: step, button: button)
+                usleep(dragStepMicroseconds)
+            }
             current = point
-            usleep(12_000)
         }
+
+        // Dwell on the destination before releasing, so whatever is under the pointer has a
+        // chance to register the hover and accept the drop.
+        try assertDragTarget()
+        try postMouse(dragged, point: points[points.count - 1], button: button)
+        usleep(dragDropDwellMicroseconds)
+
         try assertDragTarget()
         try postMouse(up, point: points[points.count - 1], button: button)
     } catch {
         // A best-effort mouse-up is cleanup, not authorization to continue the drag.
         try? postMouse(up, point: current, button: button)
         throw error
+    }
+}
+
+/**
+ * How a drag is paced, in microseconds.
+ *
+ * These are not tuning knobs so much as the cost of being believed by AppKit: a press has to
+ * settle before it can become a drag, movement has to be continuous to cross the threshold, and
+ * a drop has to hover long enough for the destination to accept it. The previous values — no
+ * hold, no interpolation, 12ms between waypoints — produced input the system read as a click,
+ * which is how a drag that moved nothing still reported success.
+ */
+private let dragPressHoldMicroseconds: UInt32 = 90_000
+private let dragStepMicroseconds: UInt32 = 8_000
+private let dragDropDwellMicroseconds: UInt32 = 140_000
+/** Longest jump between two posted drag events; beyond this the motion stops looking like motion. */
+private let dragMaxStepDistance: CGFloat = 8
+
+/** The points to post between two waypoints so the pointer travels rather than teleports. */
+private func dragSteps(from start: CGPoint, to end: CGPoint) -> [CGPoint] {
+    let dx = end.x - start.x
+    let dy = end.y - start.y
+    let distance = (dx * dx + dy * dy).squareRoot()
+    let count = max(1, Int((distance / dragMaxStepDistance).rounded(.up)))
+    // Capped so a drag across a large display cannot post thousands of events; the cap still
+    // leaves steps small enough to read as continuous motion.
+    let steps = min(count, 240)
+    return (1...steps).map { index in
+        let progress = CGFloat(index) / CGFloat(steps)
+        return CGPoint(x: start.x + dx * progress, y: start.y + dy * progress)
     }
 }
 
