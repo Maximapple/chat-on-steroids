@@ -512,6 +512,17 @@ try {
   check('an unknown ref is refused rather than guessed',
     String(refused.value ?? '').startsWith('BROWSER_BAD_REF'), refused.value ?? refused.error);
 
+  // Through the worker, the way the tool reaches it — the driver's own method is checked below,
+  // but a model can only call detach if the message that carries it works. QA had to click the
+  // extension popup with desktop automation because this route was not offered at all.
+  const workerDetach = await run(`(async () => {
+    const reply = await chrome.runtime.sendMessage({ type: 'browser_detach' });
+    return JSON.stringify(reply);
+  })()`);
+  check('the worker can be told to let go of the tab',
+    String(workerDetach.value ?? '').includes('"attached":false'),
+    workerDetach.value ?? workerDetach.error);
+
   const detached = await run(`(async () => JSON.stringify(await globalThis.__driver.browserDriver.detach()))()`);
   check('detach gives the tab back',
     String(detached.value ?? '').includes('"attached":false'), detached.value ?? detached.error);
