@@ -85,6 +85,12 @@ function desktopImageResult(text: string, data: string): { content: ToolContent[
  */
 const browserActionArg = z.discriminatedUnion('type', [
   z.object({ type: z.literal('observe') }).strict().describe('Page, refs, screenshot.'),
+  // The driver has always been able to let go of a tab and the command channel has always
+  // carried the message; only this schema never offered it, so a model could take control of a
+  // page and had no way to give it back. QA reached for the extension popup instead and clicked
+  // it with desktop automation, which is neither reliable nor what anyone should have to do.
+  z.object({ type: z.literal('detach') }).strict().describe('Let go of the tab.'),
+  z.object({ type: z.literal('status') }).strict().describe('Which tab is held.'),
   z.object({ type: z.literal('navigate'), url: z.string().min(1).max(2_000) }).strict().describe('Go to a URL.'),
   z.object({ type: z.literal('back') }).strict().describe('Back.'),
   z.object({ type: z.literal('forward') }).strict().describe('Forward.'),
@@ -687,6 +693,15 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
               );
               const picture = data['screenshot'] as { data: string; width: number; height: number } | null | undefined;
               if (picture && typeof picture.data === 'string') shot = picture;
+            } else if (action.type === 'detach' || action.type === 'status') {
+              // These answer a question about the session rather than doing something to a page,
+              // so "ok" is not an answer. Say which tab is held, or that none is.
+              const attached = data['attached'] === true;
+              lines.push(
+                attached
+                  ? `${action.type}: holding tab ${String(data['tabId'])} — ${String(data['title'] ?? '')} (${String(data['url'] ?? '')})`
+                  : `${action.type}: no tab is under control`
+              );
             } else {
               lines.push(`${action.type}: ok`);
             }

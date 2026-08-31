@@ -640,6 +640,25 @@ describe('surface boundaries', () => {
    * while the app was serving it, and had no way to distinguish "not published" from "published
    * after your connector was made". Diagnostics now names what grew.
    */
+  /**
+   * A model that can take a page must be able to give it back.
+   *
+   * The driver has always had detach and the command channel has always carried the message;
+   * only the tool's schema never offered it. So control could be taken and not released, and QA
+   * reached for the extension popup and clicked it with desktop automation instead — which is
+   * neither reliable nor anything anyone should have to do.
+   */
+  it('offers detach and status alongside the actions that drive a page', async () => {
+    everything();
+    const tools = toolList(await desktop('tools/list'));
+    const browser = tools.find((tool) => tool.name === 'browser');
+    expect(browser, 'the browser tool').toBeDefined();
+    const schema = JSON.stringify(browser);
+    for (const action of ['detach', 'status', 'observe', 'navigate', 'click_ref']) {
+      expect(schema, action).toContain(`"${action}"`);
+    }
+  });
+
   it('remembers a capability switched on after the endpoint started', async () => {
     everything();
     // Two reads of the same endpoint; the second must still carry the browser tool.
@@ -814,7 +833,11 @@ describe('surface boundaries', () => {
               : tool.name === 'exec_command'
                 ? 3_700
                 : tool.name === 'browser'
-                  ? 4_900
+                  // Raised from 4,900 for detach and status. The tool could take a page and had
+                  // no way to give it back, so a QA run resorted to clicking the extension popup
+                  // with desktop automation — the ceiling was buying a smaller schema at the
+                  // price of an unreleasable session. Their descriptions are three words each.
+                  ? 5_200
                   : 3_000;
       expect(bytes, `${tool.name} schema is ${bytes} bytes`).toBeLessThan(budget);
     }
