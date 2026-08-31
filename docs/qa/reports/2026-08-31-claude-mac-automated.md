@@ -275,6 +275,23 @@ and the image was inspected.
 The capture is at `$TMPDIR/cos-probe-window.png`. It is deliberately **not** committed: it is a
 screenshot of a live desktop in a public repository. The row profile above is the evidence.
 
+**Since this run, the probe checks the pixels itself** (`d0916ac`): it captures the window twice,
+once with the pointer at the centre and once with it parked at 4,4, and diffs the two through
+`scripts/lib/read-png.mjs`. That is a stronger check than the measurement above and it supersedes
+it. One observation from running the rebased probe here: against a live TextEdit window it
+reported
+
+```
+image 640x412, 325 pixels differ, box {"x":9,"y":9,"width":315,"height":207}
+pointer was expected near 320,206
+the window redrew between captures, so position could not be judged
+```
+
+— inconclusive rather than confirmed, because the diff box exceeded a third of the frame. That is
+the check refusing to claim a pass from noise, which is right, but it means on a busy desktop the
+pixel confirmation may not conclude. The manual measurement above did conclude, on a window that
+was not redrawing. Both were `pointer=drawn captureMode=window`.
+
 ## Open point — the probe can fail for a reason that is not a defect
 
 `scripts/probe-macos-helper.mjs` treats `pointer=outside_region` as a hard FAIL whenever the
