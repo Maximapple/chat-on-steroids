@@ -859,13 +859,38 @@ private struct KeyboardLayoutSnapshot {
     let kbdType: UInt32
 }
 
-/** Carries the main-queue result back to the requesting thread. */
-private final class KeyboardLayoutBox {
-    var snapshot: KeyboardLayoutSnapshot?
+/** Carries a main-queue result back to the requesting thread. */
+private final class MainQueueBox<Value> {
+    var value: Value?
 }
 
 /** How long a request will wait for the main queue before refusing rather than hanging. */
-private let keyboardLayoutMainQueueTimeout: TimeInterval = 2.0
+private let mainQueueTimeout: TimeInterval = 2.0
+
+/**
+ * Runs a main-queue-affine platform call and returns its result, or nil if the main queue
+ * could not service it in time.
+ *
+ * AppKit, HIToolbox and Text Services all assert on the main queue, and a violation is not an
+ * error return: `dispatch_assert_queue` fails and raises EXC_BREAKPOINT, taking the whole host
+ * process down below anything Swift or JS above it can catch. Node enters this addon on a
+ * worker thread, so the hop belongs at this boundary rather than in every caller.
+ *
+ * Deliberately not `DispatchQueue.main.sync`: that deadlocks when this already is the main
+ * thread, and waits forever when the main thread is busy, trading a crash for a hang. Running
+ * inline covers the first; the bounded wait covers the second by surfacing an ordinary refusal.
+ */
+private func onMainQueue<Value>(_ work: @escaping () -> Value?) -> Value? {
+    if Thread.isMainThread { return work() }
+    let box = MainQueueBox<Value>()
+    let done = DispatchSemaphore(value: 0)
+    DispatchQueue.main.async {
+        box.value = work()
+        done.signal()
+    }
+    guard done.wait(timeout: .now() + mainQueueTimeout) == .success else { return nil }
+    return box.value
+}
 
 /**
  * Reads the active Unicode key layout, on the main queue.
@@ -885,29 +910,82 @@ private let keyboardLayoutMainQueueTimeout: TimeInterval = 2.0
  * layout bytes, so the 128-keycode search stays off the main queue and off the UI thread.
  */
 private func currentKeyboardLayout() -> KeyboardLayoutSnapshot? {
-    func read() -> KeyboardLayoutSnapshot? {
+    onMainQueue {
         guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue() else { return nil }
         guard let rawData = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return nil }
         let data = unsafeBitCast(rawData, to: CFData.self)
         guard let bytes = CFDataGetBytePtr(data) else { return nil }
         // Copied on purpose: those bytes belong to the input source, which is released as
-        // soon as this returns. The search below then reads our own copy.
+        // soon as this returns. The keycode search below then reads our own copy, off-main.
         return KeyboardLayoutSnapshot(
             data: Data(bytes: bytes, count: CFDataGetLength(data)),
             kbdType: UInt32(LMGetKbdType())
         )
     }
+}
 
-    if Thread.isMainThread { return read() }
+/** The live pointer, as pixels plus the offset from its image origin to the point it addresses. */
+private struct PointerImage {
+    let image: CGImage
+    let hotSpot: CGPoint
+    let size: CGSize
+}
 
-    let box = KeyboardLayoutBox()
-    let done = DispatchSemaphore(value: 0)
-    DispatchQueue.main.async {
-        box.snapshot = read()
-        done.signal()
+/**
+ * The pointer as it looks right now, read on the main queue because NSCursor is AppKit.
+ *
+ * Returns nil rather than a stand-in when the system will not describe its cursor: an invented
+ * pointer in a screenshot is worse than none, because a coordinate would be read off it.
+ */
+private func currentPointerImage() -> PointerImage? {
+    onMainQueue {
+        guard let cursor = NSCursor.currentSystem else { return nil }
+        let image = cursor.image
+        guard image.size.width > 0, image.size.height > 0 else { return nil }
+        var rect = CGRect(origin: .zero, size: image.size)
+        guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return nil }
+        return PointerImage(image: cgImage, hotSpot: cursor.hotSpot, size: image.size)
     }
-    guard done.wait(timeout: .now() + keyboardLayoutMainQueueTimeout) == .success else { return nil }
-    return box.snapshot
+}
+
+/**
+ * Draws the pointer into a window capture.
+ *
+ * `SCStreamConfiguration.showsCursor` is set on every capture in this file, but it can only
+ * act where the pointer exists in the captured content — and a desktop-independent window
+ * filter captures the window detached from the desktop, while the pointer is a display
+ * compositing layer. Display capture gets the pointer from the system; window capture, which
+ * is what an ordinary `observe` on a window uses, never could.
+ *
+ * Drawn at the hotspot, which is the pixel the pointer addresses: an I-beam or a resize arrow
+ * is centred, not top-left, and drawing at the image origin would put the tip several pixels
+ * off exactly when a coordinate is being read off the picture.
+ */
+private func drawingPointer(on image: CGImage, region: CGRect) -> CGImage {
+    guard let pointer = currentPointerImage() else { return image }
+    let location = CGEvent(source: nil)?.location ?? .zero
+    guard region.width > 0, region.height > 0, region.contains(location) else { return image }
+
+    let scale = CGFloat(image.width) / region.width
+    let width = pointer.size.width * scale
+    let height = pointer.size.height * scale
+    // Global screen coordinates run top-down; a bitmap context runs bottom-up.
+    let x = (location.x - pointer.hotSpot.x - region.minX) * scale
+    let top = (location.y - pointer.hotSpot.y - region.minY) * scale
+    let y = CGFloat(image.height) - top - height
+
+    guard let context = CGContext(
+        data: nil,
+        width: image.width,
+        height: image.height,
+        bitsPerComponent: 8,
+        bytesPerRow: image.width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return image }
+    context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+    context.draw(pointer.image, in: CGRect(x: x, y: y, width: width, height: height))
+    return context.makeImage() ?? image
 }
 
 private func currentLayoutKey(for logicalName: String, in snapshot: KeyboardLayoutSnapshot) -> ResolvedKey? {
@@ -1367,7 +1445,10 @@ private func captureWindow(
     configuration.ignoreShadowsSingleWindow = true
     let filter = SCContentFilter(desktopIndependentWindow: window)
     let image = try captureImage(filter: filter, configuration: configuration)
-    return (try resizedImage(image, width: width, height: height), region)
+    let resized = try resizedImage(image, width: width, height: height)
+    // showsCursor above cannot reach a desktop-independent filter, so the pointer is drawn
+    // here. Display capture keeps the system's own, which is why this is only done for windows.
+    return (drawingPointer(on: resized, region: region), region)
 }
 
 private func captureDisplay(_ display: SCDisplay, maxWidth: Int) throws -> (CGImage, CGRect) {
