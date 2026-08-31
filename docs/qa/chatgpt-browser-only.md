@@ -18,8 +18,12 @@ No new package is needed. **Home → Health → Run checks** must show `Local se
 browser, computer, observe`. If it shows two, the Chrome extension is not connected and section E
 cannot run on any build.
 
-**Open one ordinary tab in Chrome before you start** — anything, `example.com` will do. The tool
-drives a tab that already exists; it cannot make one.
+The fifth run then failed on the other half of the same fault: Chrome had only ChatGPT tabs open,
+and `BROWSER_NO_TAB` told the caller to "open the page first" while still offering no action that
+opens a page. `navigate` now opens one when nothing is drivable, which is what makes check 18
+performable at all — so this needs a build containing that fix, and the Chrome extension must be
+**reloaded** in `chrome://extensions` after installing it, because the driver lives in the
+extension rather than in the app.
 
 ---
 
@@ -41,8 +45,8 @@ List the exact tool names the Chat On Steroids Desktop connector offers you in t
   something cannot be done with the `browser` tool, **that is the finding** — report it as a FAIL
   and say which action you looked for and did not find. A previous run's whole section was lost
   to a well-meant detour through `computer`.
-- The tool has no attach and no open-a-tab action. The first action takes the newest ordinary tab
-  that is already open. `navigate` starts a run.
+- The tool has no attach action. `navigate` starts a run: it takes the newest ordinary tab, or
+  opens one if the browser has none.
 - Verify the *effect* of each action, not that the call returned. A tool answering `ok` while
   nothing changed is the failure worth catching, and this product has shipped it twice.
 - Quote error codes and messages verbatim. Do not paraphrase.
@@ -51,7 +55,7 @@ List the exact tool names the Chat On Steroids Desktop connector offers you in t
 ## The checks
 
 18. `navigate` to `https://example.com`. Then `status`. Report which tab the tool says it holds —
-    title and URL.
+    title and URL. Say whether Chrome had an ordinary tab open beforehand or the tool opened one.
 
 19. `observe`. Report the page title and how many interactive elements (refs) came back.
 

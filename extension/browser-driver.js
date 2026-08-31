@@ -63,7 +63,8 @@ export const REFUSED_URLS = [
   /^chrome-extension:/i,
   /^moz-extension:/i,
   /^view-source:/i,
-  /^file:/i
+  /^file:/i,
+  /^javascript:/i
 ];
 
 /**
@@ -106,7 +107,13 @@ export class BrowserDriverError extends Error {
 const fail = (code, message) => new BrowserDriverError(code, message);
 
 export function refusedUrl(url) {
-  const value = String(url || '');
+  const value = String(url ?? '').trim();
+  // An address that cannot be read is refused, not allowed. Chrome answers `tab.url` with
+  // undefined for any tab the extension has no access to, and every pattern below then misses —
+  // so the ChatGPT refusal, the one this list exists for, would quietly stop applying to the
+  // tabs it must cover, and `chrome://settings` would read as an ordinary page. A tab whose
+  // address is unknown is a tab that cannot be shown safe to drive, which is the same answer.
+  if (!value) return true;
   return REFUSED_URLS.some((pattern) => pattern.test(value));
 }
 
@@ -727,8 +734,19 @@ export const browserDriver = {
     }
 
     const tab = await currentTab(tabId);
-    if (refusedUrl(tab.url)) {
-      throw fail('BROWSER_URL_REFUSED', `browser control refuses ${tab.url ?? 'this page'}`);
+    // A tab still loading reports its destination as pendingUrl and its url as empty, which a
+    // tab this driver just opened always is. Judging only `url` would refuse the page we were
+    // asked for, at the moment we asked for it.
+    const address = tab.url || tab.pendingUrl || '';
+    if (!address) {
+      throw fail(
+        'BROWSER_URL_UNKNOWN',
+        `the address of tab ${tabId} cannot be read, so it cannot be shown safe to drive. Turn ` +
+          'browser control off and on again in the extension popup and accept the tab access it asks for.'
+      );
+    }
+    if (refusedUrl(address)) {
+      throw fail('BROWSER_URL_REFUSED', `browser control refuses ${address}`);
     }
 
     await new Promise((resolve, reject) => {
@@ -826,7 +844,7 @@ export const browserDriver = {
    * tabs and browser surfaces are skipped by the same refusal list that governs an explicit
    * attach, so this cannot reach anywhere an explicit attach could not.
    */
-  async ensureAttached() {
+  async ensureAttached(openUrl = null) {
     if (session) return;
     let tabs = [];
     try {
@@ -835,20 +853,45 @@ export const browserDriver = {
       throw fail('BROWSER_PERMISSION_REQUIRED', 'browser control is off; turn it on in the extension popup');
     }
     const candidate = tabs
-      .filter((tab) => Number.isSafeInteger(tab?.id) && !refusedUrl(tab.url))
+      .filter((tab) => Number.isSafeInteger(tab?.id) && !refusedUrl(tab.url || tab.pendingUrl))
       .sort((left, right) => (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0))[0];
-    if (!candidate) {
+    if (candidate) {
+      await this.attach(candidate.id);
+      return;
+    }
+    // Nothing to take. If the caller brought an address — navigate is the only action that
+    // does — open it, because the alternative is the dead end QA walked into twice: "open the
+    // page first" is not an instruction a model can follow when no action opens a page. The
+    // address has already passed the refusal list in `act`, so this cannot open anywhere an
+    // explicit attach could not reach.
+    if (!openUrl) {
       throw fail(
         'BROWSER_NO_TAB',
-        'no ordinary web page is open to drive. Open the page first; ChatGPT tabs are never driven.'
+        'no ordinary web page is open to drive, and no address was given to open one. ' +
+          'Use navigate, which opens a page when none is open; ChatGPT tabs are never driven.'
       );
     }
-    await this.attach(candidate.id);
+    const opened = await chrome.tabs.create({ url: openUrl, active: true });
+    if (!Number.isSafeInteger(opened?.id)) {
+      throw fail('BROWSER_NO_TAB', `the browser did not open ${openUrl}`);
+    }
+    await this.attach(opened.id);
   },
 
   async act(action) {
-    await this.ensureAttached();
     const type = String(action?.type ?? '');
+    // navigate is the one action that carries its own destination, so it is the one action that
+    // can start from nothing. Its address is judged here, before a tab exists, so that a refused
+    // one never becomes a reason to open a tab and a refusal reads the same whether or not the
+    // browser happened to have a page open.
+    if (type === 'navigate') {
+      const target = String(action.url ?? '');
+      if (refusedUrl(target)) throw fail('BROWSER_URL_REFUSED', `browser control refuses ${target}`);
+      if (!/^https?:\/\//i.test(target)) throw fail('BAD_REQUEST', 'navigate needs an http(s) URL');
+      await this.ensureAttached(target);
+    } else {
+      await this.ensureAttached();
+    }
     const button = cdpButton(action?.button);
     const modifiers = (action?.modifiers ?? []).reduce(
       (bits, name) => bits | (MODIFIERS[String(name).toLowerCase()] ?? 0),
@@ -857,9 +900,8 @@ export const browserDriver = {
 
     switch (type) {
       case 'navigate': {
+        // Already validated above, where it had to be.
         const url = String(action.url ?? '');
-        if (refusedUrl(url)) throw fail('BROWSER_URL_REFUSED', `browser control refuses ${url}`);
-        if (!/^https?:\/\//i.test(url)) throw fail('BAD_REQUEST', 'navigate needs an http(s) URL');
         await send('Page.navigate', { url }, NAVIGATE_TIMEOUT_MS);
         return { navigated: url };
       }
