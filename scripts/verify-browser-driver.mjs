@@ -47,9 +47,20 @@ const port = 9400 + (process.pid % 200);
 const pagePort = port + 400;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Where a Chromium build usually lives, in the order worth trying. */
+/**
+ * Where a Chromium build usually lives, in the order worth trying.
+ *
+ * Chrome for Testing comes first, because installed Chrome can no longer be told to load an
+ * unpacked extension: Chrome 137 removed `--load-extension`, and Chrome 152 here ignores it
+ * under every documented re-enabling flag — it records zero extensions from the given path.
+ * Chrome for Testing is the same Chromium, published by Google for exactly this purpose.
+ * Edge still honours the switch, so it remains a usable fallback.
+ */
 const BROWSERS = [
   process.env['COS_BROWSER'],
+  `${os.homedir()}/AppData/Local/chrome-for-testing/chrome-win64/chrome.exe`,
+  `${os.homedir()}/.cache/puppeteer/chrome/win64/chrome.exe`,
+  '/Applications/Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
@@ -123,7 +134,20 @@ const browser = spawn(browserPath, [
   '--run-all-compositor-stages-before-draw', '--disable-new-content-rendering-timeout',
   '--no-first-run', '--no-default-browser-check', `http://127.0.0.1:${pagePort}/`
 ], { stdio: 'ignore' });
-await sleep(6000);
+// Wait for the port to answer rather than guessing at a duration: Chrome for Testing takes
+// noticeably longer to come up than Edge, and a fixed sleep turned that into "fetch failed".
+let ready = null;
+for (let attempt = 0; attempt < 60 && !ready; attempt += 1) {
+  try {
+    ready = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+  } catch {
+    await sleep(500);
+  }
+}
+if (!ready) {
+  console.error(`${browserPath} never opened its debugging port.`);
+  process.exit(2);
+}
 
 /** One target's CDP session. Every call is bounded: a silent hang would read as a pass. */
 async function attachTarget(wsUrl) {
@@ -188,11 +212,30 @@ try {
   const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   const popupTarget = list.find((t) => t.url.includes(extensionId) && t.url.includes('popup.html'));
   const pageTarget = list.find((t) => t.type === 'page' && t.url.startsWith(`http://127.0.0.1:${pagePort}/`));
-  check('the extension loads and its popup resolves', Boolean(popupTarget), popupTarget?.url ?? '');
-  check('the fixture page is open', Boolean(pageTarget), pageTarget?.url ?? '');
-  if (!popupTarget || !pageTarget) throw new Error('missing targets');
+  if (!popupTarget || !pageTarget) {
+    check('the extension loads and its popup resolves', false, 'no target at the popup url');
+    throw new Error('missing targets');
+  }
 
   popup = await attachTarget(popupTarget.webSocketDebuggerUrl);
+
+  // A target carrying the popup url proves nothing: a browser that refused to load the
+  // extension navigates to chrome-error and keeps the requested url. Ask the page what it is.
+  // Without this the run reported a passing load and then failed six checks further down with
+  // "cannot read properties of undefined", which names the symptom instead of the cause.
+  const identity = await popup.evaluate(`(() => {
+    try { return chrome?.runtime?.id ?? null; } catch { return null; }
+  })()`);
+  const loaded = identity.value === extensionId;
+  check('the extension loads and its popup resolves', loaded,
+    loaded ? popupTarget.url : `${browserPath} did not load the extension (chrome.runtime.id=${identity.value})`);
+  if (!loaded) {
+    throw new Error(
+      'the extension was not loaded. Chrome 137 and later ignore --load-extension; use a ' +
+      'Chrome for Testing build, or point COS_BROWSER at Edge.'
+    );
+  }
+  check('the fixture page is open', Boolean(pageTarget), pageTarget.url);
   pageCdp = await attachTarget(pageTarget.webSocketDebuggerUrl);
   const run = (expression) => popup.evaluate(expression);
   const readPage = async (expression) => (await pageCdp.evaluate(expression)).value;
