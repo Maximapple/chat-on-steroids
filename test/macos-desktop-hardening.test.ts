@@ -252,7 +252,7 @@ describe('macOS desktop safety hardening', () => {
    * Display capture keeps the system's own pointer, which is why only windows are composited.
    */
   it('composites the pointer into a window capture, at its hotspot', () => {
-    expect(swift).toContain('private func drawingPointer(on image: CGImage, region: CGRect) -> CGImage');
+    expect(swift).toContain('private func drawingPointer(on image: CGImage, region: CGRect) -> (CGImage, String)');
     expect(swift).toMatch(
       /private func captureWindow[\s\S]*SCContentFilter\(desktopIndependentWindow: window\)[\s\S]*drawingPointer\(on: resized, region: region\)/
     );
@@ -266,6 +266,24 @@ describe('macOS desktop safety hardening', () => {
     // Display capture still gets the system pointer, and must not be composited twice.
     expect(swift.match(/configuration\.showsCursor = true/g)).toHaveLength(2);
     expect(swift).not.toMatch(/private func captureDisplay[\s\S]{0,600}drawingPointer/);
+  });
+
+  /**
+   * A pointer missing from a window screenshot looks the same whichever reason caused it, and
+   * that ambiguity already cost one round of guessing at which. So each way of drawing nothing
+   * names itself, and the reason reaches the response — the only place a person reading a QA
+   * report can see it.
+   */
+  it('says why no pointer was drawn, instead of drawing nothing silently', () => {
+    for (const reason of ['unavailable', 'outside_region', 'buffer_unavailable', 'drawn']) {
+      expect(swift).toContain(`"${reason}"`);
+    }
+    // The system draws the pointer for a display filter, so those paths say so rather than
+    // claiming this code drew it.
+    expect(swift).toMatch(/pointerNote = "system"/);
+    // And it is actually reported, not just computed.
+    expect(swift).toContain('"pointer": pointerNote');
+    expect(swift).toMatch(/captureWindow[\s\S]{0,200}throws -> \(CGImage, CGRect, String\)/);
   });
 
   /**

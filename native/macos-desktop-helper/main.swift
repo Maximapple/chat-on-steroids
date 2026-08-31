@@ -960,11 +960,18 @@ private func currentPointerImage() -> PointerImage? {
  * Drawn at the hotspot, which is the pixel the pointer addresses: an I-beam or a resize arrow
  * is centred, not top-left, and drawing at the image origin would put the tip several pixels
  * off exactly when a coordinate is being read off the picture.
+ *
+ * Returns why it did nothing when it does nothing. Every reason here is silent in the picture
+ * — an absent pointer looks the same whether the system would not describe one, the pointer
+ * was outside the window, or the buffer failed — and "no pointer in the screenshot" has
+ * already cost one round of guessing at which. The caller puts this in the response.
  */
-private func drawingPointer(on image: CGImage, region: CGRect) -> CGImage {
-    guard let pointer = currentPointerImage() else { return image }
+private func drawingPointer(on image: CGImage, region: CGRect) -> (CGImage, String) {
+    guard let pointer = currentPointerImage() else { return (image, "unavailable") }
     let location = CGEvent(source: nil)?.location ?? .zero
-    guard region.width > 0, region.height > 0, region.contains(location) else { return image }
+    guard region.width > 0, region.height > 0, region.contains(location) else {
+        return (image, "outside_region")
+    }
 
     let scale = CGFloat(image.width) / region.width
     let width = pointer.size.width * scale
@@ -982,10 +989,11 @@ private func drawingPointer(on image: CGImage, region: CGRect) -> CGImage {
         bytesPerRow: image.width * 4,
         space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-    ) else { return image }
+    ) else { return (image, "buffer_unavailable") }
     context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
     context.draw(pointer.image, in: CGRect(x: x, y: y, width: width, height: height))
-    return context.makeImage() ?? image
+    guard let composited = context.makeImage() else { return (image, "buffer_unavailable") }
+    return (composited, "drawn")
 }
 
 private func currentLayoutKey(for logicalName: String, in snapshot: KeyboardLayoutSnapshot) -> ResolvedKey? {
@@ -1423,7 +1431,7 @@ private func captureWindow(
     maxWidth: Int,
     content: SCShareableContent,
     expectedGeometry: CGRect
-) throws -> (CGImage, CGRect) {
+) throws -> (CGImage, CGRect, String) {
     guard #available(macOS 14.0, *) else {
         // Pre-14 direct window capture cannot disable the window shadow. Returning that
         // shadow-bearing bitmap against the shadow-free WindowServer frame would make every
@@ -1448,7 +1456,8 @@ private func captureWindow(
     let resized = try resizedImage(image, width: width, height: height)
     // showsCursor above cannot reach a desktop-independent filter, so the pointer is drawn
     // here. Display capture keeps the system's own, which is why this is only done for windows.
-    return (drawingPointer(on: resized, region: region), region)
+    let (drawn, pointerNote) = drawingPointer(on: resized, region: region)
+    return (drawn, region, pointerNote)
 }
 
 private func captureDisplay(_ display: SCDisplay, maxWidth: Int) throws -> (CGImage, CGRect) {
@@ -1530,6 +1539,7 @@ private func capture(_ request: JSONObject, forcedWindow: CGWindowID? = nil) thr
     let image: CGImage
     let region: CGRect
     let captureMode: String
+    let pointerNote: String
     var capturedWindowGeometry: CGRect?
     if let requestedWindow {
         guard let row = windowRow(requestedWindow) else {
@@ -1537,7 +1547,7 @@ private func capture(_ request: JSONObject, forcedWindow: CGWindowID? = nil) thr
         }
         capturedWindowGeometry = row.bounds
         do {
-            (image, region) = try captureWindow(
+            (image, region, pointerNote) = try captureWindow(
                 requestedWindow,
                 maxWidth: maxWidth,
                 content: content,
@@ -1555,6 +1565,7 @@ private func capture(_ request: JSONObject, forcedWindow: CGWindowID? = nil) thr
             region = row.bounds
             image = try captureComposite(region: region, maxWidth: maxWidth, displays: content.displays)
             captureMode = "screen_fallback"
+            pointerNote = "system"
         }
         guard let fresh = windowRow(requestedWindow), approximatelyEqual(fresh.bounds, row.bounds) else {
             throw fail("STALE_FRAME", "window \(requestedWindow) moved or resized while it was captured")
@@ -1563,16 +1574,19 @@ private func capture(_ request: JSONObject, forcedWindow: CGWindowID? = nil) thr
         region = requestedRegion
         image = try captureComposite(region: region, maxWidth: maxWidth, displays: content.displays)
         captureMode = "screen"
+        pointerNote = "system"
     } else if bool(request["full"]) {
         region = screen
         image = try captureComposite(region: region, maxWidth: maxWidth, displays: content.displays)
         captureMode = "screen"
+        pointerNote = "system"
     } else {
         guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first else {
             throw fail("SCREEN_UNAVAILABLE", "ScreenCaptureKit reported no display")
         }
         (image, region) = try captureDisplay(display, maxWidth: maxWidth)
         captureMode = "screen"
+        pointerNote = "system"
     }
     let finalDisplayRects = try activeDisplayRects()
     guard sameDisplayTopology(displayRects, finalDisplayRects) else {
@@ -1585,7 +1599,8 @@ private func capture(_ request: JSONObject, forcedWindow: CGWindowID? = nil) thr
         "screen": rectObject(screen),
         "displays": displayTopologyObject(finalDisplayRects),
         "focused": requestedWindow == nil ? NSNull() : foregroundWindowID() == requestedWindow,
-        "captureMode": captureMode
+        "captureMode": captureMode,
+        "pointer": pointerNote
     ]
     if let capturedWindowGeometry {
         response["windowGeometry"] = rectObject(capturedWindowGeometry)
