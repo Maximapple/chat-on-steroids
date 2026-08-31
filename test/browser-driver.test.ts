@@ -9,15 +9,17 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   BROWSER_PERMISSIONS,
   COLLECT_SOURCE,
   DRIVEN_GROUP_TITLE,
   buttonMask,
   cdpButton,
+  hasBrowserPermissions,
   keyDescriptor,
-  refusedUrl
+  refusedUrl,
+  requestBrowserPermissions
 } from '../extension/browser-driver.js';
 
 const manifest = JSON.parse(
@@ -100,6 +102,79 @@ describe('permissions are opt-in', () => {
 
   it('names the driven tab group after the product so it is recognisable', () => {
     expect(DRIVEN_GROUP_TITLE).toBe('Chat On Steroids');
+  });
+
+  /**
+   * Chrome answers `permissions.*` through a callback and returns nothing. Firefox returns a
+   * promise and ignores the callback. This extension ships for both, so waiting only for the
+   * callback would hang forever on one of them — and the symptom would be a toggle that does
+   * nothing at all, with no error to chase.
+   */
+  describe('across both extension APIs', () => {
+    // The driver reads whichever of the two globals the browser provides, so the test has to
+    // be able to install either and put the environment back afterwards.
+    const globals = globalThis as unknown as Record<string, unknown>;
+    const original = { chrome: globals.chrome, browser: globals.browser };
+    afterEach(() => {
+      globals.chrome = original.chrome;
+      globals.browser = original.browser;
+    });
+
+    it('accepts the Chrome callback', async () => {
+      globals.browser = undefined;
+      globals.chrome = {
+        runtime: {},
+        permissions: {
+          contains: (_perms: unknown, done: (granted: boolean) => void) => done(true),
+          request: (_perms: unknown, done: (granted: boolean) => void) => done(false)
+        }
+      };
+      await expect(hasBrowserPermissions()).resolves.toBe(true);
+      await expect(requestBrowserPermissions()).resolves.toBe(false);
+    });
+
+    it('accepts the Firefox promise, which never calls the callback', async () => {
+      globals.browser = {
+        runtime: {},
+        permissions: {
+          contains: () => Promise.resolve(true),
+          request: () => Promise.resolve(true)
+        }
+      };
+      await expect(hasBrowserPermissions()).resolves.toBe(true);
+      await expect(requestBrowserPermissions()).resolves.toBe(true);
+    });
+
+    it('answers false rather than hanging when the API is absent or throws', async () => {
+      globals.browser = undefined;
+      globals.chrome = { runtime: {} };
+      await expect(hasBrowserPermissions()).resolves.toBe(false);
+
+      globals.chrome = {
+        runtime: {},
+        permissions: { contains: () => { throw new Error('no'); } }
+      };
+      await expect(hasBrowserPermissions()).resolves.toBe(false);
+
+      globals.browser = {
+        runtime: {},
+        permissions: { contains: () => Promise.reject(new Error('denied')) }
+      };
+      await expect(hasBrowserPermissions()).resolves.toBe(false);
+    });
+  });
+
+  /**
+   * electron-builder copies the whole extension folder, but the packaged-runtime smoke check
+   * names every file it expects. A driver missing from the package would otherwise ship as a
+   * browser-control toggle that fails on first use.
+   */
+  it('is required by the packaged-runtime smoke check', () => {
+    const smoke = readFileSync(path.join(process.cwd(), 'scripts', 'smoke-packaged-runtime.mjs'), 'utf8');
+    expect(smoke).toContain("'extension/browser-driver.js'");
+    // And the declaration file, which a browser cannot run, stays out of the package.
+    const builder = readFileSync(path.join(process.cwd(), 'electron-builder.yml'), 'utf8');
+    expect(builder).toContain("- '!**/*.d.ts'");
   });
 });
 

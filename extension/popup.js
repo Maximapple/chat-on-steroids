@@ -435,6 +435,34 @@ $('overwriteToggle').addEventListener('change', async () => {
  * Turning it off both revokes the permissions and drops any live session, so "off" means the
  * capability is gone, not merely unused.
  */
+/**
+ * Chrome answers a callback and returns nothing; Firefox returns a promise and ignores the
+ * callback. Waiting only for the callback waits forever on Firefox, which this extension
+ * supports, so whichever the browser actually hands back is accepted.
+ */
+const BROWSER_CONTROL_PERMISSIONS = {
+  permissions: ['debugger', 'tabs', 'tabGroups'],
+  origins: ['<all_urls>']
+};
+
+function browserPermissions(method) {
+  return new Promise((resolve) => {
+    const api = webext?.permissions;
+    if (!api?.[method]) return resolve(false);
+    try {
+      const returned = api[method](BROWSER_CONTROL_PERMISSIONS, (granted) => {
+        void webext.runtime.lastError;
+        resolve(Boolean(granted));
+      });
+      if (returned && typeof returned.then === 'function') {
+        returned.then((granted) => resolve(Boolean(granted)), () => resolve(false));
+      }
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
 async function syncBrowserControl() {
   try {
     const status = await webext.runtime.sendMessage({ type: 'browser_status' });
@@ -450,23 +478,12 @@ $('browserControlToggle').addEventListener('change', async () => {
   const wanted = $('browserControlToggle').checked === true;
   try {
     if (wanted) {
-      const granted = await new Promise((resolve) => {
-        webext.permissions.request(
-          { permissions: ['debugger', 'tabs', 'tabGroups'], origins: ['<all_urls>'] },
-          (result) => { void webext.runtime.lastError; resolve(Boolean(result)); }
-        );
-      });
-      if (!granted) $('browserControlToggle').checked = false;
+      if (!(await browserPermissions('request'))) $('browserControlToggle').checked = false;
     } else {
       // Stop first, then revoke: revoking under a live session would leave a debugger
       // attachment this extension can no longer address, and the banner with it.
       await webext.runtime.sendMessage({ type: 'browser_detach' }).catch(() => null);
-      await new Promise((resolve) => {
-        webext.permissions.remove(
-          { permissions: ['debugger', 'tabs', 'tabGroups'], origins: ['<all_urls>'] },
-          () => { void webext.runtime.lastError; resolve(); }
-        );
-      });
+      await browserPermissions('remove');
     }
   } finally {
     await syncBrowserControl();

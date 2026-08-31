@@ -445,31 +445,40 @@ async function currentTab(tabId) {
  */
 export const BROWSER_PERMISSIONS = { permissions: ['debugger', 'tabs', 'tabGroups'], origins: ['<all_urls>'] };
 
-export function hasBrowserPermissions() {
+/**
+ * One call shape for both extension APIs.
+ *
+ * Chrome's `chrome.permissions.*` answers a callback and returns nothing; Firefox's
+ * `browser.permissions.*` returns a promise and ignores the callback entirely. Waiting only
+ * for the callback waits forever on Firefox, which this extension supports. Accepting
+ * whichever the browser actually hands back costs three lines and removes the question.
+ */
+function askPermissions(method) {
   return new Promise((resolve) => {
+    const runtime = globalThis.browser ?? globalThis.chrome;
+    const api = runtime?.permissions;
+    if (!api?.[method]) return resolve(false);
     try {
-      chrome.permissions.contains(BROWSER_PERMISSIONS, (granted) => {
-        void chrome.runtime.lastError;
+      const returned = api[method](BROWSER_PERMISSIONS, (granted) => {
+        void runtime?.runtime?.lastError;
         resolve(Boolean(granted));
       });
+      if (returned && typeof returned.then === 'function') {
+        returned.then((granted) => resolve(Boolean(granted)), () => resolve(false));
+      }
     } catch {
       resolve(false);
     }
   });
 }
 
-/** Must be called from a user gesture; Chrome refuses the prompt otherwise. */
+export function hasBrowserPermissions() {
+  return askPermissions('contains');
+}
+
+/** Must be called from a user gesture; the browser refuses the prompt otherwise. */
 export function requestBrowserPermissions() {
-  return new Promise((resolve) => {
-    try {
-      chrome.permissions.request(BROWSER_PERMISSIONS, (granted) => {
-        void chrome.runtime.lastError;
-        resolve(Boolean(granted));
-      });
-    } catch {
-      resolve(false);
-    }
-  });
+  return askPermissions('request');
 }
 
 export const browserDriver = {
