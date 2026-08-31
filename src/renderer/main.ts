@@ -438,21 +438,37 @@ function paintDesktopPermissions(next: AppState): boolean {
  * It stops on its own the moment everything is granted, and never runs off macOS.
  */
 let desktopPermissionTimer: number | null = null;
+/** The cadence the armed timer is running at, so a change of speed re-arms it. */
+let desktopPermissionPeriod: number | null = null;
 
 function watchDesktopPermissions(next: AppState): void {
-  const outstanding =
+  const applies =
     next.platform?.family === 'macos' &&
-    (next.config.capabilities.screen || (next.config.capabilities.control && !next.config.readOnly)) &&
-    !step('desktop').classList.contains('is-done');
+    (next.config.capabilities.screen || (next.config.capabilities.control && !next.config.readOnly));
+  const outstanding = applies && !step('desktop').classList.contains('is-done');
 
-  if (!outstanding) {
+  // Watch in both directions, at two speeds.
+  //
+  // The poll used to stop the moment everything was granted, which made the list one-way: it
+  // noticed a permission appearing and could never notice one going away. QA switched
+  // Accessibility off in System Settings and the app went on showing desktop access as complete
+  // until it was restarted — a green row promising an ability the app no longer had.
+  //
+  // While something is outstanding someone is walking between here and System Settings, so the
+  // fast cadence earns itself. Once everything is granted nobody is waiting on the answer, and
+  // a slow check is enough to stop the list from lying.
+  const period = outstanding ? 2500 : 30_000;
+  if (!applies) {
     if (desktopPermissionTimer !== null) {
       window.clearInterval(desktopPermissionTimer);
       desktopPermissionTimer = null;
     }
+    desktopPermissionPeriod = null;
     return;
   }
-  if (desktopPermissionTimer !== null) return;
+  if (desktopPermissionTimer !== null && desktopPermissionPeriod === period) return;
+  if (desktopPermissionTimer !== null) window.clearInterval(desktopPermissionTimer);
+  desktopPermissionPeriod = period;
   desktopPermissionTimer = window.setInterval(async () => {
     try {
       // Never prompts. A poll that could raise a system dialog would fire one every few
@@ -465,7 +481,7 @@ function watchDesktopPermissions(next: AppState): void {
       // The backend may be restarting or missing entirely; the next tick tries again, and
       // the row simply keeps whatever it last knew.
     }
-  }, 2500);
+  }, period);
 }
 
 function paintDesktopAccess(next: AppState): void {
