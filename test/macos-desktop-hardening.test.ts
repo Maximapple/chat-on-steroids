@@ -326,6 +326,24 @@ describe('macOS desktop safety hardening', () => {
    * This is a second, independent cause of the same symptom as the transient child-window case.
    * Fixing that one did not touch this one.
    */
+  /**
+   * "Nothing is in front" and "I am in front" are different answers.
+   *
+   * The helper excludes its own process from window enumeration on purpose — the model must not
+   * be able to drive the app that is driving it — and in a packaged build the helper runs inside
+   * that app, so every Chat On Steroids window disappears. Correct, but it made foreground
+   * resolution answer nothing whenever the app itself was frontmost, which reads as the defect
+   * QA reported rather than as the refusal it is.
+   */
+  it('says when the frontmost application is the one it may not drive', () => {
+    expect(swift).toContain('result["foregroundIsSelf"] = frontmostPID() == getpid()');
+    // Both the cheap query and the one that carries a window report it.
+    expect(swift).toMatch(/case "cursor":[\s\S]{0,900}foregroundIsSelf/);
+    expect(swift).toMatch(/case "active":[\s\S]{0,200}foregroundIsSelf/);
+    // The exclusion itself is unchanged; this only describes it.
+    expect(swift).toContain('pid != ownPid');
+  });
+
   it('reads the frontmost application fresh rather than from a frozen cache', () => {
     expect(swift).toMatch(
       /private func frontmostPID\(\) -> pid_t\? \{[\s\S]{0,400}CFRunLoopRunInMode\(\.defaultMode, 0, true\)/
