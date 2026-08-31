@@ -29,7 +29,15 @@ nicht — macOS merkt sich die Antwort pro Prozess.
 
 ## 3b. Kurz prüfen, dass die richtige App läuft
 
-In der App: **Home** → Karte **Health** → **Run checks**.
+**Der schnellste Test ist der Fenstertitel.** Er muss lauten:
+
+```
+Chat On Steroids 2.0.2+b556b8b
+```
+
+Steht dort nur `2.0.2` ohne Commit, läuft eine ältere App — dann gar nicht erst weitertesten.
+
+Ausführlicher in der App: **Home** → Karte **Health** → **Run checks**.
 
 Zwei Zeilen zählen:
 
