@@ -489,6 +489,13 @@ try {
   const secondTitle = await readPage(`document.title`);
   check('navigate loads the requested document', secondTitle === 'Second document', String(secondTitle));
 
+  // The overlay lives in the document, and navigating replaces the document. It was drawn once
+  // at attach and then only by mouse actions, so between navigating and looking there was
+  // nothing to see — which is exactly the order the QA script asks for in its pointer check:
+  // navigate, observe, is the pointer there.
+  check('the pointer overlay survives a navigation',
+    (await readPage(`Boolean(document.getElementById('__cos_pointer__'))`)) === true);
+
   // The driver attached while the fixture root was open, so anything still reporting that root
   // is answering with where the run began. The address and title were captured once at attach
   // and never updated, and status is exactly what a caller uses to confirm where it is — a
