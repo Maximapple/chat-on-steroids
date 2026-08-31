@@ -697,7 +697,8 @@ export const browserDriver = {
       throw fail(
         'BROWSER_PERMISSION_REQUIRED',
         'browser control is off. Open the Chat On Steroids extension popup and turn it on; ' +
-          'Chrome asks for the debugger and site access permissions there.'
+          'the browser asks for site and tab access there. If the switch will not stay on, the ' +
+          'popup now says why underneath it.'
       );
     }
 
