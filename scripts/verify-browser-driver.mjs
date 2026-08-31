@@ -94,7 +94,13 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Driver fixture</title>
 <button id="go" aria-label="Run the thing">Run</button>
 <input id="name" placeholder="Your name">
 <button id="hidden" style="display:none">Never</button>
+<button id="dbl" aria-label="Double me">Double</button>
+<div id="pad" style="width:220px;height:70px;border:1px dashed #999">Drag pad</div>
+<a id="onward" href="/second">Go onward</a>
 <div id="log">nothing yet</div>
+<div id="klog">no keys</div>
+<div id="dlog">no dblclick</div>
+<div id="draglog">no drag</div>
 <iframe id="frame" src="/frame" style="width:320px;height:80px;border:1px solid #ccc"></iframe>
 <script>
 document.getElementById('go').addEventListener('click', (e) => {
@@ -102,6 +108,24 @@ document.getElementById('go').addEventListener('click', (e) => {
 });
 document.getElementById('name').addEventListener('input', () => {
   document.getElementById('log').textContent = 'typed:' + document.getElementById('name').value;
+});
+document.getElementById('name').addEventListener('keydown', (e) => {
+  document.getElementById('klog').textContent = 'key:' + e.key + ' trusted=' + e.isTrusted;
+});
+document.getElementById('dbl').addEventListener('dblclick', (e) => {
+  document.getElementById('dlog').textContent = 'dblclick trusted=' + e.isTrusted;
+});
+// Recorded as a sequence, because a drag that only lands its endpoints is not a drag: the
+// press, at least one move while held, and the release all have to arrive, in that order.
+const drag = [];
+const pad = document.getElementById('pad');
+pad.addEventListener('mousedown', (e) => { drag.length = 0; drag.push('down:' + e.isTrusted); });
+pad.addEventListener('mousemove', (e) => {
+  if (drag.length && e.buttons === 1 && !drag.includes('move:' + e.isTrusted)) drag.push('move:' + e.isTrusted);
+});
+pad.addEventListener('mouseup', (e) => {
+  drag.push('up:' + e.isTrusted);
+  document.getElementById('draglog').textContent = drag.join(' ');
 });
 </script>`;
 
@@ -113,9 +137,12 @@ document.getElementById('inner').addEventListener('click', (e) => {
 });
 </script>`;
 
+const SECOND = `<!doctype html><meta charset="utf-8"><title>Second document</title>
+<h1>Second</h1>`;
+
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-  res.end(req.url === '/frame' ? FRAME : PAGE);
+  res.end(req.url === '/frame' ? FRAME : req.url.startsWith('/second') ? SECOND : PAGE);
 });
 await new Promise((resolve) => server.listen(pagePort, '127.0.0.1', resolve));
 
@@ -290,8 +317,23 @@ try {
     JSON.stringify({ shot: view.shot, viewport: view.viewport }));
 
   const refFor = (name) => (view.elements ?? []).find((e) => e.name === name)?.ref;
-  const act = (action) =>
-    run(`(async () => JSON.stringify(await globalThis.__driver.browserDriver.act(${JSON.stringify(action)})))()`);
+  const act = async (action) => {
+    const reply = await run(`(async () => {
+      try { return JSON.stringify(await globalThis.__driver.browserDriver.act(${JSON.stringify(action)})); }
+      catch (e) { return 'ACTION_REFUSED ' + (e.code || '') + ': ' + e.message; }
+    })()`);
+    const text = String(reply.value ?? reply.error ?? '');
+    // Surfaced immediately: a refusal swallowed here turns into a check that fails with
+    // "nothing happened", which points at the page instead of at the call.
+    if (text.startsWith('ACTION_REFUSED')) throw new Error(`${action.type} → ${text}`);
+    return reply;
+  };
+  /** A point inside an element, in the CSS pixels the driver's coordinates are expressed in. */
+  const centreOf = async (id) => JSON.parse(await readPage(
+    `(() => { const r = document.getElementById('${id}').getBoundingClientRect();
+      return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2),
+        left: Math.round(r.x), top: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }); })()`
+  ));
 
   await act({ type: 'click_ref', ref: refFor('Run the thing') });
   await sleep(400);
@@ -315,6 +357,60 @@ try {
 
   check('the pointer overlay is drawn in the page',
     (await readPage(`Boolean(document.getElementById('__cos_pointer__'))`)) === true);
+
+  // keypress: a key the page can name, arriving as trusted. set_value already proved the
+  // input event; this proves the keyboard path, which is a different protocol call.
+  await act({ type: 'click_ref', ref: refFor('Your name') });
+  await act({ type: 'keypress', keys: ['Enter'] });
+  await sleep(400);
+  const keyLog = await readPage(`document.getElementById('klog').textContent`);
+  check('a keypress arrives as a TRUSTED key event', keyLog === 'key:Enter trusted=true', keyLog);
+
+  const dblBox = await centreOf('dbl');
+  await act({ type: 'double_click', x: dblBox.x, y: dblBox.y });
+  await sleep(400);
+  const dblLog = await readPage(`document.getElementById('dlog').textContent`);
+  check('double_click produces a real dblclick', dblLog === 'dblclick trusted=true', dblLog);
+
+  // A drag has to be press, move-while-held, release — in that order. Endpoints alone would
+  // pass a naive check while dragging nothing.
+  const box = await centreOf('pad');
+  await act({
+    type: 'drag',
+    path: [
+      { x: box.left + 15, y: box.top + 15 },
+      { x: box.left + Math.round(box.w / 2), y: box.top + Math.round(box.h / 2) },
+      { x: box.left + box.w - 15, y: box.top + box.h - 15 }
+    ]
+  });
+  await sleep(600);
+  const dragLog = await readPage(`document.getElementById('draglog').textContent`);
+  check('a drag presses, moves while held, then releases',
+    dragLog === 'down:true move:true up:true', dragLog);
+
+  // Navigation, and the history either side of it. back must return the document that was
+  // there before, not merely change the url.
+  await act({ type: 'navigate', url: `http://127.0.0.1:${pagePort}/second` });
+  await sleep(900);
+  const secondTitle = await readPage(`document.title`);
+  check('navigate loads the requested document', secondTitle === 'Second document', String(secondTitle));
+
+  await act({ type: 'back' });
+  await sleep(900);
+  const backTitle = await readPage(`document.title`);
+  check('back returns the previous document', backTitle === 'Driver fixture', String(backTitle));
+
+  await act({ type: 'forward' });
+  await sleep(900);
+  const forwardTitle = await readPage(`document.title`);
+  check('forward goes onward again', forwardTitle === 'Second document', String(forwardTitle));
+
+  await act({ type: 'back' });
+  await sleep(900);
+  await act({ type: 'reload' });
+  await sleep(900);
+  const reloadedTitle = await readPage(`document.title`);
+  check('reload keeps the same document', reloadedTitle === 'Driver fixture', String(reloadedTitle));
 
   const refused = await run(`(async () => {
     try { await globalThis.__driver.browserDriver.act({ type: 'click_ref', ref: 'e999' }); return 'NOT REFUSED'; }
