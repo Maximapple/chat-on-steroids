@@ -14,8 +14,10 @@ describe('macOS desktop safety hardening', () => {
     expect(swift).toContain('private func assertInputTarget');
     expect(swift).toContain('private func assertFrameTarget');
     expect(swift).toMatch(/private func inputTargetMatches[\s\S]*frontmostPID\(\) == row\.pid/);
-    expect(swift).toMatch(/private func inputTargetMatches[\s\S]*frontWindowID\(rows: rows\) == row\.id/);
-    expect(swift).toMatch(/private func inputTargetMatches[\s\S]*focusedAXWindowID\(for: row\.pid, rows: rows\) == row\.id/);
+    expect(swift).toMatch(
+      /private func inputTargetMatches[\s\S]*frontWindowID\(rows: rows, focusedWindow: focused\) == row\.id/
+    );
+    expect(swift).toMatch(/private func inputTargetMatches[\s\S]*guard focused == row\.id else \{ return false \}/);
     expect(swift).toMatch(/private func inputTargetMatches[\s\S]*guard focusedAXElementWindowID\(for: row\.pid, rows: rows\) == row\.id/);
     // frontWindowID is still WindowServer z-order; it only resolves which of one app's own
     // windows is front. All four clauses above still have to agree.
@@ -34,22 +36,27 @@ describe('macOS desktop safety hardening', () => {
    * a covering window owned by *another* process must still refuse.
    */
   it('resolves one app\'s transient child windows without relaxing cross-app refusal', () => {
-    expect(swift).toContain('private func frontWindowID(rows: [WindowRow]) -> CGWindowID?');
+    expect(swift).toContain(
+      'private func frontWindowID(rows: [WindowRow], focusedWindow: CGWindowID? = nil) -> CGWindowID?'
+    );
     // Another app on top: returned as-is, so the caller's frontmostPID check still refuses.
     expect(swift).toContain(
       'guard let topRow = rows.first(where: { $0.id == top }), frontmostPID() == topRow.pid else { return top }'
     );
     // AX only wins when it names a different window this same scan already saw and admitted.
+    // AX only wins when it names a different window this same scan already saw and admitted.
+    // A caller that has already read the focused window hands it in, so the two of them cannot
+    // reach different conclusions from two reads taken moments apart — see the race below.
     expect(swift).toContain(
-      'guard let focused = focusedAXWindowID(for: topRow.pid, rows: rows), focused != top else { return top }'
+      'guard let focused = focusedWindow ?? focusedAXWindowID(for: topRow.pid, rows: rows),'
     );
     expect(swift).toContain(
       'guard rows.contains(where: { $0.id == focused && $0.pid == topRow.pid }) else { return top }'
     );
     // Both readers go through it, so observation and input can never disagree about which
     // window is front.
-    expect(swift).toMatch(/private func foregroundWindowID[\s\S]*guard let frontID = frontWindowID\(rows: rows\)/);
-    expect(swift).toMatch(/private func inputTargetMatches[\s\S]*guard frontWindowID\(rows: rows\) == row\.id/);
+    expect(swift).toMatch(/private func foregroundWindowID[\s\S]*guard let frontID = frontWindowID\(rows: rows, focusedWindow: focused\)/);
+    expect(swift).toMatch(/private func inputTargetMatches[\s\S]*guard frontWindowID\(rows: rows, focusedWindow: focused\) == row\.id/);
     expect(swift).not.toMatch(/private func inputTargetMatches[\s\S]{0,200}windowServerFrontWindowID/);
   });
 
@@ -288,6 +295,39 @@ describe('macOS desktop safety hardening', () => {
    * Reported success without effect is worse than a clean failure, because a caller builds its
    * next decision on a world state that never happened.
    */
+  /**
+   * The focused window is read once per decision, not twice.
+   *
+   * frontWindowID reads AX focus to resolve an application's transient child windows, and both
+   * of its callers then read the same fact again to check the two agree. Between those reads
+   * focus can move — a bubble opens, a popup closes — and a second answer disagreeing with the
+   * first was treated as an app transition in flight. QA saw both halves of that: `No foreground
+   * window` while Chrome plainly occupied the screen, and FOCUS_FAILED against a window that was
+   * visibly active, because focusWindow polls the input fence and could never satisfy a
+   * condition that was partly a race.
+   *
+   * Every clause still has to hold. They just judge one observation instead of two.
+   */
+  it('judges one reading of the focused window, not two', () => {
+    expect(swift).toMatch(
+      /private func foregroundWindowID[\s\S]*let focused = AXIsProcessTrusted\(\) \? focusedAXWindowID\(for: pid, rows: rows\) : nil/
+    );
+    expect(swift).toMatch(
+      /private func foregroundWindowID[\s\S]*frontWindowID\(rows: rows, focusedWindow: focused\)/
+    );
+    expect(swift).toMatch(/private func foregroundWindowID[\s\S]*if let focused, focused != front\.id \{ return nil \}/);
+    // The input fence reads once as well, and still requires all of its clauses.
+    expect(swift).toMatch(
+      /private func inputTargetMatches[\s\S]*let focused = focusedAXWindowID\(for: row\.pid, rows: rows\)/
+    );
+    expect(swift).toMatch(
+      /private func inputTargetMatches[\s\S]*frontWindowID\(rows: rows, focusedWindow: focused\) == row\.id/
+    );
+    expect(swift).toMatch(
+      /private func inputTargetMatches[\s\S]*focusedAXElementWindowID\(for: row\.pid, rows: rows\) == row\.id/
+    );
+  });
+
   it('paces a drag so the system reads it as one, rather than as a click', () => {
     expect(swift).toContain('private let dragPressHoldMicroseconds');
     expect(swift).toContain('private let dragDropDwellMicroseconds');

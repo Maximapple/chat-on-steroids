@@ -265,15 +265,23 @@ private func windowServerFrontWindowID(rows suppliedRows: [WindowRow]? = nil) ->
 private func foregroundWindowID() -> CGWindowID? {
     guard let pid = frontmostPID() else { return nil }
     let rows = allWindowRows(includeMinimized: false)
-    guard let frontID = frontWindowID(rows: rows),
+    // Read the focused window once and use that one answer for both decisions below.
+    //
+    // These used to be two separate queries of the same fact: frontWindowID asked which window
+    // has AX focus in order to resolve an app's transient child windows, and then this function
+    // asked again to check they agreed. Between the two reads focus can move — a bubble opens, a
+    // popup closes — and the second answer disagreeing with the first was read as "an app
+    // transition is in flight" and reported as no foreground window at all. QA saw exactly that:
+    // `No foreground window` while Chrome plainly occupied the screen, correcting itself as soon
+    // as anything was refocused. One read cannot disagree with itself.
+    let focused = AXIsProcessTrusted() ? focusedAXWindowID(for: pid, rows: rows) : nil
+    guard let frontID = frontWindowID(rows: rows, focusedWindow: focused),
           let front = rows.first(where: { $0.id == frontID }),
           front.pid == pid else { return nil }
     // Screen-only observation must still work without Accessibility. When AX is available,
-    // disagreement means an app transition is in flight, so expose no active window rather
-    // than attributing input or pixels to stale state from either subsystem.
-    if AXIsProcessTrusted(), let focused = focusedAXWindowID(for: pid, rows: rows), focused != front.id {
-        return nil
-    }
+    // genuine disagreement still means a transition is in flight, so expose no active window
+    // rather than attributing input or pixels to stale state from either subsystem.
+    if let focused, focused != front.id { return nil }
     return front.id
 }
 
@@ -471,10 +479,13 @@ private func focusedAXElementWindowID(for pid: pid_t, rows suppliedRows: [Window
  * definition the authority on where that application's keyboard input goes — and it is only
  * trusted when it names a window this scan already saw and admitted.
  */
-private func frontWindowID(rows: [WindowRow]) -> CGWindowID? {
+private func frontWindowID(rows: [WindowRow], focusedWindow: CGWindowID? = nil) -> CGWindowID? {
     guard let top = windowServerFrontWindowID(rows: rows) else { return nil }
     guard let topRow = rows.first(where: { $0.id == top }), frontmostPID() == topRow.pid else { return top }
-    guard let focused = focusedAXWindowID(for: topRow.pid, rows: rows), focused != top else { return top }
+    // A caller that has already read the focused window passes it in, so the two of us cannot
+    // reach different conclusions from two reads taken moments apart.
+    guard let focused = focusedWindow ?? focusedAXWindowID(for: topRow.pid, rows: rows),
+          focused != top else { return top }
     guard rows.contains(where: { $0.id == focused && $0.pid == topRow.pid }) else { return top }
     return focused
 }
@@ -482,8 +493,14 @@ private func frontWindowID(rows: [WindowRow]) -> CGWindowID? {
 private func inputTargetMatches(_ row: WindowRow) -> Bool {
     guard frontmostPID() == row.pid else { return false }
     let rows = allWindowRows(includeMinimized: false)
-    guard frontWindowID(rows: rows) == row.id else { return false }
-    guard focusedAXWindowID(for: row.pid, rows: rows) == row.id else { return false }
+    // One read, two uses — as in foregroundWindowID, and here it matters more. This is the
+    // fence physical input passes through, so a disagreement between two reads of the same
+    // fact refuses a legitimate action: QA hit FOCUS_FAILED against a window that was visibly
+    // active, because focusWindow polls this and could never satisfy a condition that was
+    // partly a race. Every clause still has to hold; they just judge one observation.
+    let focused = focusedAXWindowID(for: row.pid, rows: rows)
+    guard frontWindowID(rows: rows, focusedWindow: focused) == row.id else { return false }
+    guard focused == row.id else { return false }
     // Missing focused-control evidence is not agreement. AX can return nil on a timeout,
     // an untyped value or an app transition; accepting that would turn an unprovable
     // keyboard destination into global physical input.
