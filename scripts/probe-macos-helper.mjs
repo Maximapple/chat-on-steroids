@@ -268,7 +268,7 @@ if (!candidate) {
   // Let the window settle before the first capture. A window still painting itself changes
   // between the two shots, and the comparison then reports "redrew" rather than a pointer —
   // true, but it wastes the run's one chance to judge the pixels.
-  await sleep(2500);
+  await new Promise((resolve) => setTimeout(resolve, 2500));
 
   const windowShot = await probe('it captures that window', {
     op: 'capture',
