@@ -84,16 +84,52 @@ describe('what browser control refuses to attach to', () => {
 
 describe('permissions are opt-in', () => {
   /**
-   * `debugger` plus `<all_urls>` is the most far-reaching pair an extension can hold. Shipping
-   * it as required would re-prompt every existing user on update and leave the extension
-   * disabled until they accepted a capability most of them will never switch on.
+   * `debugger` is required, and it has to be.
+   *
+   * It was optional here, on the reasoning that shipping the most far-reaching permission as
+   * required would re-prompt every user on update for a capability most never switch on. Sound
+   * reasoning about a design Chrome does not allow: `debugger` cannot appear in
+   * optional_permissions. Chrome drops the entry when the manifest loads, so requesting it later
+   * answers "Only permissions specified in the manifest may be requested" — measured against
+   * Chrome 152 with a trusted click, where `chrome.debugger` was also simply `undefined`. One
+   * unavailable entry failed the whole request, so the popup switch could never stay on, and QA
+   * found the feature unusable.
+   *
+   * The opt-in still means something: site and tab access stay optional, and those are what
+   * decide whether the extension can read a page at all.
    */
-  it('keeps the far-reaching permissions optional so an update never disables the extension', () => {
-    expect(manifest.optional_permissions).toEqual(['debugger', 'tabs', 'tabGroups']);
+  it('requires debugger, because Chrome will not grant it any other way', () => {
+    expect(manifest.permissions).toEqual(['storage', 'scripting', 'alarms', 'debugger']);
+    expect(manifest.optional_permissions).toEqual(['tabs', 'tabGroups']);
     expect(manifest.optional_host_permissions).toEqual(['<all_urls>']);
-    // The install-time set is unchanged from before browser control existed.
-    expect(manifest.permissions).toEqual(['storage', 'scripting', 'alarms']);
+    // Site access is still not granted at install; that is the part worth keeping optional.
     expect(manifest.host_permissions).not.toContain('<all_urls>');
+  });
+
+  /**
+   * The guard for the class of mistake, not just this instance.
+   *
+   * Chrome documents a set of permissions that may never be optional, and declaring one there is
+   * silent: the manifest loads, the entry vanishes, and the only symptom is a runtime request
+   * that fails for a reason nobody sees. A build should not be able to reach a browser in that
+   * state again.
+   */
+  it('declares no permission Chrome refuses to treat as optional', () => {
+    // Verified empirically for `debugger` against Chrome 152; the rest are documented alongside
+    // it as install-time only.
+    const NEVER_OPTIONAL = [
+      'debugger',
+      'declarativeNetRequest',
+      'devtools',
+      'experimental',
+      'mdns',
+      'proxy',
+      'tts',
+      'ttsEngine',
+      'wallpaper'
+    ];
+    const declared = manifest.optional_permissions ?? [];
+    expect(declared.filter((name: string) => NEVER_OPTIONAL.includes(name))).toEqual([]);
   });
 
   it('asks for exactly what the manifest offers, and no more', () => {

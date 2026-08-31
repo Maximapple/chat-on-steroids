@@ -7,10 +7,10 @@
   "permissions": [
     "storage",
     "scripting",
-    "alarms"
+    "alarms",
+    "debugger"
   ],
   "optional_permissions": [
-    "debugger",
     "tabs",
     "tabGroups"
   ],
