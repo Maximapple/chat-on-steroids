@@ -37,8 +37,10 @@ was skipped, say so in the report and state plainly whether it passes now.
   run.** If the switch still will not stay on, the popup shows the reason underneath it — quote
   that text verbatim.
 - **The `browser` tool was missing from the connector.** A chat keeps the tool list it loaded, so
-  this conversation must be a *new* one. If `browser` is still absent, run Diagnostics in the app:
-  the *Local server* line names every tool actually being served.
+  this conversation must be a *new* one. If `browser` is still absent, ask the user to open the
+  app, go to **Home → Health → Run checks**, and read back two lines: **Build**, which names the
+  commit the app was built from, and **Local server**, which names every tool actually served. An
+  app with no Build line predates this work entirely and cannot pass section E.
 - **Drag reported success while moving nothing** (check 15). The input is paced now: held,
   travelled continuously, and dwelt on before release.
 - **A permission revoked in System Settings went unnoticed** until restart (check 28), and the
