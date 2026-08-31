@@ -184,48 +184,115 @@ ok    it captures that window — refused SCREEN_PERMISSION_REQUIRED
 macOS helper probe passed (7 answers)
 ```
 
-### THE POINTER COMPOSITOR IS STILL UNTESTED
+### First attempt: the pointer compositor was not reached
 
-The probe passed on its own terms — named TCC refusals are the working code path it checks for,
-and the helper starts, answers, reads the cursor and enumerates ten real windows. But:
+`screenPermission=false accessibilityPermission=false`. Both captures were refused at the
+permission gate before any pixels were touched, so **no `pointer=` value was produced** and
+`captureMode` reached neither `window` nor `screen`. The probe passed on its own terms, because
+a cleanly named TCC refusal is the working path it checks for.
 
-- **No `pointer=` value was produced.** Neither capture reached the compositor; both were
-  refused at the permission gate before any pixels were touched.
-- `captureMode` reached neither `window` nor `screen`.
-
-The reason is TCC attribution, not the code. macOS attributes the grant to the GUI ancestor of
+The cause was TCC attribution, not the code. macOS attributes the grant to the GUI ancestor of
 the process tree, which for a `claude` session in a terminal is `Terminal.app`:
 
 ```
 zsh -> claude -> zsh -> login -> Terminal.app -> launchd
 ```
 
-`Terminal.app` holds neither Screen Recording nor Accessibility, so `screenPermission=false
-accessibilityPermission=false` is the honest state of this run.
+### Second attempt, with Terminal granted both permissions — PASS
 
-**Nothing here should be read as evidence that the pointer path works or does not work.** No
-claim about it was made from reading the Swift, deliberately: the runbook records that a code
-review of exactly this path already produced a confident wrong answer once.
+`Terminal.app` was given Screen Recording and Accessibility and fully restarted.
 
-To close it, one of:
+```
+ok    the helper starts and answers — ok
+      screenPermission=true accessibilityPermission=true
+ok    it can be asked for the cursor — ok
+      cursor={"x":1652,"y":159} foreground=731
+ok    it can enumerate windows — ok
+ok    a capture either works or is refused by name — ok
+      pointer=system captureMode=screen
+ok    it lists windows to capture — ok
+      9 windows listed, 9 not minimized
+      window 731 "chat_qa — ◑ integrate/browser-and-deskto" at 498,142 1287x805
+ok    it can put the pointer inside that window — ok
+ok    it captures that window — ok
+      pointer=outside_region captureMode=window
+FAIL  window capture returned pointer=outside_region with the pointer moved inside it
 
-1. Grant `Terminal.app` Screen Recording **and** Accessibility, fully quit and reopen Terminal
-   (macOS caches the answer for the life of the process), and re-run
-   `node scripts/probe-macos-helper.mjs arm64`.
-2. Follow runbook section 1 against the installed app — the real product path — and record the
-   `desktop timing … pointer=…` line from the Activity panel.
+macOS helper probe FAILED
+```
+
+That first run reported `outside_region` and exited 1. **It did not reproduce.** Eleven
+consecutive re-runs, same machine, same window 731, same geometry, all reported:
+
+```
+pointer=drawn captureMode=window
+macOS helper probe passed (7 answers)
+```
+
+11/11. The single `outside_region` occurred while a person was physically at the machine
+immediately after restarting Terminal. The probe warps the pointer to the window centre and then
+captures; any real mouse movement in between makes `outside_region` the honest answer. That is
+the most likely explanation, but it is **not proven** — see the open point below.
+
+### The composited pointer, verified in the image and not merely by its verdict
+
+`pointer=drawn` is only a pass if the pointer is actually in the picture at the addressed pixel,
+so the PNG was measured rather than trusted.
+
+Window 731 is 1287x805 at 498,142; the pointer was warped to its centre, 1142,545; the capture
+is scaled to 640x400, so the addressed pixel is (320,200) in the image. Bright-pixel row profile
+around that point:
+
+```
+y=196  x 318..322     top serif
+y=197  x 319..321
+y=200  x 319..321     stem
+y=201  x 319..321
+y=203  x 319..321
+y=204  x 318..322     bottom serif
+(y=216..219 is the next line of terminal text, not the cursor)
+```
+
+Glyph centre **(320,200) — the addressed pixel, to within a pixel.**
+
+Two things worth stating, because both are what the earlier wrong claim got wrong:
+
+- The shape drawn is an **I-beam**, not an arrow. That is correct: the pointer was over Terminal's
+  text area, so the I-beam is the real `NSCursor.currentSystem`. The compositor drew what was
+  actually there rather than a stock arrow.
+- Its size, ~5x9 px in a 0.497 downscale, is ~10x18 px native — an ordinary I-beam, so it is
+  being composited at the capture's scale rather than at raw backing-store pixels.
+
+**The hand-composited window-capture pointer path works on this machine.** This is the code that
+was once declared fixed on the strength of correct-looking code and was not; it has now been run,
+and the image was inspected.
+
+The capture is at `$TMPDIR/cos-probe-window.png`. It is deliberately **not** committed: it is a
+screenshot of a live desktop in a public repository. The row profile above is the evidence.
+
+## Open point — the probe can fail for a reason that is not a defect
+
+`scripts/probe-macos-helper.mjs` treats `pointer=outside_region` as a hard FAIL whenever the
+`move` succeeded. But the runbook's own table lists `outside_region` as *"not a defect — move the
+pointer and repeat"*. Between the warp and the capture the probe never re-reads the cursor, so a
+person brushing the trackpad turns a good build red with a message that names the compositor.
+
+Not changed here. Worth deciding: re-read the cursor after the warp and, if it has left the
+window, report the run as inconclusive rather than failed.
 
 ## Still outstanding — untested, not passed
 
-Everything in "What needs a person" remains untested by this run:
-
-- The pointer in a window screenshot (runbook §1) — **untested**, see above.
+- The pointer in a window screenshot (runbook §1) — **PASSED**, see above, verified in the image.
 - The onboarding permission step: timing, deep-link targets, live refresh, both themes
-  (runbook §2) — **untested**, needs granted TCC and a real desktop.
+  (runbook §2) — **untested**, needs a real desktop and the app itself.
 - QA cases 6.9, 6.3, 6.2, 6.4 and Test 5, Chrome's link-preview bubble versus foreground-window
   resolution (runbook §3) — **untested**.
 - `docs/qa/chatgpt-desktop-qa-prompt.md`, the 32-check model → MCP → app → macOS script —
   **not run**; it cannot be driven from a terminal session.
+
+Note that §1 was exercised here through the **probe**, against a Terminal window. The runbook's
+own procedure drives it through the installed app and its Activity panel, which additionally
+covers the app's TCC handling and its logging. That variant is still unrun.
 
 ## Documentation drift noticed
 
