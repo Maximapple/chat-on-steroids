@@ -321,6 +321,147 @@ function paintGroups(): void {
   }
 }
 
+/**
+ * One row per macOS permission the enabled capabilities actually need.
+ *
+ * The verdict is stated as a colour and as a word, because a colour alone is not a status
+ * anyone can act on and a word alone is not one anyone scans. Three states, not two:
+ * `not-determined` means macOS has never been asked, which is not a refusal, and painting it
+ * red would report a fault where there is none.
+ *
+ * The values come from the native backend that performs the protected operation, so this is
+ * what the OS will actually answer rather than what a settings row believes.
+ */
+const MACOS_PERMISSIONS = [
+  {
+    id: 'screen',
+    title: 'Screen Recording',
+    why: 'Needed to take a screenshot or read what is on screen.',
+    pane: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+    action: 'Open Screen Recording'
+  },
+  {
+    id: 'accessibility',
+    title: 'Accessibility',
+    why: 'Needed to click, type and inspect controls in other applications.',
+    pane: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+    action: 'Open Accessibility'
+  }
+] as const;
+
+function paintDesktopPermissions(next: AppState): boolean {
+  const stepNode = step('desktop');
+  const access = next.desktopAccess;
+  const needs = {
+    screen: next.config.capabilities.screen,
+    accessibility: next.config.capabilities.control && !next.config.readOnly
+  };
+  const applies = next.platform?.family === 'macos' && (needs.screen || needs.accessibility);
+  stepNode.hidden = !applies;
+  if (!applies) return true;
+
+  const list = $('permList');
+  const rows: HTMLElement[] = [];
+  let granted = 0;
+  let wanted = 0;
+
+  for (const permission of MACOS_PERMISSIONS) {
+    if (!needs[permission.id]) continue;
+    wanted += 1;
+    // No reading yet is its own state: the backend has not reported, which is not a refusal.
+    const verdict = access ? access[permission.id] : null;
+    const state = verdict === 'granted' ? 'granted' : verdict === 'missing' ? 'missing' : 'unknown';
+    if (state === 'granted') granted += 1;
+
+    const row = document.createElement('li');
+    row.className = 'perm-row';
+    row.dataset.state = state;
+
+    const dot = document.createElement('span');
+    dot.className = 'perm-dot';
+
+    const body = document.createElement('div');
+    body.className = 'perm-text';
+    const title = document.createElement('strong');
+    title.textContent = permission.title;
+    const why = document.createElement('span');
+    why.textContent = permission.why;
+    body.append(title, why);
+
+    const pill = document.createElement('span');
+    pill.className = 'perm-pill';
+    pill.textContent =
+      state === 'granted' ? 'Granted' : state === 'missing' ? 'Not allowed' : 'Not asked yet';
+
+    row.append(dot, body, pill);
+
+    // A granted permission needs no button; leaving one there invites the user to go and
+    // change something that is already right.
+    if (state !== 'granted') {
+      const open = document.createElement('button');
+      open.className = 'btn';
+      open.type = 'button';
+      open.dataset.link = permission.pane;
+      open.textContent = permission.action;
+      row.append(open);
+    }
+    rows.push(row);
+  }
+
+  list.replaceChildren(...rows);
+  $('permIntro').textContent =
+    granted === wanted
+      ? 'Everything this Mac needs to grant has been granted.'
+      : `${granted} of ${wanted} granted. macOS asks for these one at a time, and each is a ` +
+        'different pane in System Settings. Open a pane, switch Chat On Steroids on, and come ' +
+        'back — this list updates on its own.';
+  // The restart note only earns its space once something has actually been granted elsewhere
+  // and this process still cannot see it.
+  $('permRestart').hidden = granted === wanted;
+  return granted === wanted;
+}
+
+/**
+ * Re-reads the macOS verdicts while a permission is still missing.
+ *
+ * Granting one of these means leaving the app for System Settings and coming back, and a list
+ * that only updates on the next restart makes that trip feel like it failed. So while the
+ * setup step is showing something outstanding, the live verdicts are polled — slowly, because
+ * this crosses into the native backend, and only while there is a reason to.
+ *
+ * It stops on its own the moment everything is granted, and never runs off macOS.
+ */
+let desktopPermissionTimer: number | null = null;
+
+function watchDesktopPermissions(next: AppState): void {
+  const outstanding =
+    next.platform?.family === 'macos' &&
+    (next.config.capabilities.screen || (next.config.capabilities.control && !next.config.readOnly)) &&
+    !step('desktop').classList.contains('is-done');
+
+  if (!outstanding) {
+    if (desktopPermissionTimer !== null) {
+      window.clearInterval(desktopPermissionTimer);
+      desktopPermissionTimer = null;
+    }
+    return;
+  }
+  if (desktopPermissionTimer !== null) return;
+  desktopPermissionTimer = window.setInterval(async () => {
+    try {
+      // Never prompts. A poll that could raise a system dialog would fire one every few
+      // seconds at whoever left this tab open.
+      // Unwrapped here rather than through run(): that reports a failure as a toast, and a
+      // background poll must never put one on screen every few seconds.
+      const reply = await api.refreshDesktopAccess();
+      if (reply.ok) apply(reply.data);
+    } catch {
+      // The backend may be restarting or missing entirely; the next tick tries again, and
+      // the row simply keeps whatever it last knew.
+    }
+  }, 2500);
+}
+
 function paintDesktopAccess(next: AppState): void {
   const box = $('desktopAccess');
   const access = next.desktopAccess;
@@ -861,7 +1002,7 @@ function apply(next: AppState): void {
   cards.replaceChildren(...connectorCards(next));
 
   // Step marks: everything before the first unfinished step counts as done.
-  const order = ['folder', 'tunnel', 'key', 'connect', 'chatgpt', 'browser'];
+  const order = ['folder', 'tunnel', 'key', 'connect', 'chatgpt', 'desktop', 'browser'];
   const done = new Set<string>();
   if (config.roots.length > 0 || missingStep(next)?.step !== 'folder') done.add('folder');
   if (!openai || TUNNEL_ID_PATTERN.test(config.tunnel.tunnelId)) done.add('tunnel');
@@ -880,6 +1021,10 @@ function apply(next: AppState): void {
   // only that this extension is allowed to connect; setup is complete when a required browser
   // has actually checked in during this process. If no enabled feature needs the browser,
   // this optional step is hidden and deliberately cannot block the wizard.
+  // Painted first because it also decides whether the step applies at all: off macOS, or
+  // with no Desktop capability enabled, there is nothing to grant and nothing to block on.
+  if (paintDesktopPermissions(next)) done.add('desktop');
+  watchDesktopPermissions(next);
   if (!browserRequired || next.bridge.present) done.add('browser');
   const current = order.find((name) => !done.has(name)) ?? null;
   for (const name of order) {

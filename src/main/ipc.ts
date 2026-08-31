@@ -472,6 +472,16 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return buildState();
   });
 
+  // Re-reads the live TCC verdicts without prompting for anything. The setup step polls this
+  // while a permission is still missing, so a grant made in System Settings turns the row
+  // green on the way back instead of on the next restart — for the permissions macOS lets a
+  // running process observe. Screen Recording is not one of them, which is why the step keeps
+  // saying so until everything is granted.
+  handle('desktop:refreshAccess', async () => {
+    await refreshMacOSDesktopAccess();
+    return buildState();
+  });
+
   handle('log:get', async () => getLog());
   handle('log:text', async () => formatLogForClipboard());
   handle('log:json', async () => formatLogAsJson());
