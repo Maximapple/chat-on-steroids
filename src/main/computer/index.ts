@@ -525,8 +525,33 @@ function completedHelperRoutes(reply: Record<string, any>, completed: number): A
   return routes as ActionRoute[];
 }
 
+/**
+ * A refusal the operating system just made is better evidence than a verdict we polled.
+ *
+ * The permission rows are fed by CGPreflightScreenCaptureAccess and AXIsProcessTrusted, asked on
+ * a timer. QA revoked Screen Recording and watched the row stay green for over forty seconds
+ * while capture was already failing with a TCC denial — so the answer those calls give a running
+ * process does not track a revocation, and no polling interval will fix that.
+ *
+ * A failed operation does track it. When the helper refuses for want of a permission, that is
+ * the operating system speaking about this process right now, and the row is corrected from it
+ * immediately. Nothing is inferred in the other direction: a success does not restore a row,
+ * because macOS caches a grant for the life of a process and a stale success would say the
+ * permission is back when only the cache is.
+ */
+function notePermissionRefusal(code: string): void {
+  const current = macOSDesktopAccess;
+  if (!current) return;
+  if (code === 'SCREEN_PERMISSION_REQUIRED' && current.screen !== 'missing') {
+    publishMacOSDesktopAccess({ ...current, screen: 'missing' });
+  } else if (code === 'ACCESSIBILITY_PERMISSION_REQUIRED' && current.accessibility !== 'missing') {
+    publishMacOSDesktopAccess({ ...current, accessibility: 'missing' });
+  }
+}
+
 function protocolFailure(reply: Record<string, any>): ComputerError | null {
   if (reply['ok'] !== false) return null;
+  notePermissionRefusal(String(reply['error_code'] ?? ''));
   const completed = Number(reply['completed_count']);
   const failed = Number(reply['failed_index']);
   const completedRoutes = completedHelperRoutes(reply, completed);
