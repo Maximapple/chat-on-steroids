@@ -9,9 +9,29 @@ what is worth doing by hand.
 
 ---
 
-You are picking up work on this repository on a Mac. The branch is
-`integrate/browser-and-desktop-064733`. Everything checkable on Windows has been checked:
-`verify:ci` is green (1910 passed, 22 skipped), the browser driver scores 23/23 against real
+You are picking up work on a Mac. Everything you need is in one repository, and you may not have
+it yet — so start by making sure you do. Run this first, and if the directory already exists just
+fetch and check out the branch instead of cloning again:
+
+```sh
+# Clone if it is not there; otherwise just update what is.
+git clone https://github.com/Maximapple/chat-on-steroids.git ~/chat-on-steroids
+cd ~/chat-on-steroids
+git fetch origin
+git checkout integrate/browser-and-desktop-064733
+git pull --ff-only
+npm ci
+```
+
+If the clone fails because the directory already exists, that is fine — skip that one line and
+run the rest.
+
+Every file named below is a path inside that clone. Nothing here is fetched from anywhere else,
+and no step needs a URL.
+
+The branch is `integrate/browser-and-desktop-064733`. Everything checkable on Windows has been
+checked:
+`verify:ci` is green (1922 passed, 22 skipped), the browser driver scores 23/23 against real
 Chrome 152 and against Edge, and all six release platforms build. Two things could never be
 checked from there, and this machine is the only place they can be.
 
@@ -21,8 +41,8 @@ to ChatGPT's own, in case that comes up.
 
 ## What to run
 
-1. `npm ci`, then `npm run verify:ci`. It should be green. If it is not, that is a real finding —
-   it has never been run on macOS.
+1. `npm run verify:ci`. It should be green. If it is not, that is a real finding — it has never
+   been run on macOS.
 
 2. `npm run verify:browser`. This drives a real browser against a real page and asserts 23 things,
    among them that a click arrives with `isTrusted: true`, that the same holds inside an iframe,
