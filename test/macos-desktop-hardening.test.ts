@@ -86,9 +86,11 @@ describe('macOS desktop safety hardening', () => {
     expect(swift).toContain('if globalShortcut { event.post(tap: .cghidEventTap) }');
     expect(swift).toContain('UI_ACTION_DISABLED');
     expect(swift).toContain('the referenced accessibility control is disabled');
-    // An explicit AXEnabled=false refuses every action, and silence still refuses a click.
+    // An explicit AXEnabled=false refuses every action. Silence defers to whether the value
+    // can be written, which is the same evidence for a click as for a write — see the dedicated
+    // test below for why the click half had to change.
     expect(swift).toContain('let enabled = axOptionalBool(element, kAXEnabledAttribute as CFString)');
-    expect(swift).toContain(': (enabled ?? false)');
+    expect(swift).toContain('let permitted = enabled ?? axValueIsSettable(element)');
     expect(swift).toContain('["volumeup", "volumedown", "mute"]');
     expect(swift).toContain('(1...20).contains(value)');
   });
@@ -322,12 +324,15 @@ describe('macOS desktop safety hardening', () => {
    * explicit AXEnabled=false still refuses everything: a control that says it is disabled is
    * disabled whatever it reports about settability.
    */
-  it('lets a settable value speak for a control that publishes no AXEnabled', () => {
+  it('lets a settable value speak for a control that publishes no AXEnabled, for click as well as write', () => {
     expect(swift).toContain('private func axOptionalBool');
     expect(swift).toContain('private func axValueIsSettable');
-    expect(swift).toContain(
-      'let permitted = action == "set_value" ? (enabled ?? axValueIsSettable(element)) : (enabled ?? false)'
-    );
+    // The same evidence now answers for a click. QA found the other half of the defect: the
+    // very TextArea this fix made writable was still refused for click_ref, while a coordinate
+    // click focused it and typing worked. Silence alone still refuses — no AXEnabled and no
+    // settable value gets nothing — but silence next to a settable value is not a refusal.
+    expect(swift).toContain('let permitted = enabled ?? axValueIsSettable(element)');
+    expect(swift).not.toContain('(enabled ?? false)');
     // Read once, before the branch, so the refusal cannot disagree with the write below it.
     expect(swift).toMatch(
       /let enabled = axOptionalBool\(element, kAXEnabledAttribute as CFString\)[\s\S]*guard permitted else \{[\s\S]*UI_ACTION_DISABLED/

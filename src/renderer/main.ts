@@ -415,9 +415,15 @@ function paintDesktopPermissions(next: AppState): boolean {
       : `${granted} of ${wanted} granted. macOS asks for these one at a time, and each is a ` +
         'different pane in System Settings. Open a pane, switch Chat On Steroids on, and come ' +
         'back — this list updates on its own.';
-  // The restart note only earns its space once something has actually been granted elsewhere
-  // and this process still cannot see it.
-  $('permRestart').hidden = granted === wanted;
+  // The restart note only earns its space where a restart is actually the remedy.
+  //
+  // It used to appear whenever anything was outstanding, including a permission nobody has ever
+  // been asked for — and then it said "to pick up what you just granted" about something the
+  // user had not granted. A refused permission is the case that matters: that is what a stale
+  // TCC answer looks like from inside a running process after the setting was changed. A
+  // permission still at not-determined needs granting, not restarting, and saying otherwise
+  // sends someone to quit an app instead of ticking the box in front of them.
+  $('permRestart').hidden = !rows.some((row) => row.dataset.state === 'missing');
   return granted === wanted;
 }
 
@@ -1040,6 +1046,11 @@ function apply(next: AppState): void {
   const expand = $<HTMLButtonElement>('wizExpand');
   expand.hidden = !allDone;
   expand.textContent = showAllSteps ? 'Hide finished steps' : 'Show all steps';
+  // The label already says which way it goes, but a label is prose. aria-expanded is the state
+  // itself, which is what an assistive client — or an automation harness driving this app
+  // through accessibility — reads to know whether pressing it did anything. QA pressed this
+  // button, was told the press succeeded, and had no way to tell that nothing had changed.
+  expand.setAttribute('aria-expanded', showAllSteps ? 'true' : 'false');
 
   const needsBinary = config.tunnel.kind !== 'manual';
   $('binaryState').textContent = !needsBinary

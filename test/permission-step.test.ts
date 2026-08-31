@@ -99,7 +99,9 @@ function paint(access: Access | null, needs: { screen: boolean; accessibility: b
       : `${granted} of ${wanted} granted. macOS asks for these one at a time, and each is a ` +
         'different pane in System Settings. Open a pane, switch Chat On Steroids on, and come ' +
         'back — this list updates on its own.';
-  (document.getElementById('permRestart') as HTMLElement).hidden = granted === wanted;
+  (document.getElementById('permRestart') as HTMLElement).hidden = !rows.some(
+    (row) => row.dataset.state === 'missing'
+  );
   return granted === wanted;
 }
 
@@ -195,11 +197,26 @@ describe('when the step is finished', () => {
    * runs stays invisible to it. That is the single most common reason someone grants everything
    * and is still refused, so the note is shown exactly while something is outstanding.
    */
-  it('shows the restart note only while something is outstanding', () => {
+  /**
+   * The note tells someone to quit and reopen the app. That is only ever the remedy for one
+   * situation: the setting was changed in System Settings while this process was running, and
+   * macOS is still answering from its cached decision. A permission that has simply never been
+   * granted needs granting, and telling that person to restart sends them away from the box
+   * they should be ticking — QA saw the note claim they should "pick up what you just granted"
+   * about something nobody had granted.
+   */
+  it('offers a restart only where a restart is the remedy', () => {
+    // Refused: this is what a stale answer looks like from inside the process.
     paint({ screen: 'granted', accessibility: 'missing' }, { screen: true, accessibility: true });
     expect((document.getElementById('permRestart') as HTMLElement).hidden).toBe(false);
     expect(document.getElementById('permIntro')!.textContent).toContain('1 of 2 granted');
 
+    // Never asked: outstanding, but restarting changes nothing.
+    paint({ screen: 'granted', accessibility: 'not-determined' }, { screen: true, accessibility: true });
+    expect((document.getElementById('permRestart') as HTMLElement).hidden).toBe(true);
+    expect(document.getElementById('permIntro')!.textContent).toContain('1 of 2 granted');
+
+    // Nothing outstanding at all.
     paint({ screen: 'granted', accessibility: 'granted' }, { screen: true, accessibility: true });
     expect((document.getElementById('permRestart') as HTMLElement).hidden).toBe(true);
     expect(document.getElementById('permIntro')!.textContent).toContain('has been granted');

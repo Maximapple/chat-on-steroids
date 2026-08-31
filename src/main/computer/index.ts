@@ -1747,12 +1747,23 @@ async function actLocked(
     throw new ComputerError('The desktop helper returned an invalid pointer position.');
   }
   const current = requestedFrame ?? lastFrame;
-  const image = current
+  // Only when it is actually in the picture.
+  //
+  // The conversion is arithmetic and answers for any point on the desktop, including points the
+  // frame does not contain — so a pointer below a captured window produced "875,754" for an
+  // image 646 tall, a coordinate that cannot exist. QA caught it, and a caller reading that as
+  // an image position would address a pixel that is not there. Outside the frame, there is no
+  // image coordinate to give; `screen` still says exactly where the pointer is.
+  const inFrame = current
     ? {
         x: Math.round((sx - current.region.x) * current.scale),
         y: Math.round((sy - current.region.y) * current.scale)
       }
     : null;
+  const image =
+    inFrame && current && inFrame.x >= 0 && inFrame.y >= 0 && inFrame.x < current.width && inFrame.y < current.height
+      ? inFrame
+      : null;
   return {
     cursor: {
       screen: { x: sx, y: sy },

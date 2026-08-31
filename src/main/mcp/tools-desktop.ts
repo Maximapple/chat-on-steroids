@@ -574,7 +574,9 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
           const pointer = cursor
             ? cursor.image
               ? `Pointer image: ${cursor.image.x},${cursor.image.y} (frame ${cursor.frameId}, ${cursor.imageSize?.width}x${cursor.imageSize?.height}); desktop: ${cursor.screen.x},${cursor.screen.y}.`
-              : `Pointer desktop: ${cursor.screen.x},${cursor.screen.y}. No screenshot frame is active.`
+              : cursor.frameId === null
+                ? `Pointer desktop: ${cursor.screen.x},${cursor.screen.y}. No screenshot frame is active.`
+                : `Pointer desktop: ${cursor.screen.x},${cursor.screen.y}. It is outside frame ${cursor.frameId}, so it has no position in that image.`
             : 'Pointer position was not queried because this batch used only local wait/clipboard actions.';
           // Clipboard reads are the one action that returns something, so they are quoted
           // back in order rather than folded into the "Done:" line.
