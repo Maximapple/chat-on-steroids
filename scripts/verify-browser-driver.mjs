@@ -103,6 +103,8 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Driver fixture</title>
 <div id="draglog">no drag</div>
 <div id="wheellog">no wheel</div>
 <iframe id="frame" src="/frame" style="width:320px;height:80px;border:1px solid #ccc"></iframe>
+<!-- Last, so the page can scroll without pushing anything above it out of the viewport. -->
+<div id="tall" style="height:3000px">room to scroll</div>
 <script>
 document.getElementById('go').addEventListener('click', (e) => {
   document.getElementById('log').textContent = 'clicked trusted=' + e.isTrusted;
@@ -389,6 +391,26 @@ try {
   await sleep(400);
   const typedLog = await readPage(`document.getElementById('log').textContent`);
   check('the field fired real input events', typedLog === 'typed:Maxim', typedLog);
+
+  /*
+   * Replacing, not appending — and then clearing.
+   *
+   * QA set a field holding "OLD TEXT" to "ONLY NEW" and got "OLD TEXTONLY NEW", then set it to
+   * empty and watched the old contents survive. Both are the same missing selection: the
+   * modifier described a keystroke and left the browser to decide what it meant. The earlier
+   * check here started from an empty field, so it could never see either.
+   */
+  await act({ type: 'set_value', ref: refFor('Your name'), text: 'OLD TEXT' });
+  await sleep(300);
+  await act({ type: 'set_value', ref: refFor('Your name'), text: 'ONLY NEW' });
+  await sleep(300);
+  const replaced = await readPage(`document.getElementById('name').value`);
+  check('set_value replaces what a field already holds', replaced === 'ONLY NEW', String(replaced));
+
+  await act({ type: 'set_value', ref: refFor('Your name'), text: '' });
+  await sleep(300);
+  const cleared = await readPage(`document.getElementById('name').value`);
+  check('an empty set_value empties the field', cleared === '', JSON.stringify(cleared));
 
   const innerRef = refFor('Inside the frame');
   if (innerRef) await act({ type: 'click_ref', ref: innerRef });

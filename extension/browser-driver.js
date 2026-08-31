@@ -684,6 +684,20 @@ export function requestBrowserPermissions() {
   return askPermissions('request');
 }
 
+/** Where the page is scrolled to, or null when it cannot be read. */
+async function readScrollPosition(send) {
+  try {
+    const reply = await send('Runtime.evaluate', {
+      expression: '({ x: Math.round(scrollX), y: Math.round(scrollY) })',
+      returnByValue: true
+    });
+    const value = reply?.result?.value;
+    return value && typeof value.x === 'number' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 export const browserDriver = {
   /** What is under control right now, for the popup, the app and the stop button. */
   status() {
@@ -872,14 +886,22 @@ export const browserDriver = {
         // Writing `value` directly through the DOM skips the input events a page listens for,
         // so a framework-backed field would look changed and behave as if it never was.
         await this.act({ type: 'click', x: at.x, y: at.y });
+        // `commands` rather than a modifier, because a modifier only describes the keystroke and
+        // leaves the browser to decide what it means. QA measured what that costs: set_value on
+        // a field holding "OLD TEXT" produced "OLD TEXTONLY NEW" — nothing was selected, so the
+        // insert appended. This names the editing command outright, which is platform-independent
+        // and does not depend on Cmd versus Ctrl being interpreted the way the page expects.
         await send('Input.dispatchKeyEvent', {
-          type: 'keyDown', modifiers: SELECT_ALL_MODIFIER, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65
+          type: 'rawKeyDown', modifiers: SELECT_ALL_MODIFIER, key: 'a', code: 'KeyA',
+          windowsVirtualKeyCode: 65, commands: ['selectAll']
         });
         await send('Input.dispatchKeyEvent', {
           type: 'keyUp', modifiers: SELECT_ALL_MODIFIER, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65
         });
         const text = String(action.text ?? '');
         // insertText with empty text is a no-op, so an intentional clear needs a real delete.
+        // With the whole value selected, one delete removes it — and QA found an empty set_value
+        // reporting ok while the field kept its contents, which is the same missing selection.
         if (text) await send('Input.insertText', { text });
         else {
           await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
@@ -942,17 +964,42 @@ export const browserDriver = {
         const x = Number(action.x ?? 0);
         const y = Number(action.y ?? 0);
         await movePointer(x, y);
-        await send('Input.dispatchMouseEvent', {
-          type: 'mouseWheel', x, y, modifiers,
-          // CDP's mouseWheel carries the DOM wheel convention, where a positive deltaY scrolls
-          // down. That is the caller's convention too, so the numbers pass through unchanged.
-          // They used to be negated, on the reasoning that applies to CoreGraphics' wheel API —
-          // where the sign really is inverted, and where the macOS helper still negates — but
-          // that reasoning was carried to the wrong protocol and scrolled every page backwards.
-          deltaX: Number(action.scroll_x ?? 0),
-          deltaY: Number(action.scroll_y ?? 0)
-        }, COMPOSITOR_TIMEOUT_MS);
-        return { scrolled: { x, y } };
+        /*
+         * Sent, then judged by whether the page moved — not by whether the protocol answered.
+         *
+         * A wheel event is acknowledged only once the compositor has taken it, and it sometimes
+         * never is: QA hit `Input.dispatchMouseEvent did not answer within 30000 ms` twice in a
+         * real browser on a real page, so scrolling reported failure for an action that was
+         * delivered. Headless never acknowledges one at all. The acknowledgement is a property
+         * of the compositor, not of the scroll.
+         *
+         * So: read the position, send, and look again. A page that moved scrolled, whatever the
+         * protocol said. A page that did not move and did not answer is reported as a timeout,
+         * because then nothing is known.
+         */
+        const before = await readScrollPosition(send);
+        let acknowledged = true;
+        try {
+          await send('Input.dispatchMouseEvent', {
+            type: 'mouseWheel', x, y, modifiers,
+            // CDP's mouseWheel carries the DOM wheel convention, where a positive deltaY scrolls
+            // down. That is the caller's convention too, so the numbers pass through unchanged.
+            // They used to be negated, on the reasoning that applies to CoreGraphics' wheel API —
+            // where the sign really is inverted, and where the macOS helper still negates — but
+            // that reasoning was carried to the wrong protocol and scrolled every page backwards.
+            deltaX: Number(action.scroll_x ?? 0),
+            deltaY: Number(action.scroll_y ?? 0)
+          }, COMPOSITOR_TIMEOUT_MS);
+        } catch (error) {
+          if (error?.code !== 'BROWSER_TIMEOUT') throw error;
+          acknowledged = false;
+        }
+        const after = await readScrollPosition(send);
+        const moved = after !== null && before !== null && (after.x !== before.x || after.y !== before.y);
+        if (!acknowledged && !moved) {
+          throw fail('BROWSER_TIMEOUT', 'the wheel event was neither acknowledged nor did the page move');
+        }
+        return { scrolled: { x, y }, moved, acknowledged };
       }
 
       case 'type': {
