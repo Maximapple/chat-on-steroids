@@ -5010,6 +5010,67 @@
       .catch(() => undefined);
   }
 
+  /** Browser commands already carried, so a re-poll cannot run one twice. */
+  const carriedBrowserCommands = new Set();
+
+  /**
+   * Hands one browser action to the service worker and reports what came back.
+   *
+   * The worker owns the DevTools session because only it can; this page owns nothing here
+   * except the delivery. The result is posted back through the worker as well, since the
+   * pairing token lives there and never in a content script.
+   *
+   * Failure is still an answer. A worker that refuses, throws, or is not there at all has to
+   * settle the command, or the tool call waiting on it sits until it times out with nothing
+   * to explain why.
+   */
+  async function carryBrowserCommand(forConversation, command) {
+    const id = typeof command.id === 'string' ? command.id : '';
+    if (!id || carriedBrowserCommands.has(id)) return;
+    carriedBrowserCommands.add(id);
+    // Bounded: one id per command and commands are one-at-a-time, so this cannot grow, but a
+    // long-lived page should not accumulate them either.
+    if (carriedBrowserCommands.size > 64) {
+      for (const old of carriedBrowserCommands) {
+        carriedBrowserCommands.delete(old);
+        if (carriedBrowserCommands.size <= 32) break;
+      }
+    }
+
+    const action = command.action && typeof command.action === 'object' ? command.action : {};
+    const type = String(action.type || '');
+    let reply;
+    try {
+      if (type === 'observe') {
+        reply = await ask({ type: 'browser_observe', includeScreenshot: action.screenshot !== false });
+      } else if (type === 'attach') {
+        reply = await ask({ type: 'browser_attach', tabId: action.tabId });
+      } else if (type === 'detach') {
+        reply = await ask({ type: 'browser_detach' });
+      } else if (type === 'status') {
+        reply = await ask({ type: 'browser_status' });
+      } else {
+        reply = await ask({ type: 'browser_act', action });
+      }
+    } catch (error) {
+      reply = { ok: false, error: 'BROWSER_UNAVAILABLE', detail: String((error && error.message) || error) };
+    }
+    if (!reply || typeof reply !== 'object') {
+      reply = { ok: false, error: 'BROWSER_UNAVAILABLE', detail: 'the extension worker did not answer' };
+    }
+
+    const { ok, error, detail, ...rest } = reply;
+    await ask({
+      type: 'browser_result',
+      conversationId: forConversation,
+      id,
+      ok: ok === true,
+      data: ok === true ? (rest.result && typeof rest.result === 'object' ? rest.result : rest) : undefined,
+      error: typeof error === 'string' ? error : undefined,
+      detail: typeof detail === 'string' ? detail : undefined
+    }).catch(() => undefined);
+  }
+
   async function pullActivity() {
     if (!CLF_DOM.conversationId()) {
       // A New Chat has no feed: /activity is addressed by conversation, and this composer is
@@ -5204,6 +5265,13 @@
       goalConfig = data.goal && typeof data.goal === 'object' ? data.goal : null;
       if (goalConfig) goalDraft = goalConfig.draft || null;
       bootstrap = data.bootstrap === 'resume' || data.bootstrap === 'worker' ? data.bootstrap : null;
+      // One browser action, if the app has one waiting for this conversation. This page is
+      // only the courier: it cannot hold a DevTools session and must never try. Deliberately
+      // not awaited — a browser action can take seconds, and blocking the activity pull on it
+      // would stall the recorder, the relabeller and the wait status for the whole time.
+      if (data.browserCommand && typeof data.browserCommand === 'object') {
+        void carryBrowserCommand(conversationId, data.browserCommand);
+      }
       if (job && job.busy) pressedAt = 0;
       // The local phase describes this tab's part of a native compaction, which is over
       // the moment the app's job has moved past waiting for the handoff. Leaving it set

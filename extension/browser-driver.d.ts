@@ -40,6 +40,8 @@ export interface BrowserSessionStatus {
 }
 
 export interface BrowserElement {
+  /** Name this in a ref action; only the newest observation's refs are addressable. */
+  ref: string;
   role: string;
   name: string;
   value: string;
@@ -73,7 +75,9 @@ export type BrowserAction =
   | { type: 'scroll'; x: number; y: number; scroll_x?: number; scroll_y?: number; modifiers?: string[] }
   | { type: 'type'; text: string }
   | { type: 'keypress'; keys: string[]; modifiers?: string[] }
-  | { type: 'wait'; ms?: number };
+  | { type: 'wait'; ms?: number }
+  | { type: 'click_ref'; ref: string; button?: string }
+  | { type: 'set_value'; ref: string; text: string };
 
 export declare const browserDriver: {
   status(): BrowserSessionStatus;
@@ -81,6 +85,8 @@ export declare const browserDriver: {
   detach(): Promise<BrowserSessionStatus>;
   forget(tabId: number): void;
   act(action: BrowserAction): Promise<Record<string, unknown>>;
+  /** Where a ref points now — refused rather than guessed when the element has gone. */
+  resolveRef(ref: string): Promise<{ x: number; y: number }>;
   observe(options?: { includeScreenshot?: boolean }): Promise<BrowserObservation>;
 };
 

@@ -313,6 +313,30 @@ export const COLLECT_SOURCE = `(() => {
     '[role=combobox]', '[role=searchbox]', '[contenteditable=""]', '[contenteditable=true]'
   ].join(',');
   const seen = [];
+  /**
+   * A path that finds this element again later.
+   *
+   * Coordinates go stale the moment the page scrolls or reflows, and a click on a stale
+   * coordinate does not fail — it hits whatever moved into that spot, which is the worst
+   * possible outcome. Re-resolving from the document at action time turns that into an honest
+   * refusal instead. An id is used when the page provides one; otherwise a child-index chain,
+   * which is stable enough for the moments between an observation and the action on it.
+   */
+  const pathOf = (el) => {
+    if (el.id && document.querySelectorAll('#' + CSS.escape(el.id)).length === 1) {
+      return '#' + CSS.escape(el.id);
+    }
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === 1 && node !== document.documentElement && parts.length < 24) {
+      const parent = node.parentElement;
+      if (!parent) break;
+      const index = Array.prototype.indexOf.call(parent.children, node) + 1;
+      parts.unshift(node.tagName.toLowerCase() + ':nth-child(' + index + ')');
+      node = parent;
+    }
+    return parts.length > 0 ? 'html > body ' + parts.slice(1).map((p) => '> ' + p).join(' ') : '';
+  };
   const name = (el) => {
     const label = el.getAttribute('aria-label');
     if (label) return label.trim();
@@ -361,6 +385,8 @@ export const COLLECT_SOURCE = `(() => {
     if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) continue;
     if (el.getAttribute('aria-hidden') === 'true') continue;
     seen.push({
+      ref: 'e' + seen.length,
+      path: pathOf(el),
       role: role(el),
       name: name(el).slice(0, 160),
       value: 'value' in el && typeof el.value === 'string' ? String(el.value).slice(0, 160) : '',
@@ -550,6 +576,44 @@ export const browserDriver = {
     if (session && session.tabId === tabId) session = null;
   },
 
+  /**
+   * Where a ref points *now*, not where it pointed when it was observed.
+   *
+   * A coordinate from an earlier observation does not fail when the page has scrolled or
+   * reflowed — it hits whatever moved into that spot, which is worse than any error. So a ref
+   * is re-resolved from the document immediately before it is used, and an element that is
+   * gone, hidden or off-screen produces a refusal instead of a click somewhere else.
+   */
+  async resolveRef(ref) {
+    const path = session?.refs?.get(String(ref));
+    if (!path) {
+      throw fail('BROWSER_BAD_REF', `${ref} is not from the most recent observation of this page`);
+    }
+    const contextId = await isolatedContext();
+    const { result, exceptionDetails } = await send('Runtime.evaluate', {
+      expression: `(() => {
+        const el = document.querySelector(${JSON.stringify(path)});
+        if (!el) return JSON.stringify({ found: false });
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        const usable = r.width >= 1 && r.height >= 1 && r.bottom > 0 && r.right > 0 &&
+          r.top < innerHeight && r.left < innerWidth &&
+          s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) !== 0;
+        return JSON.stringify({
+          found: true, usable,
+          x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2)
+        });
+      })()`,
+      contextId,
+      returnByValue: true
+    });
+    if (exceptionDetails) throw fail('BROWSER_BAD_REF', `${ref} could not be resolved on this page`);
+    const found = JSON.parse(String(result?.value ?? '{}'));
+    if (!found.found) throw fail('BROWSER_BAD_REF', `${ref} is no longer on this page`);
+    if (!found.usable) throw fail('BROWSER_BAD_REF', `${ref} is on the page but not visible or reachable`);
+    return { x: found.x, y: found.y };
+  },
+
   async act(action) {
     if (!session) throw fail('BROWSER_NOT_ATTACHED', 'no tab is under browser control');
     const type = String(action?.type ?? '');
@@ -579,6 +643,32 @@ export const browserDriver = {
       case 'reload':
         await send('Page.reload', {}, NAVIGATE_TIMEOUT_MS);
         return { reloaded: true };
+
+      case 'click_ref': {
+        const at = await this.resolveRef(action.ref);
+        return this.act({ ...action, type: 'click', x: at.x, y: at.y });
+      }
+      case 'set_value': {
+        const at = await this.resolveRef(action.ref);
+        // Focus by clicking where the control actually is, select everything, then insert.
+        // Writing `value` directly through the DOM skips the input events a page listens for,
+        // so a framework-backed field would look changed and behave as if it never was.
+        await this.act({ type: 'click', x: at.x, y: at.y });
+        await send('Input.dispatchKeyEvent', {
+          type: 'keyDown', modifiers: 4, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65
+        });
+        await send('Input.dispatchKeyEvent', {
+          type: 'keyUp', modifiers: 4, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65
+        });
+        const text = String(action.text ?? '');
+        // insertText with empty text is a no-op, so an intentional clear needs a real delete.
+        if (text) await send('Input.insertText', { text });
+        else {
+          await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
+          await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
+        }
+        return { set: action.ref, length: text.length };
+      }
 
       case 'move':
         await movePointer(action.x, action.y);
@@ -699,6 +789,9 @@ export const browserDriver = {
     session.url = tab.url ?? session.url;
     session.title = tab.title ?? session.title;
     const page = await collectElements();
+    // Only the newest observation's refs are addressable. Keeping older ones alive would let
+    // a ref from three pages ago resolve against whatever happens to match now.
+    session.refs = new Map((page.elements ?? []).map((element) => [element.ref, element.path]));
     const view = await viewport();
     const shot = includeScreenshot ? await screenshot() : null;
     return {
@@ -708,7 +801,8 @@ export const browserDriver = {
       viewport: view,
       scrollY: page.scrollY,
       scrollHeight: page.scrollHeight,
-      elements: page.elements ?? [],
+      // The path is how a ref is resolved, not something the model should reason about.
+      elements: (page.elements ?? []).map(({ path, ...element }) => element),
       screenshot: shot
     };
   }
