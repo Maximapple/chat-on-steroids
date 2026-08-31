@@ -211,7 +211,13 @@ describe('startup survives a step that throws', () => {
     // The recovery is skipped when the control plane is already up, and when the window was
     // deliberately disabled — a second instance must not start a bridge behind the primary.
     expect(main).toMatch(/if \(startedControlPlane \|\| windowActivation\.isDisabled\(\)\) return;/);
-    expect(main).toMatch(/\.catch\(\(error: unknown\)[\s\S]*void startBridge\(\)[\s\S]*void connect\(\)/);
+    expect(main).toMatch(/\.catch\(\(error: unknown\)[\s\S]*void startBridge\(\)[\s\S]*autoConnect\(\)/);
+    // And connect's own failure is no longer discarded: `void connect()` threw its rejection
+    // away, which is how a restart with a revoked permission left both connectors answering
+    // tunnel_client_not_connected with nothing anywhere saying why.
+    expect(main).toContain('function autoConnect(): void {');
+    expect(main).toMatch(/void connect\(\)\.catch\(\(error: unknown\) => \{[\s\S]{0,200}automatic connect failed/);
+    expect(main).not.toMatch(/if \(getConfig\(\)\.ui\.autoConnect\) void connect\(\);/);
   });
 });
 
