@@ -290,14 +290,54 @@ window, report the run as inconclusive rather than failed.
 - The pointer in a window screenshot (runbook §1) — **PASSED**, see above, verified in the image.
 - The onboarding permission step: timing, deep-link targets, live refresh, both themes
   (runbook §2) — **untested**, needs a real desktop and the app itself.
-- QA cases 6.9, 6.3, 6.2, 6.4 and Test 5, Chrome's link-preview bubble versus foreground-window
-  resolution (runbook §3) — **untested**.
+- QA cases 6.9, 6.3, 6.2, 6.4 (runbook §3) — **untested** here.
+- Test 5, Chrome's link-preview bubble versus foreground-window resolution — **not untested: it
+  FAILS**, on a stale build. See the cross-check below.
 - `docs/qa/chatgpt-desktop-qa-prompt.md`, the 32-check model → MCP → app → macOS script —
   **not run**; it cannot be driven from a terminal session.
 
 Note that §1 was exercised here through the **probe**, against a Terminal window. The runbook's
 own procedure drives it through the installed app and its Activity panel, which additionally
 covers the app's TCC handling and its logging. That variant is still unrun.
+
+## Cross-check against the release report in this folder
+
+`chat-on-steroids-release-qa-5709d323.md` landed in this folder during the same session. It is a
+full release pass against the **installed app**, and it recommends **HOLD** on one remaining
+release blocker: `Test 5 — Foreground-Window Freshness, FAIL — P2`. Chrome's link-preview bubble
+and its omnibox popup leave Desktop reporting `No foreground window` while Chrome is plainly
+frontmost, and legitimate actions are then blocked with `FOCUS_FAILED`.
+
+That report's own status block gives the build it tested: `5709d323`, verified by comparing the
+installed bundle byte-for-byte against the SHA-named DMG. Placing that commit in this branch:
+
+```
+5709d323  Sun Aug 30 22:05:55 2026  Let a settable value speak for a control with no AXEnabled
+a5565df   Sun Aug 30 23:38:03 2026  Resolve one app's transient child windows, and draw the
+                                    pointer everywhere
+```
+
+`5709d323` is an **ancestor** of `a5565df`, and of this branch's head — 34 commits behind it. So
+the tested build predates `a5565df` by 93 minutes, and `a5565df` is a fix for precisely this
+defect. It describes the same evidence the report gathered independently: the link-preview bubble
+at **175x22 at the screen edge** (the report logs `bounds: -1,1014 175x22`), the omnibox popup
+after it, `foregroundWindowID` reading a transient child above the focused window as an app
+transition in flight and exposing nothing, and `focusWindow` then polling for a condition it
+could not satisfy until the bubble went away — which is the `FOCUS_FAILED` the report hit.
+
+**This does not mean the P2 is fixed.** It means the HOLD is recorded against a build that could
+not have contained its own fix, so the finding cannot be actioned as it stands, and the fix has
+never been exercised against the app on this machine. Deciding otherwise from the commit message
+would be the precise mistake this folder's README warns about — the pointer path was declared
+fixed once on the strength of code that read correctly.
+
+What would settle it: build from this branch's head, install, and re-run that report's §9.2
+Fall A and Fall B — hover a link until the bubble appears, then ask which window is in front,
+and repeat with the omnibox popup open. Runbook §3's Test 5 is the same check.
+
+Nothing in the automated work recorded above touches that code path. The two script changes are
+harness-only and the helper probe exercises capture and the pointer compositor, not
+foreground-window resolution.
 
 ## Documentation drift noticed
 
