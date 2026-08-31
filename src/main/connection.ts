@@ -145,7 +145,15 @@ function toolsFor(id: SurfaceId): string[] {
   const caps = effectiveCapabilities(config);
   if (id === 'desktop') {
     const computer = caps.control || caps.clipboardRead || caps.clipboardWrite;
-    return [...(caps.screen ? ['observe'] : []), ...(computer ? ['computer'] : [])];
+    // `browser` was added to this surface and never added here, so the app undercounted its own
+    // tools — "9 total" where the server serves ten. It gates on control exactly as the
+    // registration does, and getting the two out of step is how a display disagrees with a
+    // server about what exists.
+    return [
+      ...(caps.screen ? ['observe'] : []),
+      ...(computer ? ['computer'] : []),
+      ...(caps.control ? ['browser'] : [])
+    ];
   }
   const tools: string[] = [];
   if (caps.read || caps.browse || caps.metadata) tools.push('read');
