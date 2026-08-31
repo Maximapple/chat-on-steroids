@@ -27,43 +27,45 @@ to you as MCP apps. Work through every section below in order.
 
 ## Before anything else: confirm this is the right build
 
-The previous run scored 24 pass, 3 fail, 11 skipped — and its whole priority section was
-unreachable because the app under test predated the feature it was there to exercise. Nothing on
-screen could reveal that at the time. It can now, and this is the first thing to establish.
-
 Ask the user for the **window title** of Chat On Steroids. It must read:
 
 ```
 Chat On Steroids 2.0.2+<commit>
 ```
 
-A title showing only `2.0.2`, with no commit, is an older build: **stop and say so**, because
-every result after that measures the wrong application. This costs one question and saves a run.
+with the commit matching the package they installed. A title without a commit is an older build:
+**stop and say so**, because everything after it measures the wrong application. One question,
+and it saves a run — an earlier one lost its whole priority section to exactly this.
 
 ## What changed since the previous run
 
-Everything the last run found has been addressed, so the checks below verify fixes rather than
-explore. For each check, say whether it differs from last time.
+The last run scored 30 pass, 7 fail, 1 skipped, and reached section E for the first time. Every
+one of its seven failures has been addressed. Say for each check whether it differs from last
+time, and treat the seven below as the point of this run.
 
-- **Browser control could not be switched on at all**, so sections E (18–25) and checks 33–34
-  have never once executed. Chrome refuses `debugger` as an optional permission; it is required
-  now. **That makes E the priority of this run.** If the toggle still will not stay on, the popup
-  states the reason underneath it — quote it verbatim.
-- **The `browser` tool was missing from the connector.** Use a *new* chat: one that is already
-  open keeps the tool list it loaded. If `browser` is still absent, have the user open **Home →
-  Health → Run checks** and read back the **Local server** line — it names every tool served, and
-  now also says *why* `browser` is missing when it is.
-- **Drag reported success while moving nothing** (check 15) — failed in both previous runs, once
-  intermittently. The input is paced now: held, travelled continuously, dwelt on before release.
-  Retry it if the first attempt works, since the defect was that a retry could succeed where the
-  first silently did not.
-- **A revoked permission went unnoticed until restart** (checks 28 and 35), and the restart note
-  appeared for permissions nobody had granted.
-- **`No foreground window` while an app was plainly active.** Two independent causes, both fixed:
-  a transient child window winning z-order, and the helper never seeing applications launched
-  after it started.
-- **Scrolling ran backwards and `set_value` appended instead of replacing** in the browser
-  driver — checks 33 and 34, never yet executed.
+- **15, drag with no effect.** Measured separately on the same machine: driving the helper
+  directly moved the file 6 times out of 6, and an ablation showed interpolation is the one thing
+  that matters. The suspicion is that the app's long-lived helper had gone blind to a Finder
+  window opened after it started — a separate defect, now fixed. Retry even if the first attempt
+  works, since the original failure was a first attempt that silently did nothing.
+- **25, detach could not be done.** The tool offered no way to release a tab at all; the driver
+  always could and only the schema never listed it. `detach` and `status` are actions now. Use
+  the browser tool, not the extension popup — clicking the popup with desktop automation is what
+  produced the false success last time.
+- **33, browser scroll timed out.** A wheel event is acknowledged only when the compositor takes
+  it, which sometimes never happens. Scrolling is judged by whether the page moved.
+- **34, set_value appended instead of replacing.** It named a keystroke and left the browser to
+  interpret it; it names the editing command now. Measured in a real browser: a field holding
+  "OLD TEXT" set to "ONLY NEW" contains exactly "ONLY NEW", and an empty value empties it.
+- **35, a revoked permission went unnoticed for 40 seconds.** The detection was never broken —
+  107 sample points show the backend flips in the same instant. The row was polled every 30
+  seconds. It is 6 now.
+- **36, a reset permission showed "Not allowed".** macOS answers both permission APIs with a
+  plain boolean and exposes nothing separating a refusal from never having been asked, so that
+  distinction is not implementable. The label says "Not granted", which is true either way.
+- **11, no foreground window while Chat On Steroids was itself in front.** Its own windows are
+  deliberately never exposed — the model must not drive the app driving it — and the answer now
+  says so instead of reporting an empty desktop.
 
 Do not skip a section because an earlier one failed — note the failure and continue, so the
 report covers everything.
