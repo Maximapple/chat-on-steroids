@@ -10259,7 +10259,15 @@ describe('the goal loop', () => {
     live.window.addEventListener('message', onAsk);
     try {
       stopGenerating(live.document);
-      await new Promise((resolve) => globalThis.setTimeout(resolve, 10));
+      // Wait for the ask, not for a duration. This used to be a flat 10 ms, which is a bet that
+      // the machine is fast: the same commit passed on the arm64 runner and failed on the x64 one
+      // in the same release build, scans still 0. Waiting on the condition keeps what the test
+      // proves — if the observer never requests the terminal Fiber reply, scans stays 0 and this
+      // gives up after roughly two seconds and fails exactly as before.
+      for (let round = 0; round < 200 && scans === 0; round++) {
+        await settle(50);
+        await new Promise((resolve) => globalThis.setTimeout(resolve, 10));
+      }
       await settle(1200);
     } finally {
       live.window.removeEventListener('message', onAsk);

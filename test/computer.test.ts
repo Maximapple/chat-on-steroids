@@ -95,7 +95,18 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('queries Windows UI Automation without requiring a screenshot', async () => {
-    const result = await findUi({ role: 'Button', maxResults: 5 });
+    // A cold, loaded build machine can spend longer walking the UI Automation tree than the
+    // product allows find_ui — eight seconds, plus ten while the helper is still starting. The
+    // same commit passed on the Windows arm64 runner and timed out on the x64 one within one
+    // release build, which is a statement about the machine, not the code. This test is about
+    // the shape of the answer, so it retries the timeout and only the timeout; anything else
+    // still fails immediately. Raising the product's budget to suit a build machine would make
+    // every real user wait longer for a list of controls.
+    const query = () => findUi({ role: 'Button', maxResults: 5 });
+    const result = await query().catch((error: unknown) => {
+      if (!/did not answer in time/i.test(String((error as Error)?.message ?? error))) throw error;
+      return query();
+    });
     expect(result.window).toBeGreaterThan(0);
     expect(Array.isArray(result.elements)).toBe(true);
     expect(result.elements.length).toBeLessThanOrEqual(5);
