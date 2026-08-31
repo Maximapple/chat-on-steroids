@@ -70,6 +70,18 @@ export const REFUSED_URLS = [
 const COMMAND_TIMEOUT_MS = 15_000;
 /** Navigation gets longer, but never unbounded. */
 const NAVIGATE_TIMEOUT_MS = 30_000;
+/**
+ * Two operations answer only once the renderer has composited, and get longer for it.
+ *
+ * `Page.captureScreenshot` replies when a frame is produced, and a wheel event is acknowledged
+ * after the compositor's input pipeline has taken it. Neither is a fixed cost: a tab that is
+ * not compositing — backgrounded, occluded, or simply idle with nothing animating — can take
+ * seconds, and both were measured taking longer than ten in a real browser run. Holding them
+ * to the ordinary command deadline turns "the page was quiet" into a failure, which is the
+ * opposite of what the caller asked about. Clicks and keystrokes are acknowledged directly and
+ * keep the ordinary deadline.
+ */
+const COMPOSITOR_TIMEOUT_MS = 30_000;
 /** Upper bound on elements one observation returns, so a huge page cannot flood the model. */
 const MAX_ELEMENTS = 200;
 
@@ -532,7 +544,7 @@ async function screenshot() {
     format: 'png',
     captureBeyondViewport: false,
     clip: { x: 0, y: 0, width, height, scale: 1 }
-  });
+  }, COMPOSITOR_TIMEOUT_MS);
   return { data, width, height };
 }
 
@@ -888,7 +900,7 @@ export const browserDriver = {
           // page content moves up; CDP's deltaY is the opposite sign.
           deltaX: -Number(action.scroll_x ?? 0),
           deltaY: -Number(action.scroll_y ?? 0)
-        });
+        }, COMPOSITOR_TIMEOUT_MS);
         return { scrolled: { x, y } };
       }
 

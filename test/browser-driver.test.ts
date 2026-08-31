@@ -101,6 +101,26 @@ describe('permissions are opt-in', () => {
     expect(BROWSER_PERMISSIONS.origins).toEqual(manifest.optional_host_permissions);
   });
 
+  /**
+   * A capture is not an ordinary command.
+   *
+   * `Page.captureScreenshot` answers when the renderer produces a frame, and a tab that is not
+   * compositing can take seconds to make one — measured at over ten in a real headless run.
+   * Holding it to the ordinary deadline turns "the page was quiet" into a failed observation.
+   */
+  it('gives the two compositor-bound operations their own deadline', () => {
+    const driver = readFileSync(path.join(process.cwd(), 'extension', 'browser-driver.js'), 'utf8');
+    expect(driver).toContain('const COMPOSITOR_TIMEOUT_MS = 30_000;');
+    // A capture answers when a frame is produced; a wheel event when the compositor has taken
+    // it. Both were measured stalling past ten seconds on an idle tab in a real browser.
+    expect(driver).toMatch(/Page\.captureScreenshot[\s\S]{0,220}COMPOSITOR_TIMEOUT_MS/);
+    expect(driver).toMatch(/type: 'mouseWheel'[\s\S]{0,320}COMPOSITOR_TIMEOUT_MS/);
+    // Clicks and keystrokes are acknowledged directly and keep the ordinary deadline, which
+    // still exists: an unbounded wait is how a stuck tab becomes a stuck tool call.
+    expect(driver).toContain('const COMMAND_TIMEOUT_MS = 15_000;');
+    expect(driver).not.toMatch(/type: 'mousePressed'[\s\S]{0,200}COMPOSITOR_TIMEOUT_MS/);
+  });
+
   it('names the driven tab group after the product so it is recognisable', () => {
     expect(DRIVEN_GROUP_TITLE).toBe('Chat On Steroids');
   });
@@ -226,9 +246,16 @@ describe('permissions are opt-in', () => {
   it('is required by the packaged-runtime smoke check', () => {
     const smoke = readFileSync(path.join(process.cwd(), 'scripts', 'smoke-packaged-runtime.mjs'), 'utf8');
     expect(smoke).toContain("'extension/browser-driver.js'");
-    // And the declaration file, which a browser cannot run, stays out of the package.
+    // And the declaration file, which a browser cannot run, stays out of both packages: the
+    // app's bundled copy and the standalone add-on zip are produced by different steps, and
+    // only the first was filtered — the published zip carried it until a built artifact was
+    // actually opened and looked at.
     const builder = readFileSync(path.join(process.cwd(), 'electron-builder.yml'), 'utf8');
     expect(builder).toContain("- '!**/*.d.ts'");
+    const release = readFileSync(path.join(process.cwd(), '.github', 'workflows', 'release.yml'), 'utf8');
+    expect(release).toContain("-x '*.map' -x '*.d.ts'");
+    expect(release).toContain('required in manifest.json background.js browser-driver.js');
+    expect(release).toContain('Extension zip carries TypeScript declarations');
   });
 });
 
