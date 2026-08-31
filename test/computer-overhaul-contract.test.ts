@@ -230,7 +230,12 @@ describe('the health check explains a missing browser tool', () => {
   const diagnostics = readFileSync(path.join(process.cwd(), 'src/main/diagnostics.ts'), 'utf8');
 
   it('names each reason separately, in the line the tool is missing from', () => {
-    expect(diagnostics).toContain("if (!names.includes('browser'))");
+    // Scoped to the surface the tool lives on. Reporting `browser` as absent from Core is true,
+    // useless and alarming — and it happened, on a build that was serving it correctly.
+    expect(diagnostics).toContain("if (surface === 'desktop' && !names.includes('browser'))");
+    // Both surfaces get asked, or Core's list is mistaken for the whole server.
+    expect(diagnostics).toContain("checkLocalServer(status.localUrl, 'core')");
+    expect(diagnostics).toContain("checkLocalServer(desktop.localUrl, 'desktop')");
     expect(diagnostics).toContain('Read only is on, which withdraws desktop control');
     expect(diagnostics).toContain('"See and use the desktop" is off');
     expect(diagnostics).toContain('this build predates browser control');

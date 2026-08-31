@@ -197,12 +197,17 @@ async function checkLocalServer(url: string, surface: SurfaceId): Promise<Check>
     }
   });
   if (init === null) {
-    return { name: 'Local server', status: 'fail', ok: false, detail: 'No answer on the loopback address.' };
+    return {
+      name: `Local server (${surface === 'core' ? 'Core' : 'Desktop'})`,
+      status: 'fail',
+      ok: false,
+      detail: 'No answer on the loopback address.'
+    };
   }
   const initObj = init.json as { error?: { message?: string } } | null;
   if (init.status >= 400 || initObj?.error) {
     return {
-      name: 'Local server',
+      name: `Local server (${surface === 'core' ? 'Core' : 'Desktop'})`,
       status: 'fail',
       ok: false,
       detail: `initialize failed: HTTP ${init.status} ${initObj?.error?.message ?? init.text.slice(0, 120)}`
@@ -216,7 +221,7 @@ async function checkLocalServer(url: string, surface: SurfaceId): Promise<Check>
   const tools = listObj?.result?.tools;
   if (!Array.isArray(tools)) {
     return {
-      name: 'Local server',
+      name: `Local server (${surface === 'core' ? 'Core' : 'Desktop'})`,
       status: 'fail',
       ok: false,
       detail: `tools/list failed: ${listObj?.error?.message ?? `HTTP ${list?.status ?? 0}`}`
@@ -234,8 +239,10 @@ async function checkLocalServer(url: string, surface: SurfaceId): Promise<Check>
   // the tool exists — so when it is missing, nothing says why. A QA run lost its entire priority
   // section to that silence and had to reason it out from source afterwards. Each reason names
   // itself here instead, in the same line as the list it is missing from.
+  // Only where the tool belongs. `browser` lives on Desktop, and saying it is absent from Core
+  // is true, useless, and alarming.
   const missing: string[] = [];
-  if (!names.includes('browser')) {
+  if (surface === 'desktop' && !names.includes('browser')) {
     const caps = effectiveCapabilities(getConfig());
     if (getConfig().readOnly) {
       missing.push('`browser` is absent because Read only is on, which withdraws desktop control');
@@ -256,7 +263,7 @@ async function checkLocalServer(url: string, surface: SurfaceId): Promise<Check>
       ? ` Switched on since this endpoint started: ${added.join(', ')}. The tools they add are being served now, but a chat that already loaded this connector keeps the list it saw — start a new chat, and only recreate the connector if that still does not show them.`
       : '';
   return {
-    name: 'Local server',
+    name: `Local server (${surface === 'core' ? 'Core' : 'Desktop'})`,
     status: 'pass',
     ok: true,
     detail:
@@ -368,8 +375,14 @@ export async function runDiagnostics(): Promise<Diagnosis> {
       detail: 'Not running. Press Connect first.'
     });
   } else {
-    // status.localUrl is Core's endpoint, so this check speaks for Core.
+    // Both surfaces, because they serve different tools and only one of them was ever asked.
+    // Core's list was being reported as though it were the whole server, so a user looking for
+    // `browser` was shown a list it could never appear in — and then told it was missing.
     checks.push(await checkLocalServer(status.localUrl, 'core'));
+    const desktop = status.surfaces.find((entry) => entry.id === 'desktop');
+    if (desktop?.available && desktop.localUrl) {
+      checks.push(await checkLocalServer(desktop.localUrl, 'desktop'));
+    }
   }
 
   // 3. The tunnel process itself.
