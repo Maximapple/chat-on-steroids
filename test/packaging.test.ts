@@ -109,34 +109,37 @@ describe('cross-platform packaging targets', () => {
     const workflow = readFileSync(path.join(root, '.github', 'workflows', 'release.yml'), 'utf8');
     const parsed = yamlFile('.github/workflows/release.yml');
     const matrix = parsed.jobs.package.strategy.matrix.include;
+    // Each entry carries a selector so a hand-started run can build one package instead of six.
+    // A release and every workflow_call still build all of them; the selector only narrows a
+    // dispatch, and the skipped jobs stay visible in the run.
     expect(matrix).toHaveLength(6);
     expect(matrix).toEqual([
       {
         name: 'Windows x64', platform: 'win32', arch: 'x64', runner: 'windows-2025',
-        script: 'dist:x64', artifact: 'package-windows-x64', files: 'release/Chat-On-Steroids-Setup-x64.exe'
+        script: 'dist:x64', artifact: 'package-windows-x64', selector: 'windows-x64', files: 'release/Chat-On-Steroids-Setup-x64.exe'
       },
       {
         name: 'Windows arm64', platform: 'win32', arch: 'arm64', runner: 'windows-11-arm',
-        script: 'dist:arm64', artifact: 'package-windows-arm64', files: 'release/Chat-On-Steroids-Setup-arm64.exe'
+        script: 'dist:arm64', artifact: 'package-windows-arm64', selector: 'windows-arm64', files: 'release/Chat-On-Steroids-Setup-arm64.exe'
       },
       {
         name: 'macOS x64', platform: 'darwin', arch: 'x64', runner: 'macos-15-intel',
-        script: 'dist:mac:x64', artifact: 'package-macos-x64',
+        script: 'dist:mac:x64', artifact: 'package-macos-x64', selector: 'macos-x64',
         files: 'release/Chat-On-Steroids-macOS-x64.dmg\nrelease/Chat-On-Steroids-macOS-x64.zip\n'
       },
       {
         name: 'macOS arm64', platform: 'darwin', arch: 'arm64', runner: 'macos-15',
-        script: 'dist:mac:arm64', artifact: 'package-macos-arm64',
+        script: 'dist:mac:arm64', artifact: 'package-macos-arm64', selector: 'macos-arm64',
         files: 'release/Chat-On-Steroids-macOS-arm64.dmg\nrelease/Chat-On-Steroids-macOS-arm64.zip\n'
       },
       {
         name: 'Linux x64', platform: 'linux', arch: 'x64', runner: 'ubuntu-24.04',
-        script: 'dist:linux:x64', artifact: 'package-linux-x64',
+        script: 'dist:linux:x64', artifact: 'package-linux-x64', selector: 'linux-x64',
         files: 'release/Chat-On-Steroids-Linux-x64.AppImage\nrelease/Chat-On-Steroids-Linux-x64.deb\n'
       },
       {
         name: 'Linux arm64', platform: 'linux', arch: 'arm64', runner: 'ubuntu-24.04-arm',
-        script: 'dist:linux:arm64', artifact: 'package-linux-arm64',
+        script: 'dist:linux:arm64', artifact: 'package-linux-arm64', selector: 'linux-arm64',
         files: 'release/Chat-On-Steroids-Linux-arm64.AppImage\nrelease/Chat-On-Steroids-Linux-arm64.deb\n'
       }
     ]);

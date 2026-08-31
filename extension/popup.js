@@ -527,8 +527,19 @@ async function syncBrowserControl() {
     const on = status?.granted === true;
     $('browserControlToggle').checked = on;
     $('browserControlToggle').closest('.row')?.classList.toggle('on', on);
-  } catch {
+    // A worker that answers with a failure is not the same as one that says "not granted", and
+    // the switch cannot show the difference. It showed off for both, which is how a worker that
+    // could not load the driver at all looked exactly like a permission nobody had granted.
+    showBrowserControlError(
+      status?.ok === false && status?.error
+        ? `Browser control is unavailable: ${status.error}`
+        : null
+    );
+  } catch (error) {
     $('browserControlToggle').checked = false;
+    showBrowserControlError(
+      `Browser control could not be read from the extension worker: ${error?.message ?? String(error)}`
+    );
   }
 }
 

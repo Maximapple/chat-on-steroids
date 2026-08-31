@@ -285,6 +285,31 @@ try {
   const run = (expression) => popup.evaluate(expression);
   const readPage = async (expression) => (await pageCdp.evaluate(expression)).value;
 
+  /*
+   * The service worker, not just this page.
+   *
+   * Everything below drives the driver from the popup, which is an ordinary extension page and
+   * can do things a service worker cannot. The worker is where browser control actually runs,
+   * and it failed there for months while this run stayed green: it loaded the driver with a
+   * dynamic import, which the specification forbids on ServiceWorkerGlobalScope, so every
+   * browser_* message answered with an error and the popup switch silently showed off.
+   *
+   * One message settles it. It reaches the worker, which must have evaluated its imports to
+   * answer at all.
+   */
+  const workerReply = await run(`(async () => {
+    try {
+      const reply = await chrome.runtime.sendMessage({ type: 'browser_status' });
+      return JSON.stringify({ reply, lastError: chrome.runtime.lastError?.message ?? null });
+    } catch (e) {
+      return JSON.stringify({ threw: String(e && e.message ? e.message : e) });
+    }
+  })()`);
+  const worker = JSON.parse(workerReply.value ?? '{}');
+  check('the service worker loads the driver and answers',
+    worker?.reply?.ok === true,
+    workerReply.value ?? workerReply.error);
+
   const tabInfo = await run(`(async () => {
     const tabs = await chrome.tabs.query({});
     const t = tabs.find((t) => (t.url || '').startsWith('http://127.0.0.1:${pagePort}/'));
