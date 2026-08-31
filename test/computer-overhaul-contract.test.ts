@@ -154,3 +154,33 @@ describe('the Windows drag is paced like a real one', () => {
     expect(HELPER_SCRIPT).toContain('if (steps > 240) steps = 240;');
   });
 });
+
+/**
+ * A coordinate that claims to be in an image has to be in that image.
+ *
+ * The conversion from desktop to image space is plain arithmetic and answers for any point on
+ * the desktop, including points the captured frame does not contain. So a pointer sitting below
+ * a captured window produced "Pointer image: 875,754" for an image 646 pixels tall — a position
+ * that cannot exist, which a caller would nonetheless use to address a pixel. QA found it.
+ *
+ * Outside the frame there is no image coordinate to give, and saying so is the whole fix: the
+ * desktop position is still reported, and it is the one that was never in doubt.
+ */
+describe('the pointer never reports a position outside the image', () => {
+  const source = readFileSync(path.join(process.cwd(), 'src/main/computer/index.ts'), 'utf8');
+  const tool = readFileSync(path.join(process.cwd(), 'src/main/mcp/tools-desktop.ts'), 'utf8');
+
+  it('bounds the image coordinate by the frame it names', () => {
+    expect(source).toContain('const inFrame = current');
+    // Every edge of the frame, and the frame having to exist at all.
+    expect(source).toMatch(
+      /inFrame && current && inFrame\.x >= 0 && inFrame\.y >= 0 && inFrame\.x < current\.width && inFrame\.y < current\.height/
+    );
+  });
+
+  it('says the pointer is outside rather than printing an impossible point', () => {
+    expect(tool).toContain('it has no position in that image');
+    // And still distinguishes that from having no frame at all, which is a different answer.
+    expect(tool).toContain('No screenshot frame is active.');
+  });
+});

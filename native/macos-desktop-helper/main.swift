@@ -1232,17 +1232,23 @@ private func actUI(_ request: JSONObject) throws -> JSONObject {
         )
     }
     let action = string(request["action"])
-    // Mutation requires an explicitly readable true value. Missing, untyped or timed-out
-    // AXEnabled evidence is not permission to click through the uncertainty.
+    // What a control says about itself decides; silence defers to what it can do.
     //
-    // A value write has a second and stronger authority available: accessibility answers
-    // directly whether AXValue can be written. Some genuinely editable controls publish no
-    // AXEnabled attribute at all — TextEdit's document AXTextArea is one — and treating that
-    // silence as "disabled" made a visibly editable document unwritable while physical typing
-    // into the same control worked. An explicit AXEnabled=false still refuses either way: a
-    // control that says it is disabled is disabled, whatever it reports about settability.
+    // An explicit AXEnabled=false always refuses: a control that says it is disabled is
+    // disabled, whatever else it reports. Absent, untyped or timed-out AXEnabled is not a
+    // refusal though — some genuinely interactive controls publish no such attribute at all,
+    // and TextEdit's document AXTextArea is one of them. For those, accessibility offers a
+    // second and more direct authority: whether AXValue can be written. A control whose value
+    // can be set is interactive by definition.
+    //
+    // That fallback was first allowed only for set_value, on the reasoning that silence should
+    // not license a click. QA then found the other half of the same defect: click_ref against
+    // that same editable TextArea was refused as disabled while a coordinate click focused it,
+    // typing worked, and set_value worked. Refusing there blocked legitimate ref-first work on
+    // a control already proven interactive by the very evidence being ignored. Silence alone
+    // still refuses — a control with no AXEnabled and no settable value gets nothing.
     let enabled = axOptionalBool(element, kAXEnabledAttribute as CFString)
-    let permitted = action == "set_value" ? (enabled ?? axValueIsSettable(element)) : (enabled ?? false)
+    let permitted = enabled ?? axValueIsSettable(element)
     guard permitted else {
         throw fail("UI_ACTION_DISABLED", "the referenced accessibility control is disabled")
     }
