@@ -3,15 +3,6 @@ name: Release candidate
 on:
   workflow_call:
   workflow_dispatch:
-    inputs:
-      # Six platforms take as long as the slowest of them, and a QA turn only ever installs one.
-      # A release still builds everything — this only narrows a run started by hand.
-      only:
-        description: 'Limit to one package (blank builds all six)'
-        required: false
-        default: ''
-        type: choice
-        options: ['', 'macos-arm64', 'macos-x64', 'windows-x64', 'windows-arm64', 'linux-x64', 'linux-arm64']
 
 permissions:
   contents: read
@@ -33,7 +24,6 @@ jobs:
             runner: windows-2025
             script: dist:x64
             artifact: package-windows-x64
-            selector: windows-x64
             files: release/Chat-On-Steroids-Setup-x64.exe
           - name: Windows arm64
             platform: win32
@@ -41,7 +31,6 @@ jobs:
             runner: windows-11-arm
             script: dist:arm64
             artifact: package-windows-arm64
-            selector: windows-arm64
             files: release/Chat-On-Steroids-Setup-arm64.exe
           - name: macOS x64
             platform: darwin
@@ -49,7 +38,6 @@ jobs:
             runner: macos-15-intel
             script: dist:mac:x64
             artifact: package-macos-x64
-            selector: macos-x64
             files: |
               release/Chat-On-Steroids-macOS-x64.dmg
               release/Chat-On-Steroids-macOS-x64.zip
@@ -59,7 +47,6 @@ jobs:
             runner: macos-15
             script: dist:mac:arm64
             artifact: package-macos-arm64
-            selector: macos-arm64
             files: |
               release/Chat-On-Steroids-macOS-arm64.dmg
               release/Chat-On-Steroids-macOS-arm64.zip
@@ -69,7 +56,6 @@ jobs:
             runner: ubuntu-24.04
             script: dist:linux:x64
             artifact: package-linux-x64
-            selector: linux-x64
             files: |
               release/Chat-On-Steroids-Linux-x64.AppImage
               release/Chat-On-Steroids-Linux-x64.deb
@@ -79,19 +65,11 @@ jobs:
             runner: ubuntu-24.04-arm
             script: dist:linux:arm64
             artifact: package-linux-arm64
-            selector: linux-arm64
             files: |
               release/Chat-On-Steroids-Linux-arm64.AppImage
               release/Chat-On-Steroids-Linux-arm64.deb
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
-    # Skipped rather than removed from the matrix, so the run still shows every platform and says
-    # plainly which ones were not built. A blank selection — every scheduled or called run —
-    # builds all six.
-    if: >-
-      github.event.inputs.only == '' ||
-      github.event.inputs.only == null ||
-      github.event.inputs.only == matrix.selector
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -337,11 +315,6 @@ jobs:
     needs: package
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # A candidate is the whole set. A run narrowed to one package has nothing to assemble, and
-    # failing here would make a deliberately partial build look broken.
-    if: >-
-      github.event.inputs.only == '' ||
-      github.event.inputs.only == null
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
