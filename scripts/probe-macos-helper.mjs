@@ -209,14 +209,23 @@ if (!candidate) {
   const front = await probe('it names a foreground window', { op: 'cursor' });
   if (front?.ok === true) {
     const id = Number(front['foreground']);
-    console.log(`      foreground=${id}, the opened window is ${candidate['id']}`);
-    if (id === 0) {
-      console.log('FAIL  a window is open and frontmost, but no foreground window was named');
+    // Only judge when something actually claims to be foreground. A runner has no ordinary
+    // user session, so NSWorkspace may report no frontmost application at all — and then
+    // answering nothing is correct, not the defect QA saw. Asserting otherwise here failed a
+    // build for the code being right, which is the same mistake in the opposite direction as
+    // calling a moved pointer a compositor fault.
+    const claimed = windows.find((w) => w?.['state'] === 'foreground');
+    console.log(`      foreground=${id}, opened window ${candidate['id']}, window list claims ${claimed?.['id'] ?? 'none'}`);
+    if (!claimed) {
+      console.log('      no window claims foreground on this runner, so there is nothing to judge');
+    } else if (id === 0) {
+      console.log(`FAIL  window ${claimed['id']} claims foreground, but no foreground window was named`);
       failed = true;
-    } else if (id !== Number(candidate['id'])) {
-      // Not necessarily wrong — another window could legitimately be in front — but worth
-      // seeing, because the whole defect was about naming the wrong one.
-      console.log('      note: foreground is a different window than the one just opened');
+    } else if (id !== Number(claimed['id'])) {
+      console.log(`FAIL  foreground resolved to ${id}, but ${claimed['id']} is the one claiming it`);
+      failed = true;
+    } else {
+      console.log('      foreground resolution agrees with the window list');
     }
   }
 
@@ -256,6 +265,11 @@ if (!candidate) {
   };
 
   const cursorBefore = await readCursor();
+  // Let the window settle before the first capture. A window still painting itself changes
+  // between the two shots, and the comparison then reports "redrew" rather than a pointer —
+  // true, but it wastes the run's one chance to judge the pixels.
+  await sleep(2500);
+
   const windowShot = await probe('it captures that window', {
     op: 'capture',
     id: candidate['id'],
