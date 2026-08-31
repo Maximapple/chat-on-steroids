@@ -52,8 +52,11 @@ that pointer path already produced a confident wrong answer once.
 
 There is also `docs/qa/chatgpt-desktop-qa-prompt.md`, a 32-check script meant to be pasted into
 ChatGPT with the app connected. That exercises model → MCP → app → macOS, which is the real
-product path and not something you can drive from here. If a report comes back from it, the
-failures in it are yours to investigate and fix.
+product path and not something you can drive from here.
+
+**If reports are already in `docs/qa/reports/`, read them first** — they may make half of the
+list above unnecessary, or point straight at a defect. That folder's README says how findings are
+meant to be handled, including which two "failures" are actually the security properties working.
 
 ## How to behave about it
 
