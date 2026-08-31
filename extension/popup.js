@@ -367,6 +367,9 @@ async function loadPreferences() {
   syncOverwrite();
   $('timeToggle').checked = showTimes;
   $('replaceDraftToggle').checked = replaceWorkerDrafts;
+  // The browser-control row reflects a browser permission rather than a stored preference, so
+  // it has to be read on open. Without this it only ever painted after somebody clicked it.
+  await syncBrowserControl();
 }
 
 /** Puts one value on the clipboard and says so in place, without moving anything. */
@@ -464,6 +467,24 @@ function browserPermissions(method) {
 }
 
 async function syncBrowserControl() {
+  // Whether the browser knows this permission at all, which is not the same as holding it.
+  // `chrome.debugger` does not exist until the permission is granted, so testing for that
+  // object would hide the switch that grants it and make the feature unreachable — measured
+  // in a real Edge run, where the popup saw no debugger API before granting.
+  const supported = await new Promise((resolve) => {
+    try {
+      const returned = webext.permissions.contains({ permissions: ['debugger'] }, (held) => {
+        resolve(!webext.runtime.lastError && typeof held === 'boolean');
+      });
+      if (returned && typeof returned.then === 'function') {
+        returned.then(() => resolve(true), () => resolve(false));
+      }
+    } catch {
+      resolve(false);
+    }
+  });
+  $('browserControlToggle').closest('.row').hidden = !supported;
+  if (!supported) return;
   try {
     const status = await webext.runtime.sendMessage({ type: 'browser_status' });
     const on = status?.granted === true;

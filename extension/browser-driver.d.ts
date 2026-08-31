@@ -19,6 +19,8 @@ export declare const MODIFIERS: Record<string, number>;
 /** Whether browser control refuses to attach to this page at all. */
 export declare function refusedUrl(url: unknown): boolean;
 
+/** False where the browser exposes no DevTools protocol to extensions. */
+export declare function browserControlSupported(): Promise<boolean>;
 export declare function hasBrowserPermissions(): Promise<boolean>;
 /** Must be called from a user gesture; Chrome refuses the prompt otherwise. */
 export declare function requestBrowserPermissions(): Promise<boolean>;

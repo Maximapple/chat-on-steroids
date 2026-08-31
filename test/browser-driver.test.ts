@@ -16,6 +16,7 @@ import {
   DRIVEN_GROUP_TITLE,
   buttonMask,
   cdpButton,
+  browserControlSupported,
   hasBrowserPermissions,
   keyDescriptor,
   refusedUrl,
@@ -120,10 +121,14 @@ describe('permissions are opt-in', () => {
       globals.browser = original.browser;
     });
 
+    /** Every fake carries the debugger API, because a browser without it cannot do any of this. */
+    const debuggerApi = { attach() {}, detach() {}, sendCommand() {}, onDetach: { addListener() {} } };
+
     it('accepts the Chrome callback', async () => {
       globals.browser = undefined;
       globals.chrome = {
         runtime: {},
+        debugger: debuggerApi,
         permissions: {
           contains: (_perms: unknown, done: (granted: boolean) => void) => done(true),
           request: (_perms: unknown, done: (granted: boolean) => void) => done(false)
@@ -136,6 +141,7 @@ describe('permissions are opt-in', () => {
     it('accepts the Firefox promise, which never calls the callback', async () => {
       globals.browser = {
         runtime: {},
+        debugger: debuggerApi,
         permissions: {
           contains: () => Promise.resolve(true),
           request: () => Promise.resolve(true)
@@ -147,20 +153,68 @@ describe('permissions are opt-in', () => {
 
     it('answers false rather than hanging when the API is absent or throws', async () => {
       globals.browser = undefined;
-      globals.chrome = { runtime: {} };
+      globals.chrome = { runtime: {}, debugger: debuggerApi };
       await expect(hasBrowserPermissions()).resolves.toBe(false);
 
       globals.chrome = {
         runtime: {},
+        debugger: debuggerApi,
         permissions: { contains: () => { throw new Error('no'); } }
       };
       await expect(hasBrowserPermissions()).resolves.toBe(false);
 
       globals.browser = {
         runtime: {},
+        debugger: debuggerApi,
         permissions: { contains: () => Promise.reject(new Error('denied')) }
       };
       await expect(hasBrowserPermissions()).resolves.toBe(false);
+    });
+
+    /**
+     * Support is decided by whether the browser recognises the permission, not by whether the
+     * `debugger` object is there.
+     *
+     * That object does not exist until the optional permission is granted, so a presence check
+     * would hide the very switch that grants it and make the feature permanently unreachable —
+     * which is exactly what a real Edge run reported before this was corrected: the popup saw
+     * no debugger API at all, on a browser that supports it perfectly well.
+     */
+    it('supports a browser that knows the permission, granted or not', async () => {
+      globals.browser = undefined;
+      // Chrome shape: knows the name, has not granted it. The switch must be offered.
+      globals.chrome = {
+        runtime: {},
+        permissions: { contains: (_p: unknown, done: (held: boolean) => void) => done(false) }
+      };
+      await expect(browserControlSupported()).resolves.toBe(true);
+
+      // Granted: still supported, and now actually held.
+      globals.chrome = {
+        runtime: {},
+        debugger: debuggerApi,
+        permissions: { contains: (_p: unknown, done: (held: boolean) => void) => done(true) }
+      };
+      await expect(browserControlSupported()).resolves.toBe(true);
+      await expect(hasBrowserPermissions()).resolves.toBe(true);
+    });
+
+    it('treats a browser that does not know the permission as unsupported', async () => {
+      globals.chrome = undefined;
+      // A browser that never implemented it reports the unknown name rather than answering.
+      globals.browser = {
+        runtime: { lastError: { message: 'Type error for parameter permissions' } },
+        permissions: { contains: (_p: unknown, done: (held: unknown) => void) => done(undefined) }
+      };
+      await expect(browserControlSupported()).resolves.toBe(false);
+      await expect(hasBrowserPermissions()).resolves.toBe(false);
+
+      // And the promise shape of the same refusal.
+      globals.browser = {
+        runtime: {},
+        permissions: { contains: () => Promise.reject(new Error('unknown permission')) }
+      };
+      await expect(browserControlSupported()).resolves.toBe(false);
     });
   });
 
@@ -261,9 +315,11 @@ describe('reading a page', () => {
     expect(page.url).toBe('https://example.com/page');
     expect(page.title).toBe('Fixture page');
     expect(page.elements).toHaveLength(4);
-    // Every element is addressable by ref, and carries a path the driver re-resolves with.
-    expect(page.elements.map((e) => e.ref)).toEqual(['e0', 'e1', 'e2', 'e3']);
+    // Every element carries the path its ref is re-resolved with. Refs themselves are numbered
+    // by the driver across all frames, not here: this collector runs once per frame and a
+    // per-frame counter would hand out the same ref for two different elements.
     expect(page.elements.every((e) => typeof e.path === 'string' && (e.path as string).length > 0)).toBe(true);
+    expect(page.elements.some((e) => 'ref' in e)).toBe(false);
     expect(page.elements.map((e) => [e.role, e.name])).toEqual([
       ['link', 'Next page'],
       ['button', 'Save'],
