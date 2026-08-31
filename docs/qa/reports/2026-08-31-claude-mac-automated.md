@@ -153,6 +153,11 @@ PASS  detach removes the overlay
 
 `npm run typecheck` and `npm run verify:privacy` both still pass after the change.
 
+Chrome for Testing 152.0.7977.64 is now installed at `/Applications/Chrome for Testing.app`,
+which is already first in the script's candidate list on macOS. **`npm run verify:browser` needs
+no `COS_BROWSER` on this machine** — it finds that build on its own and scores 23/23. Installed
+Chrome (152.0.7977.65) is still unusable for this harness, as the script says.
+
 ## 3. The macOS desktop helper — built, ran, but did NOT reach the pointer path
 
 `node scripts/prepare-macos-desktop-helper.mjs --platform darwin --arch arm64`:
