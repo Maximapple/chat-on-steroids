@@ -7,6 +7,27 @@ const preparation = readFileSync(path.join(process.cwd(), 'scripts/prepare-macos
 const computer = readFileSync(path.join(process.cwd(), 'src/main/computer/index.ts'), 'utf8');
 
 describe('macOS desktop safety hardening', () => {
+  /**
+   * A refusal to focus says which of the three facts disagreed.
+   *
+   * "the requested window could not be activated" is a sentence with no next step in it. QA hit
+   * it against a Chrome window plainly on screen, and answering why would have meant an
+   * instrumented build on the one machine that could reproduce it — for a fact the helper had
+   * already computed and discarded.
+   *
+   * The diagnostic is deliberately a separate function. The fence stays exactly as it is,
+   * because it is what physical input is judged by and every clause of it is asserted above;
+   * a message must never be the thing deciding whether input is sent.
+   */
+  it('names the clause that refused a focus request', () => {
+    expect(swift).toContain('private func inputTargetRefusal');
+    // The reason is read first and then quoted into the message, so it precedes it.
+    expect(swift).toMatch(/inputTargetRefusal\)[\s\S]{0,200}FOCUS_FAILED/);
+    // The fence still decides; the diagnostic only explains.
+    expect(swift).toMatch(/guard try focusWindow\(requested\) else \{/);
+    expect(swift).not.toMatch(/if inputTargetRefusal\([\s\S]{0,60}== nil/);
+  });
+
   it('requires exact Workspace, WindowServer and AX agreement for physical input', () => {
     expect(swift).toContain('private func windowServerFrontWindowID');
     expect(swift).toContain('private func focusedAXWindowID');

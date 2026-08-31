@@ -537,12 +537,50 @@ private func inputTargetMatches(_ row: WindowRow) -> Bool {
     return true
 }
 
+/**
+ * Which clause of the input fence refuses this window, for the error message only.
+ *
+ * `inputTargetMatches` above stays the authority and is deliberately left exactly as it is: it is
+ * the fence physical input passes through, and its shape is asserted clause by clause elsewhere.
+ * This re-reads the same three facts a moment later purely to say which one disagreed.
+ *
+ * It earns its keep because "the requested window could not be activated" is a sentence with no
+ * next step in it. QA hit it against a Chrome window that was plainly on screen, and answering
+ * why took a separate instrumented build on the machine that could reproduce it — for a fact the
+ * helper already knew and threw away. Being a second observation it can name a reason that has
+ * since changed; a diagnostic that is occasionally stale is still worth more than none.
+ */
+private func inputTargetRefusal(_ row: WindowRow) -> String {
+    guard frontmostPID() == row.pid else { return "another application is frontmost" }
+    let rows = allWindowRows(includeMinimized: false)
+    let focused = focusedAXWindowID(for: row.pid, rows: rows)
+    if frontWindowID(rows: rows, focusedWindow: focused) != row.id {
+        return "another window of the same application is in front"
+    }
+    if focused != row.id {
+        return "the application's focused window is \(windowIDDescription(focused))"
+    }
+    let element = focusedAXElementWindowID(for: row.pid, rows: rows)
+    if element != row.id {
+        return "the focused control belongs to \(windowIDDescription(element))"
+    }
+    return "focus moved while the window was being checked"
+}
+
+private func windowIDDescription(_ id: CGWindowID?) -> String {
+    guard let id else { return "no window this scan can attribute" }
+    return "window \(id)"
+}
+
 private func assertInputTarget(_ id: CGWindowID) throws -> WindowRow {
     guard let row = windowRow(id), row.onScreen else {
         throw fail("INPUT_TARGET_LOST", "target window \(id) no longer exists on screen; no input was sent")
     }
     guard inputTargetMatches(row) else {
-        throw fail("INPUT_TARGET_LOST", "window \(id) is no longer the exact active input target; no input was sent")
+        throw fail(
+            "INPUT_TARGET_LOST",
+            "window \(id) is no longer the exact active input target (\(inputTargetRefusal(row))); no input was sent"
+        )
     }
     return row
 }
@@ -1353,7 +1391,8 @@ private func actUI(_ request: JSONObject) throws -> JSONObject {
     } else if action == "click" {
         if AXUIElementPerformAction(element, kAXPressAction as CFString) != .success {
             guard try focusWindow(snapshot.window) else {
-                throw fail("FOCUS_FAILED", "snapshot window \(snapshot.window) could not be activated")
+                let why = windowRow(snapshot.window).map(inputTargetRefusal) ?? "the window is gone"
+                throw fail("FOCUS_FAILED", "snapshot window \(snapshot.window) could not be activated: \(why)")
             }
             guard let live = windowRow(snapshot.window),
                   live.bounds.integral == snapshot.windowBounds.integral else {
@@ -1929,7 +1968,8 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     }
                     leasedWindow = requested
                     guard try focusWindow(requested) else {
-                        throw fail("FOCUS_FAILED", "the requested window could not be activated")
+                        let why = windowRow(requested).map(inputTargetRefusal) ?? "the window is gone"
+                        throw fail("FOCUS_FAILED", "the requested window could not be activated: \(why)")
                     }
                     routes.append("focus")
                 default:
