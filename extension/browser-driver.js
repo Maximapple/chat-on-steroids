@@ -176,6 +176,27 @@ async function groupDrivenTab(tabId) {
 }
 
 /**
+ * Puts a released tab back where it was.
+ *
+ * The group is the visible answer to "is this tab being driven": a blue band labelled with the
+ * app's name, above the tab. It was created on attach and never removed, so every session left
+ * one behind — a tab still advertising that something is driving it when nothing is, and one
+ * more band in the tab strip for every run. The indicator that exists to be trusted was the one
+ * telling the untruth.
+ *
+ * Best effort by construction. Ungrouping needs a permission that is optional, the tab may have
+ * gone, and neither is a reason to fail letting go of it.
+ */
+async function ungroupDrivenTab(tabId, groupId) {
+  if (groupId === null || groupId === undefined) return;
+  try {
+    if (chrome.tabs?.ungroup) await chrome.tabs.ungroup(tabId);
+  } catch {
+    // The tab is gone, or grouping was never permitted. Either way there is nothing to undo.
+  }
+}
+
+/**
  * A pointer the person can actually see.
  *
  * CDP input moves no real cursor, so without this the page reacts and nothing visibly causes
@@ -791,8 +812,9 @@ export const browserDriver = {
   /** Always safe to call, always leaves the tab as the user's own again. */
   async detach() {
     if (!session) return { attached: false, tabId: null, url: null, title: null };
-    const { tabId } = session;
+    const { tabId, groupId } = session;
     await removePointer();
+    await ungroupDrivenTab(tabId, groupId);
     try {
       await new Promise((resolve) => chrome.debugger.detach({ tabId }, () => {
         void chrome.runtime.lastError;
@@ -805,9 +827,17 @@ export const browserDriver = {
     return { attached: false, tabId: null, url: null, title: null };
   },
 
-  /** Called when the browser tears the session down underneath us. */
+  /**
+   * Called when the browser tears the session down underneath us.
+   *
+   * Also reached when a person presses Cancel on Chrome's debugging banner, and the tab then
+   * outlives the session — so the group has to go here too, not only in detach.
+   */
   forget(tabId) {
-    if (session && session.tabId === tabId) session = null;
+    if (!session || session.tabId !== tabId) return;
+    const { groupId } = session;
+    session = null;
+    void ungroupDrivenTab(tabId, groupId);
   },
 
   /**
