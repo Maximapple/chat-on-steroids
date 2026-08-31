@@ -31,7 +31,7 @@
  * a wheel event may still not be acknowledged, and that is a property of headless rather than
  * of the driver — clicks, which are acknowledged directly, land every time.
  */
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -146,9 +146,22 @@ const server = http.createServer((req, res) => {
 });
 await new Promise((resolve) => server.listen(pagePort, '127.0.0.1', resolve));
 
-/** Chromium's id for an unpacked extension: sha-256 of the load path, nibbles mapped a..p. */
+/**
+ * Chromium's id for an unpacked extension: sha-256 of the load path, nibbles mapped a..p.
+ *
+ * The path it hashes is the *real* one, with symlinks resolved. On macOS `os.tmpdir()` is
+ * `/var/folders/…`, a symlink to `/private/var/folders/…`, so hashing the unresolved path
+ * yielded an id no target ever carried: the popup opened as a
+ * chrome-error page keeping the requested url, and the run blamed Chrome's `--load-extension`
+ * removal for what was this arithmetic. Chrome for Testing 152 loads the extension here fine.
+ *
+ * Windows is left on `path.resolve` deliberately: it has no such symlink, its id is proven
+ * correct against Chrome 152 and Edge, and `realpathSync` there can renormalise a path in ways
+ * this cannot check from macOS.
+ */
+const extensionRoot = process.platform === 'win32' ? path.resolve(copy) : realpathSync(copy);
 const digest = createHash('sha256')
-  .update(Buffer.from(path.resolve(copy), process.platform === 'win32' ? 'utf16le' : 'utf8'))
+  .update(Buffer.from(extensionRoot, process.platform === 'win32' ? 'utf16le' : 'utf8'))
   .digest();
 const extensionId = [...digest.subarray(0, 16)]
   .flatMap((byte) => [byte >> 4, byte & 15])
