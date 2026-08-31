@@ -1752,11 +1752,17 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
     case "cursor":
         result["cursor"] = cursorObject()
         result["foreground"] = foregroundWindowID().map(Int.init) ?? 0
+        // Whether the application in front is this one. Its windows are deliberately excluded
+        // from enumeration — the model must not drive the app driving it — but that made a
+        // correct refusal look like a wrong answer: QA saw `No foreground window` while Chat On
+        // Steroids was plainly frontmost. Reported so the caller can say which it is.
+        result["foregroundIsSelf"] = frontmostPID() == getpid()
     case "windows":
         let foreground = foregroundWindowID()
         result["windows"] = allWindowRows().map { $0.json(foreground: foreground) }
         result["screen"] = rectObject(try virtualScreenRect())
     case "active":
+        result["foregroundIsSelf"] = frontmostPID() == getpid()
         let foreground = foregroundWindowID()
         result["window"] = foreground.flatMap(windowRow)?.json(foreground: foreground) ?? NSNull()
         result["screen"] = rectObject(try virtualScreenRect())

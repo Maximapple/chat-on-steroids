@@ -290,8 +290,17 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
           // A bare "what is on screen right now" with no window at all: cheapest possible
           // answer, and the only one that still works when there is no foreground window.
           if (what === 'active' && target === undefined && input.screenshot === false) {
-            const { window, screen } = await activeWindow();
-            if (!window) return ok(prefix(waited, `Desktop ${screen.width}x${screen.height}\nNo foreground window.`));
+            const { window, screen, foregroundIsSelf } = await activeWindow();
+            if (!window) {
+              // "None" and "this app" are different answers, and reporting the second as the
+              // first made a deliberate refusal look like a defect. Chat On Steroids hides its
+              // own windows from everything the model can see, on purpose: it must not be able
+              // to drive the app that is driving it.
+              const reason = foregroundIsSelf
+                ? 'Chat On Steroids itself is in front. Its own windows are never exposed, so there is nothing here to act on — switch to another application first.'
+                : 'No foreground window.';
+              return ok(prefix(waited, `Desktop ${screen.width}x${screen.height}\n${reason}`));
+            }
             return ok(prefix(waited, describeWindow(window)));
           }
 

@@ -886,11 +886,16 @@ export async function focusWindow(id: number): Promise<boolean> {
   return reply['focused'] === true;
 }
 
-export async function activeWindow(): Promise<{ window: WindowInfo | null; screen: Rect }> {
+export async function activeWindow(): Promise<{
+  window: WindowInfo | null;
+  screen: Rect;
+  /** The frontmost application is Chat On Steroids, whose windows are never automatable. */
+  foregroundIsSelf: boolean;
+}> {
   const reply = await runHelper({ op: 'active' });
   const value = reply['window'];
   const window = value && typeof value === 'object' ? (value as WindowInfo) : null;
-  return { window, screen: reply['screen'] as Rect };
+  return { window, screen: reply['screen'] as Rect, foregroundIsSelf: reply['foregroundIsSelf'] === true };
 }
 
 export async function findUi(opts: {
