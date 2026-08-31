@@ -214,3 +214,34 @@ describe('startup survives a step that throws', () => {
     expect(main).toMatch(/\.catch\(\(error: unknown\)[\s\S]*void startBridge\(\)[\s\S]*void connect\(\)/);
   });
 });
+
+/**
+ * A tool that is missing has to say why it is missing.
+ *
+ * The condition for `browser` lives in the tool's own description, which can only be read once
+ * the tool exists. When it is absent — the case a user is actually investigating — nothing said
+ * anything, and a QA run lost its whole priority section to that silence before working the
+ * reason out from source afterwards.
+ *
+ * Three reasons, and they are genuinely different actions: turn Read only off, turn the desktop
+ * capability on, or install a build that has the feature at all.
+ */
+describe('the health check explains a missing browser tool', () => {
+  const diagnostics = readFileSync(path.join(process.cwd(), 'src/main/diagnostics.ts'), 'utf8');
+
+  it('names each reason separately, in the line the tool is missing from', () => {
+    expect(diagnostics).toContain("if (!names.includes('browser'))");
+    expect(diagnostics).toContain('Read only is on, which withdraws desktop control');
+    expect(diagnostics).toContain('"See and use the desktop" is off');
+    expect(diagnostics).toContain('this build predates browser control');
+    // Read-only is checked first: it withdraws control, so the capability check underneath it
+    // would otherwise report the symptom rather than the cause.
+    expect(diagnostics).toMatch(/if \(getConfig\(\)\.readOnly\)[\s\S]{0,200}else if \(!caps\.control\)/);
+    expect(diagnostics).toContain('missingNote +');
+  });
+
+  /** And the build line, which decides what every other line in the report means. */
+  it('leads with the build it is reporting on', () => {
+    expect(diagnostics).toMatch(/name: 'Build'[\s\S]{0,300}BUILD_REVISION/);
+  });
+});

@@ -228,6 +228,28 @@ async function checkLocalServer(url: string, surface: SurfaceId): Promise<Check>
   // tool here that never appears there — QA reported `browser` missing while the app was
   // serving it, and had no way to tell the two apart. If anything has been added since, say so
   // here, where the list it is being compared against is on the same line.
+  // Why a tool a user is looking for is not in that list.
+  //
+  // The condition for `browser` lives in the tool's own description, which is only readable once
+  // the tool exists — so when it is missing, nothing says why. A QA run lost its entire priority
+  // section to that silence and had to reason it out from source afterwards. Each reason names
+  // itself here instead, in the same line as the list it is missing from.
+  const missing: string[] = [];
+  if (!names.includes('browser')) {
+    const caps = effectiveCapabilities(getConfig());
+    if (getConfig().readOnly) {
+      missing.push('`browser` is absent because Read only is on, which withdraws desktop control');
+    } else if (!caps.control) {
+      missing.push('`browser` is absent because "See and use the desktop" is off');
+    } else {
+      missing.push(
+        '`browser` is absent although desktop control is on — this build predates browser control; ' +
+          'check the Build line above against the package you installed'
+      );
+    }
+  }
+  const missingNote = missing.length > 0 ? ` ${missing.join('. ')}.` : '';
+
   const added = capabilitiesAddedSinceConnectorSnapshot(surface);
   const staleNote =
     added.length > 0
@@ -239,6 +261,7 @@ async function checkLocalServer(url: string, surface: SurfaceId): Promise<Check>
     ok: true,
     detail:
       `Answers on loopback and offers ${names.length} tool${names.length === 1 ? '' : 's'}: ${names.join(', ')}.` +
+      missingNote +
       staleNote
   };
 }
