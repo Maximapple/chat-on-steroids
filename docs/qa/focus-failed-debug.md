@@ -83,19 +83,26 @@ Then repeat the Chrome case **twice more**, in these two states, because they ch
 
 ## 2. Which of the three clauses is the one that refuses?
 
-`inputTargetMatches` in `native/macos-desktop-helper/main.swift` is where the decision is made.
-Add temporary logging to `FileHandle.standardError` printing, on every poll iteration, the window
-id being tested and the three values it compares — `frontWindowID(...)`, `focusedAXWindowID(...)`
-and `focusedAXElementWindowID(...)` — then rebuild with the same prepare script and repeat the
-Chrome case from question 1.
+**The helper now says this itself** — no instrumentation, no source edits. The refusal reads
 
-Report the actual numbers, not a summary. Specifically:
+```
+FOCUS_FAILED: the requested window could not be activated: <reason>
+```
 
-- Does `focusedAXElementWindowID` return nil, the right window id, or a different one?
-- Do the other two agree with each other and with the requested window?
-- Does the answer change between the three Chrome states from question 1?
+where the reason is one of: another application is frontmost; another window of the same
+application is in front; the application's focused window is `<window N | no window this scan can
+attribute>`; the focused control belongs to `<window N | …>`; or focus moved while the window was
+being checked.
 
-**Remove the logging afterwards** and say that you did.
+So just quote the full refusal from each case in question 1, verbatim. Report specifically:
+
+- Which reason appears for Chrome, and whether it is the same in all three Chrome states?
+- Does TextEdit refuse at all, and with which reason if so?
+- Does the reason name a window id, and is it a window `{"op":"windows"}` also lists?
+
+If the reason is "the focused control belongs to no window this scan can attribute", the
+hypothesis holds and the fix is about clause 3 specifically. If it is one of the first two, the
+hypothesis is wrong and the cause is about which window was targeted, not about accessibility.
 
 ## What to report
 
