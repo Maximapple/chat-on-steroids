@@ -9,6 +9,11 @@
     "scripting",
     "alarms"
   ],
+  "optional_permissions": [
+    "debugger",
+    "tabs",
+    "tabGroups"
+  ],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
@@ -17,6 +22,9 @@
     "http://127.0.0.1:8767/*",
     "http://127.0.0.1:8768/*",
     "http://127.0.0.1:8769/*"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js",

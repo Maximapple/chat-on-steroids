@@ -427,6 +427,52 @@ $('overwriteToggle').addEventListener('change', async () => {
   }
 });
 
+/**
+ * Browser control is the one switch that changes what the extension is allowed to do.
+ *
+ * Chrome only shows a permission prompt from a real user gesture, which is why this lives in
+ * the popup rather than in a settings round trip: the click that turns it on *is* the consent.
+ * Turning it off both revokes the permissions and drops any live session, so "off" means the
+ * capability is gone, not merely unused.
+ */
+async function syncBrowserControl() {
+  try {
+    const status = await webext.runtime.sendMessage({ type: 'browser_status' });
+    const on = status?.granted === true;
+    $('browserControlToggle').checked = on;
+    $('browserControlToggle').closest('.row')?.classList.toggle('on', on);
+  } catch {
+    $('browserControlToggle').checked = false;
+  }
+}
+
+$('browserControlToggle').addEventListener('change', async () => {
+  const wanted = $('browserControlToggle').checked === true;
+  try {
+    if (wanted) {
+      const granted = await new Promise((resolve) => {
+        webext.permissions.request(
+          { permissions: ['debugger', 'tabs', 'tabGroups'], origins: ['<all_urls>'] },
+          (result) => { void webext.runtime.lastError; resolve(Boolean(result)); }
+        );
+      });
+      if (!granted) $('browserControlToggle').checked = false;
+    } else {
+      // Stop first, then revoke: revoking under a live session would leave a debugger
+      // attachment this extension can no longer address, and the banner with it.
+      await webext.runtime.sendMessage({ type: 'browser_detach' }).catch(() => null);
+      await new Promise((resolve) => {
+        webext.permissions.remove(
+          { permissions: ['debugger', 'tabs', 'tabGroups'], origins: ['<all_urls>'] },
+          () => { void webext.runtime.lastError; resolve(); }
+        );
+      });
+    }
+  } finally {
+    await syncBrowserControl();
+  }
+});
+
 $('replaceDraftToggle').addEventListener('change', async () => {
   const previous = replaceWorkerDrafts;
   replaceWorkerDrafts = $('replaceDraftToggle').checked === true;
