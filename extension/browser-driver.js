@@ -226,7 +226,18 @@ const POINTER_SOURCE = `(() => {
   return node;
 })()`;
 
+/**
+ * Where the overlay was last put, so it can be put back.
+ *
+ * The overlay lives in the document and a navigation replaces the document. It was drawn at
+ * attach and thereafter only by mouse actions, so navigate-then-look — the exact order the QA
+ * script asks for — found nothing, and the pointer the user watches vanished for every page
+ * change until something happened to move it.
+ */
+let pointerAt = { x: 0, y: 0, pressed: false };
+
 async function movePointer(x, y, pressed = false) {
+  pointerAt = { x, y, pressed };
   try {
     await send('Runtime.evaluate', {
       expression:
@@ -238,6 +249,11 @@ async function movePointer(x, y, pressed = false) {
     // A page mid-navigation has no document to draw into. The action still stands; only its
     // illustration is missing, and that is never a reason to fail the action.
   }
+}
+
+/** Draws the overlay again wherever it last was, after a new document replaced it. */
+async function restorePointer() {
+  await movePointer(pointerAt.x, pointerAt.y, pointerAt.pressed);
 }
 
 async function removePointer() {
@@ -1005,6 +1021,7 @@ export const browserDriver = {
         // Already validated above, where it had to be.
         const url = String(action.url ?? '');
         await send('Page.navigate', { url }, NAVIGATE_TIMEOUT_MS);
+        await restorePointer();
         return { navigated: url };
       }
       case 'back':
@@ -1014,10 +1031,12 @@ export const browserDriver = {
         const entry = history.entries?.[index];
         if (!entry) throw fail('BROWSER_NO_HISTORY', `there is nothing to go ${type} to`);
         await send('Page.navigateToHistoryEntry', { entryId: entry.id }, NAVIGATE_TIMEOUT_MS);
+        await restorePointer();
         return { navigated: entry.url };
       }
       case 'reload':
         await send('Page.reload', {}, NAVIGATE_TIMEOUT_MS);
+        await restorePointer();
         return { reloaded: true };
 
       case 'click_ref': {
@@ -1199,6 +1218,10 @@ export const browserDriver = {
     // Reading a page is as much a use of the session as acting on one — a refused page must not
     // be readable either, and observe is how anything would be read.
     if (session) await this.assertPageStillAllowed();
+    // And the screenshot below is where the pointer has to appear. A page can replace its own
+    // document without any navigation action to hook — a clicked link, a redirect — so drawing
+    // it here covers what re-drawing after the navigation actions cannot.
+    if (session) await restorePointer();
     await this.ensureAttached();
     const tab = await currentTab(session.tabId);
     session.url = tab.url ?? session.url;
