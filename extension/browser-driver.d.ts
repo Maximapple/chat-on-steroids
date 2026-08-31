@@ -82,7 +82,8 @@ export type BrowserAction =
   | { type: 'set_value'; ref: string; text: string };
 
 export declare const browserDriver: {
-  status(): BrowserSessionStatus;
+  status(): Promise<BrowserSessionStatus>;
+  ensureAttached(openUrl?: string | null): Promise<void>;
   attach(tabId: number): Promise<BrowserSessionStatus>;
   detach(): Promise<BrowserSessionStatus>;
   forget(tabId: number): void;

@@ -12,6 +12,7 @@ import { JSDOM } from 'jsdom';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   BROWSER_PERMISSIONS,
+  browserDriver,
   COLLECT_SOURCE,
   DRIVEN_GROUP_TITLE,
   buttonMask,
@@ -87,6 +88,38 @@ describe('what browser control refuses to attach to', () => {
     expect(refusedUrl('')).toBe(true);
     expect(refusedUrl('   ')).toBe(true);
     expect(refusedUrl('javascript:alert(1)')).toBe(true);
+  });
+});
+
+describe('why no tab could be taken', () => {
+  const withTabs = async (tabs: unknown[], run: () => Promise<void>) => {
+    const original = (globalThis as { chrome?: unknown }).chrome;
+    (globalThis as { chrome?: unknown }).chrome = { tabs: { query: async () => tabs } };
+    try {
+      await run();
+    } finally {
+      (globalThis as { chrome?: unknown }).chrome = original;
+    }
+  };
+
+  /**
+   * "Nothing is open" and "nothing whose address I may read" are different problems, and only
+   * the second is the user's to solve. Chrome answers `tab.url` with undefined wherever the
+   * extension has no access, and those tabs are refused rather than driven — so a browser full
+   * of pages can present as an empty one, and the advice to open a page changes nothing.
+   */
+  it('says the addresses cannot be read rather than that nothing is open', async () => {
+    await withTabs([{ id: 1 }, { id: 2 }], async () => {
+      await expect(browserDriver.ensureAttached()).rejects.toMatchObject({
+        code: 'BROWSER_PERMISSION_REQUIRED'
+      });
+    });
+  });
+
+  it('still says nothing is drivable when the only readable tabs are refused ones', async () => {
+    await withTabs([{ id: 1, url: 'https://chatgpt.com/c/x' }], async () => {
+      await expect(browserDriver.ensureAttached()).rejects.toMatchObject({ code: 'BROWSER_NO_TAB' });
+    });
   });
 });
 

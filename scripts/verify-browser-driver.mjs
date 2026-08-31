@@ -488,6 +488,17 @@ try {
   const secondTitle = await readPage(`document.title`);
   check('navigate loads the requested document', secondTitle === 'Second document', String(secondTitle));
 
+  // The driver attached while the fixture root was open, so anything still reporting that root
+  // is answering with where the run began. The address and title were captured once at attach
+  // and never updated, and status is exactly what a caller uses to confirm where it is — a
+  // stale answer there does not read as missing information, it reads as confirmation.
+  const afterNavigate = await run(
+    `(async () => JSON.stringify(await globalThis.__driver.browserDriver.status()))()`
+  );
+  check('status reports the page the driver is on now, not the one it started on',
+    String(afterNavigate.value ?? '').includes('/second'),
+    afterNavigate.value ?? afterNavigate.error);
+
   await act({ type: 'back' });
   await sleep(900);
   const backTitle = await readPage(`document.title`);
