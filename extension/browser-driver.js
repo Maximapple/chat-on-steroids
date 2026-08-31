@@ -614,8 +614,36 @@ export const browserDriver = {
     return { x: found.x, y: found.y };
   },
 
+  /**
+   * Attaches to the tab a person would mean by "the browser", if nothing is attached yet.
+   *
+   * Making the model ask for this first was bookkeeping it should not have to carry, and one
+   * more thing to get wrong. The newest ordinary tab is the one being worked in; ChatGPT's own
+   * tabs and browser surfaces are skipped by the same refusal list that governs an explicit
+   * attach, so this cannot reach anywhere an explicit attach could not.
+   */
+  async ensureAttached() {
+    if (session) return;
+    let tabs = [];
+    try {
+      tabs = await chrome.tabs.query({});
+    } catch {
+      throw fail('BROWSER_PERMISSION_REQUIRED', 'browser control is off; turn it on in the extension popup');
+    }
+    const candidate = tabs
+      .filter((tab) => Number.isSafeInteger(tab?.id) && !refusedUrl(tab.url))
+      .sort((left, right) => (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0))[0];
+    if (!candidate) {
+      throw fail(
+        'BROWSER_NO_TAB',
+        'no ordinary web page is open to drive. Open the page first; ChatGPT tabs are never driven.'
+      );
+    }
+    await this.attach(candidate.id);
+  },
+
   async act(action) {
-    if (!session) throw fail('BROWSER_NOT_ATTACHED', 'no tab is under browser control');
+    await this.ensureAttached();
     const type = String(action?.type ?? '');
     const button = cdpButton(action?.button);
     const modifiers = (action?.modifiers ?? []).reduce(
@@ -784,7 +812,7 @@ export const browserDriver = {
 
   /** One look: what the page is, what can be acted on, and a picture of it. */
   async observe({ includeScreenshot = true } = {}) {
-    if (!session) throw fail('BROWSER_NOT_ATTACHED', 'no tab is under browser control');
+    await this.ensureAttached();
     const tab = await currentTab(session.tabId);
     session.url = tab.url ?? session.url;
     session.title = tab.title ?? session.title;
