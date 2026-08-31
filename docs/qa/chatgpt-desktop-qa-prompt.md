@@ -13,14 +13,42 @@ click them:
 - **Then fully quit the app and open it again.** macOS caches a permission answer for the life of
   the process; without the restart the app still cannot see what you just granted.
 - Load the Chrome extension: `chrome://extensions` → Developer mode → Load unpacked → the folder
-  the app's **Open extension folder** button opens. In the extension popup, switch **browser
-  control** on and accept the two permission prompts Chrome shows.
+  the app's **Open extension folder** button opens. **Reload it** if it was already installed —
+  an older copy has a manifest Chrome will not grant. Then switch **browser control** on in the
+  popup and accept the site-access prompt. Debugger access comes with the install now, so Chrome
+  does not ask for it here.
+- **Use a new ChatGPT chat for this run.** A chat keeps the tool list it loaded when it opened,
+  and `browser` is only in the list of a chat opened after the app started serving it.
 
 ---
 
 You are testing the desktop and browser automation of an app called Chat On Steroids, connected
-to you as MCP apps. Work through every section below in order. Do not skip a section because an
-earlier one failed — note the failure and continue, so the report covers everything.
+to you as MCP apps. Work through every section below in order.
+
+## What changed since the previous run
+
+The last run scored 17 pass, 4 fail, 11 skipped. Everything it found has been addressed, so the
+checks below are now verifying fixes rather than exploring. Where a check previously failed or
+was skipped, say so in the report and state plainly whether it passes now.
+
+- **Browser control could not be switched on at all.** Chrome refuses `debugger` as an optional
+  permission, so every request failed and the toggle snapped back. It is a required permission
+  now. **Sections E (18–25) were entirely unreachable last time and are the priority of this
+  run.** If the switch still will not stay on, the popup shows the reason underneath it — quote
+  that text verbatim.
+- **The `browser` tool was missing from the connector.** A chat keeps the tool list it loaded, so
+  this conversation must be a *new* one. If `browser` is still absent, run Diagnostics in the app:
+  the *Local server* line names every tool actually being served.
+- **Drag reported success while moving nothing** (check 15). The input is paced now: held,
+  travelled continuously, and dwelt on before release.
+- **A permission revoked in System Settings went unnoticed** until restart (check 28), and the
+  restart note appeared even for permissions nobody had granted.
+- **`No foreground window` while an app was plainly active**, and `FOCUS_FAILED` against a
+  visible window. Both were one cause.
+- **A pointer position outside the captured image** was reported as an image coordinate.
+
+Do not skip a section because an earlier one failed — note the failure and continue, so the
+report covers everything.
 
 Rules for the whole run:
 
@@ -118,6 +146,28 @@ as needing evidence.
 32. Ask for a screenshot with an absurdly large requested width. Confirm it is either clamped or
     refused, and that whatever comes back is coherent.
 
+## H. Fixes with no previous check
+
+These cover behaviour that changed since the last run and was never exercised.
+
+33. **Scroll direction in the browser.** With browser control attached to a long page, scroll down
+    by a positive amount and confirm from a screenshot that the content moved **down**, not up.
+    Then scroll back. This was inverted and nothing caught it.
+34. **Setting a value replaces rather than appends.** In a browser text field that already
+    contains text, set a new value. The field must contain **only** the new text. Then set an
+    empty value and confirm the field is empty, not merely one character shorter.
+35. **The permission list notices a revocation on its own.** With everything granted, turn one
+    permission off in System Settings and return to the app **without restarting**. Within about
+    30 seconds the row must turn red by itself. Report how long it took.
+36. **The restart note only when a restart helps.** With a permission at "Not asked yet" and none
+    refused, confirm the amber restart note is **absent**. Then refuse one and confirm it appears.
+37. **A pointer outside the captured window.** Move the pointer well outside a window, capture
+    that window, and read the reported pointer line. It must say the pointer is outside the frame
+    rather than print image coordinates that fall outside the image.
+38. **The app survives a permission it does not have.** With Accessibility off, fully quit and
+    reopen the app. The window must come back and the connector must answer — desktop actions
+    should refuse with a named permission error, not with a dead tunnel.
+
 ---
 
 # The report
@@ -128,10 +178,10 @@ is not usable.
 **Environment** — macOS version, Mac model and architecture, Chrome version, app version, and
 whether Screen Recording and Accessibility were granted.
 
-**Summary** — how many of the 32 numbered checks passed, failed, or could not be run, and the
+**Summary** — how many of the 38 numbered checks passed, failed, or could not be run, and the
 three most serious problems in one line each.
 
-**Section-by-section** — for every numbered check: the number, PASS / FAIL / SKIPPED, and one or
+**Section-by-section** — for every numbered check, including whether it differs from the previous run: the number, PASS / FAIL / SKIPPED, and one or
 two sentences of what actually happened. For a FAIL, the verbatim error code and message.
 
 **The pointer question** — answer these four directly, because they are the reason for this run:
