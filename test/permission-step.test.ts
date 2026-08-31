@@ -259,7 +259,7 @@ describe('the live re-read', () => {
     expect(main).toContain('accessibility: next.config.capabilities.control && !next.config.readOnly');
   });
 
-  it('polls without prompting, and stops once the step is done', () => {
+  it('polls without prompting, in both directions, and stops only when it cannot apply', () => {
     const ipc = readFileSync(path.join(process.cwd(), 'src', 'main', 'ipc.ts'), 'utf8');
     const preload = readFileSync(path.join(process.cwd(), 'src', 'preload', 'index.ts'), 'utf8');
     expect(ipc).toContain("handle('desktop:refreshAccess'");
@@ -270,6 +270,15 @@ describe('the live re-read', () => {
     expect(main).toContain('api.refreshDesktopAccess()');
     expect(main).toMatch(/watchDesktopPermissions[\s\S]*!step\('desktop'\)\.classList\.contains\('is-done'\)/);
     expect(main).toMatch(/watchDesktopPermissions[\s\S]*clearInterval\(desktopPermissionTimer\)/);
+    // Two cadences, and the slow one keeps running after everything is granted. Stopping there
+    // made the list one-way: it could see a permission appear and never see one go away, so
+    // QA revoked Accessibility and the app kept showing desktop access as complete until it was
+    // restarted. The timer is only torn down when the step cannot apply at all.
+    expect(main).toContain('const period = outstanding ? 2500 : 30_000;');
+    expect(main).toMatch(/if \(!applies\) \{[\s\S]{0,220}clearInterval\(desktopPermissionTimer\)/);
+    expect(main).toContain('}, period);');
+    // A cadence change has to re-arm, or the speed would be whatever it first happened to be.
+    expect(main).toContain('if (desktopPermissionTimer !== null && desktopPermissionPeriod === period) return;');
     // A background poll must not put a toast on screen every few seconds.
     expect(main).toMatch(/refreshDesktopAccess\(\);\s*\n\s*if \(reply\.ok\) apply\(reply\.data\);/);
   });

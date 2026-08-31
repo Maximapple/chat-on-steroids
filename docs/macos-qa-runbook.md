@@ -106,6 +106,22 @@ Chrome 137 and later ignore `--load-extension`, so installed Chrome cannot be dr
 the script prefers a Chrome for Testing build and says so plainly if the extension did not load.
 This is a harness limitation only: users install through **Load unpacked**, which still works.
 
+## 5. When a tool seems to be missing
+
+The QA run found the Desktop connector offering only `observe` and `computer`, with no `browser`,
+and could not tell whether the app fails to publish it or ChatGPT is holding an old tool list.
+The app already answers that. Run **Diagnostics**; the **Local server** line names every tool it
+actually serves:
+
+```
+Answers on loopback and offers 3 tools: browser, computer, observe
+```
+
+If `browser` is in that line, the app publishes it and the connector in ChatGPT needs
+recreating — a connector keeps the tool list it saw when it was made. If `browser` is absent,
+`control` is not switched on for this connector: check that **See and use the desktop** is on and
+that **Read only** is off, since read-only strips control while leaving screenshots.
+
 ## Reporting back
 
 For each item: what you did, what you saw, and for section 1 the exact `pointer=` value. A
