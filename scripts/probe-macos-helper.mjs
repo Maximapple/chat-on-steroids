@@ -18,6 +18,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { readPNG, differenceRegion } from './lib/read-png.mjs';
 
 if (process.platform !== 'darwin') {
   throw new Error(`probe-macos-helper.mjs must run on macOS, got ${process.platform}`);
@@ -219,6 +220,63 @@ if (!candidate) {
     } else {
       console.log(`FAIL  window capture returned pointer=${verdict} with the pointer moved inside it`);
       failed = true;
+    }
+
+    /*
+     * And now the pixels, because "drawn" is the compositor's own word for it.
+     *
+     * The same window is captured twice — once with the pointer at its centre, once with the
+     * pointer parked in the corner of the screen — and the two images are diffed. If the pointer
+     * is really composited, the difference is small and sits where the pointer was. That is the
+     * one thing a verdict cannot tell you, and it is exactly what was wrong before: the code read
+     * correctly, reported success, and put nothing in the picture.
+     */
+    if (verdict === 'drawn' && windowShot['captureMode'] === 'window') {
+      const withPointer = path.join(process.env['TMPDIR'] ?? '/tmp', 'cos-probe-window.png');
+      const parked = path.join(process.env['TMPDIR'] ?? '/tmp', 'cos-probe-window-parked.png');
+      await probe('it can park the pointer away from the window',
+        { op: 'act', actions: [{ type: 'move', x: 4, y: 4 }] });
+      const second = await probe('it captures the window again',
+        { op: 'capture', id: candidate['id'], maxWidth: 640, file: parked });
+
+      if (second?.ok === true) {
+        console.log(`      second capture pointer=${second['pointer']}`);
+        try {
+          const a = readPNG(withPointer);
+          const b = readPNG(parked);
+          const diff = differenceRegion(a, b);
+          const scale = a.width / Number(candidate['width']);
+          const expected = {
+            x: Math.round((cx - Number(candidate['x'])) * scale),
+            y: Math.round((cy - Number(candidate['y'])) * scale)
+          };
+          console.log(`      image ${a.width}x${a.height}, ${diff.count} pixels differ, box ${JSON.stringify(diff.box)}`);
+          console.log(`      pointer was expected near ${expected.x},${expected.y}`);
+
+          if (!diff.box) {
+            console.log('FAIL  the two captures are identical — nothing was drawn into the pixels');
+            failed = true;
+          } else {
+            // A pointer is a small thing. A box covering most of the frame means the window
+            // redrew itself and this comparison proves nothing either way.
+            const localised = diff.box.width <= a.width / 3 && diff.box.height <= a.height / 3;
+            const near =
+              expected.x >= diff.box.x - 24 && expected.x <= diff.box.x + diff.box.width + 24 &&
+              expected.y >= diff.box.y - 24 && expected.y <= diff.box.y + diff.box.height + 24;
+            if (!localised) {
+              console.log('      the window redrew between captures, so position could not be judged');
+            } else if (near) {
+              console.log('      PIXELS CONFIRM the pointer is drawn, at the position it was moved to');
+            } else {
+              console.log('FAIL  pixels changed, but nowhere near where the pointer was put');
+              failed = true;
+            }
+          }
+        } catch (error) {
+          console.log(`FAIL  could not compare the two captures: ${error.message}`);
+          failed = true;
+        }
+      }
     }
   }
 }
