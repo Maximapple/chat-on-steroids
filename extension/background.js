@@ -19,6 +19,7 @@
  * after seconds of idling) and dies with the browser, which is the right lifetime for a
  * record the app has not accepted yet.
  */
+import * as browserDriverModule from './browser-driver.js';
 
 const webext = globalThis.browser ?? globalThis.chrome;
 
@@ -2258,19 +2259,24 @@ const HANDLERS = {
 /**
  * The browser driver, loaded once and only when something actually asks for it.
  *
- * Dynamic rather than static so the module is off the hot path of ordinary observation, and
- * so this file still parses where it is evaluated as a classic script.
+ * Statically imported, because a service worker may not do otherwise: dynamic `import()` is
+ * disallowed on ServiceWorkerGlobalScope by specification, and Chrome refuses it at runtime with
+ * exactly that message. It was dynamic here to keep the module off the hot path of ordinary
+ * observation and to let this file parse where a test evaluates it as a classic script — and
+ * that second reason quietly cost the whole feature: every browser_* message failed in a real
+ * browser while the tests, which never execute an import, stayed green. The test harness stubs
+ * the module now; the product does what the platform allows.
  */
-let browserControlModule = null;
+let browserLifecycleInstalled = false;
 async function browserControl() {
-  if (!browserControlModule) {
-    browserControlModule = await import('./browser-driver.js');
-    // Registered here rather than at load: a session the browser tears down — a closed tab,
-    // Cancel on the debugging banner, DevTools opening — must not leave this worker believing
-    // it still owns one.
-    browserControlModule.installBrowserDriverLifecycle();
+  if (!browserLifecycleInstalled) {
+    browserLifecycleInstalled = true;
+    // Registered on first use rather than at load: a session the browser tears down — a closed
+    // tab, Cancel on the debugging banner, DevTools opening — must not leave this worker
+    // believing it still owns one.
+    browserDriverModule.installBrowserDriverLifecycle();
   }
-  return browserControlModule;
+  return browserDriverModule;
 }
 
 /** Every browser handler answers the same shape, so one refusal path serves all of them. */
