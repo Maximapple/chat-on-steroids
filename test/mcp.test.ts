@@ -631,6 +631,22 @@ describe('surface boundaries', () => {
     }
   });
 
+  /**
+   * The tool cannot vanish, and when it arrives late the app has to say so.
+   *
+   * `browser` appears when control is exposed, and the exposed surface only ever widens — so
+   * switching control on adds it here. What it cannot do is add it to a connector ChatGPT
+   * already created: that keeps the tools/list it first fetched. QA reported `browser` missing
+   * while the app was serving it, and had no way to distinguish "not published" from "published
+   * after your connector was made". Diagnostics now names what grew.
+   */
+  it('remembers a capability switched on after the endpoint started', async () => {
+    everything();
+    // Two reads of the same endpoint; the second must still carry the browser tool.
+    expect(toolNames(await desktop('tools/list'))).toContain('browser');
+    expect(toolNames(await desktop('tools/list'))).toContain('browser');
+  });
+
   it('advertises exactly Desktop’s tools on Desktop, with nothing from Core', async () => {
     everything();
     const names = toolNames(await desktop('tools/list'));

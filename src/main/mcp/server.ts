@@ -216,6 +216,31 @@ interface SurfaceExposure {
 }
 
 /**
+ * Capabilities that were switched on after a connector had already taken its tools/list.
+ *
+ * Recorded for one purpose: telling the user their connector is out of date. Cleared whenever
+ * the exposed surface is reset, because that is the moment a fresh snapshot becomes possible.
+ */
+const capabilitiesWidenedSinceStart = new Set<string>();
+
+function noteCapabilityWidened(name: string): void {
+  if (capabilitiesWidenedSinceStart.has(name)) return;
+  capabilitiesWidenedSinceStart.add(name);
+  // Said once, in the Activity panel, at the moment it happens. Someone who switches a
+  // capability on and then wonders why ChatGPT still cannot see the new tool has the answer in
+  // front of them instead of having to run Diagnostics to find it.
+  logInfo(
+    `capability ${name} switched on after this endpoint started; a connector created before ` +
+      'now keeps its old tool list, so recreate it in ChatGPT to pick up the new tools'
+  );
+}
+
+/** Which capabilities have appeared since a connector last fetched its tool list. */
+export function capabilitiesAddedSinceConnectorSnapshot(): string[] {
+  return [...capabilitiesWidenedSinceStart].sort();
+}
+
+/**
  * What each independently discoverable connector has already exposed.
  *
  * Core and Desktop share one loopback listener, but they are separate MCP servers to the
@@ -281,6 +306,7 @@ export async function startMcpServer(getContext: () => ToolContext): Promise<Mcp
   // TOOL_DISABLED result while the live capability is off. A fresh app/server start
   // resets the surface to the permissions that are enabled at that point.
   forgetExposedSurface();
+  capabilitiesWidenedSinceStart.clear();
   const stableContext = (surface: SurfaceId): ToolContext => {
     const live = getContext();
     const exposed = exposureFor(surface);
@@ -289,6 +315,13 @@ export async function startMcpServer(getContext: () => ToolContext): Promise<Mcp
       exposed.caps = { ...live.caps };
     } else {
       for (const key of Object.keys(live.caps) as Array<keyof ToolContext['caps']>) {
+        // Widening is the whole point of this surface, but it is invisible from the other end:
+        // ChatGPT keeps the tools/list it fetched when the connector was made, so a capability
+        // switched on afterwards adds a tool here that never appears there. QA hit exactly this
+        // and reported `browser` missing while the app was serving it. Remember what grew, so
+        // Diagnostics can say the connector needs recreating instead of leaving someone to
+        // conclude the tool does not exist.
+        if (live.caps[key] && !exposed.caps[key]) noteCapabilityWidened(key);
         if (live.caps[key]) exposed.caps[key] = true;
       }
     }

@@ -27,6 +27,7 @@ import {
 
 import type { Capabilities, Check, Diagnosis, MacOSDesktopAccessStatus } from '../shared/types.js';
 import { surfaceIsUseful } from './mcp/surfaces.js';
+import { capabilitiesAddedSinceConnectorSnapshot } from './mcp/server.js';
 import { refreshMacOSDesktopAccess } from './computer/index.js';
 
 async function fetchJson(
@@ -215,11 +216,23 @@ async function checkLocalServer(url: string): Promise<Check> {
     };
   }
   const names = tools.map((t) => t.name).filter(Boolean);
+  // A tool this server offers is not necessarily a tool ChatGPT can see. A connector keeps the
+  // tools/list it fetched when it was created, so a capability switched on afterwards adds a
+  // tool here that never appears there — QA reported `browser` missing while the app was
+  // serving it, and had no way to tell the two apart. If anything has been added since, say so
+  // here, where the list it is being compared against is on the same line.
+  const added = capabilitiesAddedSinceConnectorSnapshot();
+  const staleNote =
+    added.length > 0
+      ? ` Switched on since this endpoint started: ${added.join(', ')} — a connector created before that keeps its old tool list, so recreate it in ChatGPT to see the new tools.`
+      : '';
   return {
     name: 'Local server',
     status: 'pass',
     ok: true,
-    detail: `Answers on loopback and offers ${names.length} tool${names.length === 1 ? '' : 's'}: ${names.join(', ')}`
+    detail:
+      `Answers on loopback and offers ${names.length} tool${names.length === 1 ? '' : 's'}: ${names.join(', ')}.` +
+      staleNote
   };
 }
 
