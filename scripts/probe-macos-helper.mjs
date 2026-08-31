@@ -153,6 +153,26 @@ if (shot?.ok === true) {
  * The pointer is moved deliberately — parked at 10,10 it would sit outside any window and the
  * honest answer would be outside_region, which proves the geometry check and nothing else.
  */
+/*
+ * A runner has no window open, and without one the window filter cannot be exercised at all —
+ * the first run of this probe reported exactly that and printed UNCOVERED. So open one. TextEdit
+ * with a real document is the most reliable choice: it appears, it has a title, and it needs no
+ * interaction to stay up.
+ */
+let openedWindow = false;
+try {
+  const scratch = path.join(process.env['TMPDIR'] ?? '/tmp', 'cos-probe-window.txt');
+  execFileSync('/bin/sh', ['-c', `printf 'Chat On Steroids pointer probe
+' > ${JSON.stringify(scratch)}`]);
+  execFileSync('/usr/bin/open', ['-a', 'TextEdit', scratch]);
+  openedWindow = true;
+  // Launching is asynchronous and the window has to be mapped before it can be captured.
+  await new Promise((resolve) => setTimeout(resolve, 6000));
+  console.log('      opened a TextEdit window to capture');
+} catch (error) {
+  console.log(`      could not open a window (${error.message}) — the window path may stay uncovered`);
+}
+
 const listed = await probe('it lists windows to capture', { op: 'windows' });
 // The op reports state as foreground/open/minimized — there is no onScreen field. A minimized
 // window has no pixels to capture, so anything else will do.
@@ -163,9 +183,13 @@ const candidate = windows.find((w) =>
 console.log(`      ${windows.length} windows listed, ${windows.filter((w) => w?.['state'] !== 'minimized').length} not minimized`);
 
 if (!candidate) {
-  // Not a failure: a bare runner may genuinely have no ordinary window on screen. Say so, so
-  // a passing probe is never mistaken for having covered this.
   console.log('      no on-screen window here, so the hand-composited pointer path is UNCOVERED');
+  if (openedWindow) {
+    // A window was opened and still none is listed. That is the window enumeration failing,
+    // which is a defect rather than an empty desktop.
+    console.log('FAIL  a window was opened but the helper listed none');
+    failed = true;
+  }
 } else {
   const cx = Math.round(Number(candidate['x']) + Number(candidate['width']) / 2);
   const cy = Math.round(Number(candidate['y']) + Number(candidate['height']) / 2);
@@ -196,6 +220,14 @@ if (!candidate) {
       console.log(`FAIL  window capture returned pointer=${verdict} with the pointer moved inside it`);
       failed = true;
     }
+  }
+}
+
+if (openedWindow) {
+  try {
+    execFileSync('/usr/bin/osascript', ['-e', 'tell application "TextEdit" to quit saving no']);
+  } catch {
+    // Leaving an editor open on a throwaway runner harms nothing; failing the probe for it would.
   }
 }
 
