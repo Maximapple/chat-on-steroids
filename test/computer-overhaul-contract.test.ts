@@ -184,3 +184,29 @@ describe('the pointer never reports a position outside the image', () => {
     expect(tool).toContain('No screenshot frame is active.');
   });
 });
+
+/**
+ * A failed startup step must not take the control plane with it.
+ *
+ * Startup is one long promise chain, and it had nothing to catch a throw: anything that rejected
+ * before the end silently stopped the rest — no bridge, no connect, no message. QA restarted the
+ * app with Accessibility switched off, found the UI did not return, and both tunnels answered
+ * tunnel_client_not_connected. A control plane that never started, indistinguishable from one
+ * that started and broke.
+ *
+ * A permission the user revoked in System Settings must not be able to take the app's own
+ * connection down with it.
+ */
+describe('startup survives a step that throws', () => {
+  const main = readFileSync(path.join(process.cwd(), 'src/main/index.ts'), 'utf8');
+
+  it('logs the failure and still brings up the bridge and connection', () => {
+    expect(main).toContain('let startedControlPlane = false;');
+    expect(main).toContain('startedControlPlane = true;');
+    expect(main).toMatch(/\.catch\(\(error: unknown\) => \{[\s\S]{0,400}logError\(`startup did not finish/);
+    // The recovery is skipped when the control plane is already up, and when the window was
+    // deliberately disabled — a second instance must not start a bridge behind the primary.
+    expect(main).toMatch(/if \(startedControlPlane \|\| windowActivation\.isDisabled\(\)\) return;/);
+    expect(main).toMatch(/\.catch\(\(error: unknown\)[\s\S]*void startBridge\(\)[\s\S]*void connect\(\)/);
+  });
+});

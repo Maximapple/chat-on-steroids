@@ -215,6 +215,9 @@ function refreshTray(): void {
 
 app.on('second-instance', windowActivation.request);
 
+/** Whether startup got as far as bringing up the bridge and connection. */
+let startedControlPlane = false;
+
 void app.whenReady().then(async () => {
   // This guard is intentionally before even app.getPath/init* calls. A secondary instance, or a
   // primary that was told to quit before ready, must never touch the primary's shared userData.
@@ -344,6 +347,7 @@ void app.whenReady().then(async () => {
   if (getConfig().sessions.record || getConfig().multiAgent.enabled) {
     void startBridge();
   }
+  startedControlPlane = true;
   // Retention governs recordings already stored on disk, independent of whether recording is
   // currently enabled. The tray app can stay alive for days, so run once now and keep a coarse
   // maintenance timer rather than making expiry depend on the next process restart.
@@ -355,7 +359,30 @@ void app.whenReady().then(async () => {
   });
 
   if (getConfig().ui.autoConnect) void connect();
-});
+})
+  /*
+   * Startup is one long chain, and it had nothing to catch a throw.
+   *
+   * Anything that rejected before the end simply stopped the rest of it, silently: no bridge, no
+   * connect, no message. QA restarted the app with Accessibility switched off and found the UI
+   * did not come back and both tunnels answered `tunnel_client_not_connected` — a control plane
+   * that never started, reported as if it had started and then failed.
+   *
+   * Two things follow. A failure is now logged instead of becoming an unhandled rejection
+   * nobody sees, and the control plane is brought up regardless, because a permission the user
+   * revoked in System Settings must not be able to take the app's own connection down with it.
+   * If it was already started this is a no-op.
+   */
+  .catch((error: unknown) => {
+    logError(`startup did not finish: ${(error as Error)?.message ?? String(error)}`);
+    if (startedControlPlane || windowActivation.isDisabled()) return;
+    try {
+      if (getConfig().sessions.record || getConfig().multiAgent.enabled) void startBridge();
+      if (getConfig().ui.autoConnect) void connect();
+    } catch (secondary) {
+      logError(`could not start the control plane after a failed startup: ${(secondary as Error)?.message}`);
+    }
+  });
 
 app.on('before-quit', () => {
   if (!ownsAppRuntime(hasSingleInstanceLock)) return;
