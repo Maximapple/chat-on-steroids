@@ -110,8 +110,10 @@ This is a harness limitation only: users install through **Load unpacked**, whic
 
 The QA run found the Desktop connector offering only `observe` and `computer`, with no `browser`,
 and could not tell whether the app fails to publish it or ChatGPT is holding an old tool list.
-The app already answers that. Run **Diagnostics**; the **Local server** line names every tool it
-actually serves:
+The app already answers that. In the app: **Home** → the **Health** card → **Run checks**. Two
+lines in the result matter. **Build** names the commit this app was built from, which is the only
+way to tell two builds apart — they all call themselves 2.0.2, and a QA run was once spent on an
+app that predated the feature it was testing. **Local server** names every tool actually served:
 
 ```
 Answers on loopback and offers 3 tools: browser, computer, observe

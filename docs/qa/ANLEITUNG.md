@@ -27,6 +27,21 @@ nicht — macOS merkt sich die Antwort pro Prozess.
 5. Auf das Erweiterungs-Symbol klicken → **Browsersteuerung** einschalten → beide Chrome-Fragen
    mit Ja beantworten
 
+## 3b. Kurz prüfen, dass die richtige App läuft
+
+In der App: **Home** → Karte **Health** → **Run checks**.
+
+Zwei Zeilen zählen:
+
+```
+Build          Chat On Steroids 2.0.2, built from <commit> …
+Local server   … offers 3 tools: browser, computer, observe
+```
+
+Steht bei **Build** nicht der Commit des DMG, das du gerade installiert hast — oder fehlt die
+Zeile ganz — läuft noch die alte App, und Testen ist sinnlos. Fehlt `browser` bei **Local
+server**, siehe Schritt 3 (Erweiterung) und öffne einen neuen ChatGPT-Chat.
+
 ## 4. Automatische Prüfungen (Claude auf dem Mac)
 
 Terminal:
