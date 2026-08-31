@@ -213,6 +213,35 @@ describe('the live re-read', () => {
    * anything is outstanding — and never with a prompt, which would fire a system dialog every
    * few seconds at whoever left the tab open.
    */
+  /**
+   * When the step hides itself, and what that costs.
+   *
+   * The rows only exist because a Desktop capability is on. With none on there is nothing to
+   * ask for, so the step hides — and, because a hidden step must not block the wizard behind
+   * it, hiding also counts as done. That combination is invisible from the outside and it
+   * confused the first person to look for the list on a real Mac: capability off, so no step,
+   * and the wizard collapsed because everything counted as finished.
+   *
+   * Asserted against the source because the gate lives in the renderer module. The point is
+   * that neither half changes without someone noticing: dropping the family check would paint
+   * macOS-only rows on Windows, and returning false when hidden would wedge setup permanently
+   * on a machine that needs no permission at all.
+   */
+  it('hides itself when nothing needs a permission, and then counts as done', () => {
+    const gate = main.match(/const applies = ([^;]+);/);
+    expect(gate).not.toBeNull();
+    // macOS only, and only when a capability actually needs one of the two.
+    expect(gate![1]).toContain("platform?.family === 'macos'");
+    expect(gate![1]).toContain('needs.screen || needs.accessibility');
+    // 'macos' is what the main process reports; 'darwin' here would hide the step forever.
+    expect(main).toContain("stepNode.hidden = !applies");
+    expect(main).toMatch(/if \(!applies\) return true;/);
+
+    // Read-only drops the Accessibility need — it cannot click anything — but still wants
+    // Screen Recording, so the step stays for screenshots alone.
+    expect(main).toContain('accessibility: next.config.capabilities.control && !next.config.readOnly');
+  });
+
   it('polls without prompting, and stops once the step is done', () => {
     const ipc = readFileSync(path.join(process.cwd(), 'src', 'main', 'ipc.ts'), 'utf8');
     const preload = readFileSync(path.join(process.cwd(), 'src', 'preload', 'index.ts'), 'utf8');
