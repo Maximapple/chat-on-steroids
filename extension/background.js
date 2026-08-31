@@ -1896,6 +1896,11 @@ const HANDLERS = {
       `&goalClient=${encodeURIComponent(String(source.tab))}` +
       `&compactToken=${encodeURIComponent(typeof message.compactToken === 'string' ? message.compactToken : '')}`;
     const result = await call(`/activity${query}`);
+    // Every reply passes through here, so this is where the app's own view of "still running"
+    // is available to act on. Not awaited: the tab flag must never delay an activity reply.
+    if (result && result.ok === true && result.data) {
+      void holdTabForExecution(source.tab, tabIsExecuting(result.data));
+    }
     return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
   },
   /** Reinstall the least-trusted MAIN-world reader when a live content script loses it. */
@@ -2254,6 +2259,73 @@ async function browserResult(run, fallbackCode) {
   }
 }
 
+/**
+ * Whether a tab is still taking part in a run, judged from the app's own activity reply.
+ *
+ * Exported shape rather than an inline condition because this decides when Chrome is allowed
+ * to reclaim a tab, and a rule that decides that should be readable and testable on its own.
+ *
+ * Deliberately narrow. Protecting every ChatGPT tab would disable Memory Saver for someone
+ * who keeps twenty of them open, which is a worse product than the problem it solves. These
+ * five conditions are the ones where losing the page costs something that cannot be recovered
+ * by looking again later:
+ *
+ *  - the owning prime of a running swarm, which the app only projects to that one chat;
+ *  - a worker chat whose turn is still going;
+ *  - a compaction in flight, which is one generation that cannot be restarted;
+ *  - tool calls the app is waiting on;
+ *  - background exec sessions still running, or finished with output nobody has read.
+ */
+function tabIsExecuting(data) {
+  if (!data || typeof data !== 'object') return false;
+  const number = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
+  const exec = data.backgroundExec && typeof data.backgroundExec === 'object' ? data.backgroundExec : {};
+  if (data.swarm && typeof data.swarm === 'object' && data.swarm.running === true) return true;
+  if (data.bootstrap === 'worker' && data.generating === true) return true;
+  if (data.job && typeof data.job === 'object' && data.job.busy === true) return true;
+  if (number(data.pendingTools) > 0) return true;
+  if (number(exec.running) > 0 || number(exec.exitedUnread) > 0) return true;
+  return false;
+}
+
+/**
+ * Tabs currently held back from Chrome's Memory Saver, so the flag is only written on change.
+ *
+ * Not persisted on purpose: `autoDiscardable` is per-tab browser state that dies with the tab,
+ * and a stale set restored into a new browser session would describe tabs that no longer exist.
+ */
+const heldTabs = new Set();
+
+/**
+ * Keeps Chrome from reclaiming a tab that is still doing the work.
+ *
+ * Memory Saver discards a background tab after a period of inactivity, which takes the content
+ * script with it: the recorder stops, activity polling stops, and fresh request-to-conversation
+ * evidence stops being produced. The app is deliberately conservative without that evidence, so
+ * the visible symptom is safe calls landing in Unattributed activity and identity-sensitive
+ * ones failing closed with CALLER_IDENTITY_REQUIRED — in the middle of a run that was working.
+ *
+ * `autoDiscardable` covers discarding, which is the case that loses the document. It does not
+ * prevent freezing, and nothing in the extension API does; a frozen tab resumes with its
+ * document intact, so the recorder comes back on its own rather than needing to re-register.
+ *
+ * Failure here is never fatal. The flag is an optimisation of Chrome's memory policy, not a
+ * correctness boundary, and a browser that refuses it leaves exactly the behaviour we have now.
+ */
+async function holdTabForExecution(tabId, executing) {
+  if (!Number.isSafeInteger(tabId) || tabId < 0) return;
+  const held = heldTabs.has(tabId);
+  if (held === executing) return;
+  try {
+    await webext.tabs.update(tabId, { autoDiscardable: !executing });
+    if (executing) heldTabs.add(tabId);
+    else heldTabs.delete(tabId);
+  } catch {
+    // An older browser, a tab that just closed, or a build without the property. Leave the
+    // set alone so the next reply tries again rather than believing something it did not do.
+  }
+}
+
 webext.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const handler = message && typeof message.type === 'string' ? HANDLERS[message.type] : null;
   if (!handler) {
@@ -2443,6 +2515,8 @@ if (webext.tabs && webext.tabs.onCreated && typeof webext.tabs.onCreated.addList
 // Document unload is not conversation lifetime. A real tab close is: reload keeps the
 // same tab id, while closing it wakes the service worker and retires only that tab's claim.
 webext.tabs.onRemoved.addListener((id) => {
+  // The flag died with the tab; only our record of it would survive.
+  heldTabs.delete(id);
   revivalReuseAttempted.delete(id);
   clearDeferredRevivalOffersForTab(id);
   void serializeTab(id, async () => {
