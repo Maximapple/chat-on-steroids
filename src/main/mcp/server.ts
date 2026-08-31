@@ -230,8 +230,9 @@ function noteCapabilityWidened(name: string): void {
   // capability on and then wonders why ChatGPT still cannot see the new tool has the answer in
   // front of them instead of having to run Diagnostics to find it.
   logInfo(
-    `capability ${name} switched on after this endpoint started; a connector created before ` +
-      'now keeps its old tool list, so recreate it in ChatGPT to pick up the new tools'
+    `capability ${name} switched on; the tools it adds are being served now. A ChatGPT chat ` +
+      'that already loaded this connector keeps the tool list it saw, so start a new chat to ' +
+      'pick them up — and recreate the connector only if a new chat still does not show them'
   );
 }
 

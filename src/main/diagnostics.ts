@@ -224,7 +224,7 @@ async function checkLocalServer(url: string): Promise<Check> {
   const added = capabilitiesAddedSinceConnectorSnapshot();
   const staleNote =
     added.length > 0
-      ? ` Switched on since this endpoint started: ${added.join(', ')} — a connector created before that keeps its old tool list, so recreate it in ChatGPT to see the new tools.`
+      ? ` Switched on since this endpoint started: ${added.join(', ')}. The tools they add are being served now, but a chat that already loaded this connector keeps the list it saw — start a new chat, and only recreate the connector if that still does not show them.`
       : '';
   return {
     name: 'Local server',
