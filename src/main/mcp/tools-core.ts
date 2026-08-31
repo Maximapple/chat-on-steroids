@@ -617,6 +617,18 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
       .sort((left, right) => left - right);
   };
 
+  /**
+   * Whether any tracked session anywhere is holding a completed result.
+   *
+   * Process-wide on purpose, and it reads like an over-reach until you ask what it gates.
+   * It never decides a quota — that is unreadExecResultIds, which is strictly per chat. It
+   * decides two things about an *unattributable* call: whether to pay for the bounded wait
+   * that lets a late-arriving identity land, and, if identity still cannot be proven, whether
+   * to refuse. When we do not know who is calling, we cannot know they are not the chat that
+   * is already over quota, so refusing is the conservative half of the issue #36 fix; the
+   * alternative lets an unprovable caller launch the unbounded replacement wave that issue
+   * describes. The refusal is not terminal: identity is retried once the extension reconnects.
+   */
   const anyUnreadExecResults = (): boolean =>
     execTrackedProcessIds().some(
       (processId) => unifiedExecManager.backgroundState(processId)?.exitedUnread === true
