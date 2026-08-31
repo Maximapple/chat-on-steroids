@@ -209,30 +209,63 @@ describe('macOS desktop safety hardening', () => {
     expect(swift.match(/TISCopyCurrentKeyboardLayoutInputSource/g)).toHaveLength(1);
     expect(swift.match(/TISGetInputSourceProperty/g)).toHaveLength(1);
     expect(swift).toMatch(
-      /private func currentKeyboardLayout\(\)[\s\S]*TISCopyCurrentKeyboardLayoutInputSource[\s\S]*TISGetInputSourceProperty[\s\S]*if Thread\.isMainThread \{ return read\(\) \}[\s\S]*DispatchQueue\.main\.async/
+      /private func currentKeyboardLayout\(\)[\s\S]*onMainQueue \{[\s\S]*TISCopyCurrentKeyboardLayoutInputSource[\s\S]*TISGetInputSourceProperty/
     );
-
-    // Already on main runs inline, and a busy main thread refuses instead of hanging.
-    expect(swift).toContain('if Thread.isMainThread { return read() }');
-    // The call, not the prose: the function's own comment names it as the thing to avoid.
-    expect(swift).not.toMatch(/DispatchQueue\.main\.sync\s*[({]/);
-    expect(swift).toContain('private let keyboardLayoutMainQueueTimeout: TimeInterval = 2.0');
-    expect(swift).toContain('done.wait(timeout: .now() + keyboardLayoutMainQueueTimeout) == .success');
-    expect(swift).toContain('"the active keyboard layout could not be read in time"');
 
     // The layout bytes are copied out: they belong to an input source released on return.
     expect(swift).toContain('Data(bytes: bytes, count: CFDataGetLength(data))');
     // UCKeyTranslate is pure over those bytes, so the 128-keycode search — the expensive
     // half — stays out of the main-queue section and off the UI thread entirely.
-    const mainQueueSection = swift.slice(
-      swift.indexOf('private func currentKeyboardLayout()'),
-      swift.indexOf('private func currentLayoutKey(')
-    );
-    expect(mainQueueSection).toContain('TISGetInputSourceProperty');
-    expect(mainQueueSection).not.toContain('UCKeyTranslate');
     expect(swift).toMatch(
       /private func currentLayoutKey\(for logicalName: String, in snapshot: KeyboardLayoutSnapshot\)[\s\S]*UCKeyTranslate/
     );
+    const hop = swift.slice(
+      swift.indexOf('private func onMainQueue'),
+      swift.indexOf('private let keyCodes')
+    );
+    expect(hop).not.toContain('UCKeyTranslate');
+  });
+
+  /**
+   * One marshal, used by everything that needs AppKit or Text Services from the addon's
+   * worker thread. A bounded, deadlock-free hop is exactly the primitive that must not exist
+   * in two slightly different copies.
+   */
+  it('marshals to the main queue once, inline when already there and never unbounded', () => {
+    expect(swift.match(/private func onMainQueue<Value>/g)).toHaveLength(1);
+    expect(swift).toContain('if Thread.isMainThread { return work() }');
+    // The call, not the prose: the function's own comment names it as the thing to avoid.
+    expect(swift).not.toMatch(/DispatchQueue\.main\.sync\s*[({]/);
+    expect(swift).toContain('private let mainQueueTimeout: TimeInterval = 2.0');
+    expect(swift).toContain('done.wait(timeout: .now() + mainQueueTimeout) == .success');
+    expect(swift).toContain('"the active keyboard layout could not be read in time"');
+    // Every AppKit/Text Services reader goes through it rather than dispatching its own.
+    expect(swift.match(/DispatchQueue\.main\.async/g)).toHaveLength(1);
+  });
+
+  /**
+   * The pointer has to be drawn into a window capture, because `showsCursor` cannot reach it.
+   *
+   * A desktop-independent window filter captures the window detached from the desktop, and the
+   * pointer is a display compositing layer rather than part of any window's content — so the
+   * flag is set and does nothing on exactly the path an ordinary `observe` on a window uses.
+   * Display capture keeps the system's own pointer, which is why only windows are composited.
+   */
+  it('composites the pointer into a window capture, at its hotspot', () => {
+    expect(swift).toContain('private func drawingPointer(on image: CGImage, region: CGRect) -> CGImage');
+    expect(swift).toMatch(
+      /private func captureWindow[\s\S]*SCContentFilter\(desktopIndependentWindow: window\)[\s\S]*drawingPointer\(on: resized, region: region\)/
+    );
+    // Read through the shared hop, because NSCursor is AppKit.
+    expect(swift).toMatch(/private func currentPointerImage\(\)[\s\S]*onMainQueue \{[\s\S]*NSCursor\.currentSystem/);
+    // At the hotspot — the pixel the pointer addresses — not the image origin.
+    expect(swift).toContain('let x = (location.x - pointer.hotSpot.x - region.minX) * scale');
+    expect(swift).toContain('let top = (location.y - pointer.hotSpot.y - region.minY) * scale');
+    // A pointer that is not over this window is not drawn onto it.
+    expect(swift).toContain('region.contains(location)');
+    // Display capture still gets the system pointer, and must not be composited twice.
+    expect(swift.match(/configuration\.showsCursor = true/g)).toHaveLength(2);
+    expect(swift).not.toMatch(/private func captureDisplay[\s\S]{0,600}drawingPointer/);
   });
 
   /**
