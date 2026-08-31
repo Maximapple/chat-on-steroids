@@ -332,10 +332,20 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
               throw err;
             }
             const shot = await screenshot({ maxWidth: input.max_width });
+            // Why there is no window matters here as much as on the bare query, and this
+            // path was missed when that one was fixed — which is why QA still saw the old
+            // wording. Asked separately because the failure above tells us nothing about it.
+            let selfInFront = false;
+            try {
+              selfInFront = (await activeWindow())?.foregroundIsSelf === true;
+            } catch {
+              // Best effort. This only chooses between two ways of saying the same fallback, and
+              // failing to learn which would be a poor reason to fail the screenshot itself.
+            }
             return desktopImageResult(
               prefix(
                 waited,
-                `No foreground window, so this is the whole primary monitor.\nframe: ${shot.frameId}  ${shot.width}x${shot.height} — pass frameId ${shot.frameId} with any coordinates you read off it`
+                `${selfInFront ? 'Chat On Steroids itself is in front and its own windows are never exposed, so this is the whole primary monitor.' : 'No foreground window, so this is the whole primary monitor.'}\nframe: ${shot.frameId}  ${shot.width}x${shot.height} — pass frameId ${shot.frameId} with any coordinates you read off it`
               ),
               shot.data
             );

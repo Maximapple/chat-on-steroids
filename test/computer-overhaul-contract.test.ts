@@ -314,3 +314,26 @@ describe('a browser failure says whether a retry is safe', () => {
     expect(control.match(/command\.collectedAt === null/g)).toHaveLength(2);
   });
 });
+
+/**
+ * A drag that goes nowhere is refused, not performed.
+ *
+ * Mapped coordinates are clamped into the frame's region — right for a click at an edge, wrong
+ * for a path. A route lying outside the frame collapses to one point: no threshold is crossed,
+ * no drag session begins, and the helper answers ok because every event it was asked to post
+ * was posted. QA reported "success with no effect" twice, and a separate measurement on the same
+ * machine moved a file 6 times out of 6 driving the helper directly — the difference between
+ * those two is this mapping, which the direct route never passes through.
+ */
+describe('a drag whose path collapses is refused', () => {
+  const source = readFileSync(path.join(process.cwd(), 'src/main/computer/index.ts'), 'utf8');
+
+  it('checks the mapped path for distance, and says what to do about it', () => {
+    expect(source).toContain('DRAG_PATH_COLLAPSED');
+    // Judged after clamping, which is the only place the collapse can be seen.
+    expect(source).toContain('const distinct = xs.some((x, index) => x !== xs[0] || ys[index] !== ys[0]);');
+    // Nothing is sent, and the message names the frame rather than only the symptom.
+    expect(source).toContain('Nothing was sent. Take a fresh screenshot and read the coordinates off that image.');
+    expect(source).toMatch(/DRAG_PATH_COLLAPSED[\s\S]{0,200}frame\.id/);
+  });
+});
