@@ -25,29 +25,45 @@ click them:
 You are testing the desktop and browser automation of an app called Chat On Steroids, connected
 to you as MCP apps. Work through every section below in order.
 
+## Before anything else: confirm this is the right build
+
+The previous run scored 24 pass, 3 fail, 11 skipped — and its whole priority section was
+unreachable because the app under test predated the feature it was there to exercise. Nothing on
+screen could reveal that at the time. It can now, and this is the first thing to establish.
+
+Ask the user for the **window title** of Chat On Steroids. It must read:
+
+```
+Chat On Steroids 2.0.2+<commit>
+```
+
+A title showing only `2.0.2`, with no commit, is an older build: **stop and say so**, because
+every result after that measures the wrong application. This costs one question and saves a run.
+
 ## What changed since the previous run
 
-The last run scored 17 pass, 4 fail, 11 skipped. Everything it found has been addressed, so the
-checks below are now verifying fixes rather than exploring. Where a check previously failed or
-was skipped, say so in the report and state plainly whether it passes now.
+Everything the last run found has been addressed, so the checks below verify fixes rather than
+explore. For each check, say whether it differs from last time.
 
-- **Browser control could not be switched on at all.** Chrome refuses `debugger` as an optional
-  permission, so every request failed and the toggle snapped back. It is a required permission
-  now. **Sections E (18–25) were entirely unreachable last time and are the priority of this
-  run.** If the switch still will not stay on, the popup shows the reason underneath it — quote
-  that text verbatim.
-- **The `browser` tool was missing from the connector.** A chat keeps the tool list it loaded, so
-  this conversation must be a *new* one. If `browser` is still absent, ask the user to open the
-  app, go to **Home → Health → Run checks**, and read back two lines: **Build**, which names the
-  commit the app was built from, and **Local server**, which names every tool actually served. An
-  app with no Build line predates this work entirely and cannot pass section E.
-- **Drag reported success while moving nothing** (check 15). The input is paced now: held,
-  travelled continuously, and dwelt on before release.
-- **A permission revoked in System Settings went unnoticed** until restart (check 28), and the
-  restart note appeared even for permissions nobody had granted.
-- **`No foreground window` while an app was plainly active**, and `FOCUS_FAILED` against a
-  visible window. Both were one cause.
-- **A pointer position outside the captured image** was reported as an image coordinate.
+- **Browser control could not be switched on at all**, so sections E (18–25) and checks 33–34
+  have never once executed. Chrome refuses `debugger` as an optional permission; it is required
+  now. **That makes E the priority of this run.** If the toggle still will not stay on, the popup
+  states the reason underneath it — quote it verbatim.
+- **The `browser` tool was missing from the connector.** Use a *new* chat: one that is already
+  open keeps the tool list it loaded. If `browser` is still absent, have the user open **Home →
+  Health → Run checks** and read back the **Local server** line — it names every tool served, and
+  now also says *why* `browser` is missing when it is.
+- **Drag reported success while moving nothing** (check 15) — failed in both previous runs, once
+  intermittently. The input is paced now: held, travelled continuously, dwelt on before release.
+  Retry it if the first attempt works, since the defect was that a retry could succeed where the
+  first silently did not.
+- **A revoked permission went unnoticed until restart** (checks 28 and 35), and the restart note
+  appeared for permissions nobody had granted.
+- **`No foreground window` while an app was plainly active.** Two independent causes, both fixed:
+  a transient child window winning z-order, and the helper never seeing applications launched
+  after it started.
+- **Scrolling ran backwards and `set_value` appended instead of replacing** in the browser
+  driver — checks 33 and 34, never yet executed.
 
 Do not skip a section because an earlier one failed — note the failure and continue, so the
 report covers everything.
