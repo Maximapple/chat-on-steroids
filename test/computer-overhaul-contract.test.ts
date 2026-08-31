@@ -338,8 +338,10 @@ describe('a drag whose path collapses is refused', () => {
     expect(source).toContain('DRAG_PATH_COLLAPSED');
     // Judged after clamping, which is the only place the collapse can be seen.
     expect(source).toContain('const distinct = xs.some((x, index) => x !== xs[0] || ys[index] !== ys[0]);');
-    // Nothing is sent, and the message names the frame rather than only the symptom.
-    expect(source).toContain('Nothing was sent. Take a fresh screenshot and read the coordinates off that image.');
-    expect(source).toMatch(/DRAG_PATH_COLLAPSED[\s\S]{0,200}frame\.id/);
+    // Nothing is sent, and the message names the cause that can actually occur here. Points are
+    // checked against the frame before this, so an out-of-frame route never reaches it; what
+    // does is a path too short to survive the scale of a Retina capture.
+    expect(source).toContain('Nothing was sent — use endpoints further apart.');
+    expect(source).toMatch(/DRAG_PATH_COLLAPSED[\s\S]{0,220}frame\.scale/);
   });
 });

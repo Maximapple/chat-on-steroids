@@ -1657,21 +1657,19 @@ async function actLocked(
         const ys = action.path.map((p) => toScreenY(p.y));
         // A drag that goes nowhere is not a drag, and must not be reported as one.
         //
-        // Mapped coordinates are clamped into the frame's region, which is right for a click at
-        // the edge and wrong for a path: a route that lies outside the frame collapses to a
-        // single point, no threshold is crossed, no drag session begins, and the helper answers
-        // ok because every event it was asked to post was posted. That is the "success with no
-        // effect" QA has now reported twice, and the caller cannot tell it from a real drag.
-        //
-        // The likely cause is a frame mismatch — coordinates read off one screenshot and sent
-        // against another, or against a stale one — so the refusal says that rather than merely
-        // reporting a zero length.
+        // Points are already checked against the frame above, so an out-of-frame route is
+        // refused before it reaches here. What survives that and still collapses is a path too
+        // short to survive the scale: a screenshot of a Retina display is larger than the region
+        // it shows, so image pixels divide down, and a drag of a pixel or two lands on one
+        // screen point. Nothing crosses the drag threshold, no session begins, and the helper
+        // answers ok because every event it was asked to post was posted — the "success with no
+        // effect" a caller cannot tell from a real drag.
         const distinct = xs.some((x, index) => x !== xs[0] || ys[index] !== ys[0]);
         if (!distinct) {
           throw new ComputerError(
-            `DRAG_PATH_COLLAPSED: every point of this drag maps to ${xs[0]},${ys[0]} once clamped into frame ` +
-              `${frame.id} (${frame.region.width}x${frame.region.height} at ${frame.region.x},${frame.region.y}). ` +
-              'Nothing was sent. Take a fresh screenshot and read the coordinates off that image.'
+            `DRAG_PATH_COLLAPSED: every point of this drag lands on ${xs[0]},${ys[0]} on screen. The ` +
+              `image is ${frame.scale > 1 ? `${frame.scale}x` : 'not'} scaled relative to the desktop, so a path ` +
+              'this short covers no distance there. Nothing was sent — use endpoints further apart.'
           );
         }
         return { type: 'drag', xs, ys, button: action.button ?? 'left' };
