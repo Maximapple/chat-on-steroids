@@ -245,3 +245,44 @@ describe('the health check explains a missing browser tool', () => {
     expect(diagnostics).toMatch(/name: 'Build'[\s\S]{0,300}BUILD_REVISION/);
   });
 });
+
+/**
+ * One identity, in every place a build is named.
+ *
+ * A release number cannot tell two builds apart, and that ambiguity cost a whole QA run: an app
+ * predating the feature under test was indistinguishable from one that had it, from the outside
+ * and from ChatGPT's side alike. The commit rides along as semver build metadata — valid semver,
+ * ignored by anything that compares versions, readable by anything that displays one.
+ *
+ * The bare release number survives only where the value is *compared* against a published tag:
+ * the extension download URL and the bridge's compatibility reply. Everywhere it is *read*, it
+ * carries the build.
+ */
+describe('a build can be told apart from every other build', () => {
+  const version = readFileSync(path.join(process.cwd(), 'src/main/version.ts'), 'utf8');
+  const tools = readFileSync(path.join(process.cwd(), 'src/main/mcp/tools.ts'), 'utf8');
+  const index = readFileSync(path.join(process.cwd(), 'src/main/index.ts'), 'utf8');
+  const diagnostics = readFileSync(path.join(process.cwd(), 'src/main/diagnostics.ts'), 'utf8');
+
+  it('composes the shown version from the release and the commit', () => {
+    expect(version).toContain('export const BUILD_VERSION =');
+    expect(version).toContain("`${APP_VERSION}+${BUILD_REVISION}`");
+    // A build with no revision says so rather than impersonating the release.
+    expect(version).toContain("`${APP_VERSION}-dev`");
+  });
+
+  it('shows it wherever a build is named, including to ChatGPT', () => {
+    // The connector's own version, which is the only identity that crosses to the other side.
+    expect(tools).toContain('{ name: definition.serverName, version: BUILD_VERSION }');
+    expect(index).toContain('title: `Chat On Steroids ${BUILD_VERSION}`');
+    expect(index).toMatch(/logInfo\(`Chat On Steroids \$\{BUILD_VERSION\} starting/);
+    expect(diagnostics).toContain('Chat On Steroids ${BUILD_VERSION}');
+  });
+
+  it('keeps the bare release where the value is compared, not read', () => {
+    const bridge = readFileSync(path.join(process.cwd(), 'src/main/bridge.ts'), 'utf8');
+    // The extension compatibility reply and the download URL both name a published release.
+    expect(bridge).toContain('version: APP_VERSION');
+    expect(version).toContain('export function extensionDownloadUrl(version = APP_VERSION)');
+  });
+});
