@@ -27,7 +27,7 @@ import {
 
 import type { Capabilities, Check, Diagnosis, MacOSDesktopAccessStatus } from '../shared/types.js';
 import { surfaceIsUseful, type SurfaceId } from './mcp/surfaces.js';
-import { APP_VERSION, BUILD_REVISION } from './version.js';
+import { APP_VERSION, BUILD_REVISION, BUILD_VERSION } from './version.js';
 import { capabilitiesAddedSinceConnectorSnapshot } from './mcp/server.js';
 import { refreshMacOSDesktopAccess } from './computer/index.js';
 
@@ -331,7 +331,7 @@ export async function runDiagnostics(): Promise<Diagnosis> {
     name: 'Build',
     status: 'pass',
     ok: true,
-    detail: `Chat On Steroids ${APP_VERSION}, built from ${BUILD_REVISION} on ${process.platform}-${process.arch}.`
+    detail: `Chat On Steroids ${BUILD_VERSION} on ${process.platform}-${process.arch}. Release ${APP_VERSION}, commit ${BUILD_REVISION}.`
   });
   const config = getConfig();
   const caps = effectiveCapabilities(config);

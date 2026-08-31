@@ -8,7 +8,7 @@ import { getConfig, initConfigPath, loadConfig } from './config.js';
 import { connect, disconnect, getStatus, onStatusChange, shutdownConnection } from './connection.js';
 import { registerIpc } from './ipc.js';
 import { logError, logInfo, logWarn } from './logger.js';
-import { APP_VERSION, BUILD_REVISION } from './version.js';
+import { BUILD_VERSION } from './version.js';
 import { unifiedExecManager } from './codex/manager.js';
 import { initSecretsPath } from './secrets.js';
 import { setBrowserOpener, shutdownBridge, startBridge } from './bridge.js';
@@ -91,7 +91,9 @@ function createWindow(): void {
     autoHideMenuBar: true,
     // Painted before the renderer loads, so a dark window never flashes white.
     backgroundColor: getConfig().ui.theme === 'dark' ? '#0e0e11' : '#ffffff',
-    title: 'Chat On Steroids',
+    // The window carries it too, because that is the one place nobody has to go looking. Two
+    // builds with the same name and version is how a QA run came to measure the wrong app.
+    title: `Chat On Steroids ${BUILD_VERSION}`,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -225,7 +227,7 @@ void app.whenReady().then(async () => {
   if (!shouldBeginAppBootstrap(hasSingleInstanceLock, quitting)) return;
   // Named once, first, so every line below it in a log or a bug report is attributable to a
   // specific build. Version alone cannot do that: two builds carry the same one.
-  logInfo(`Chat On Steroids ${APP_VERSION} (${BUILD_REVISION}) starting on ${process.platform}-${process.arch}`);
+  logInfo(`Chat On Steroids ${BUILD_VERSION} starting on ${process.platform}-${process.arch}`);
   const userData = app.getPath('userData');
   initConfigPath(userData);
   initSecretsPath(userData);
