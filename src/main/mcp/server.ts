@@ -221,11 +221,13 @@ interface SurfaceExposure {
  * Recorded for one purpose: telling the user their connector is out of date. Cleared whenever
  * the exposed surface is reset, because that is the moment a fresh snapshot becomes possible.
  */
-const capabilitiesWidenedSinceStart = new Set<string>();
+const capabilitiesWidenedSinceStart = new Map<SurfaceId, Set<string>>();
 
-function noteCapabilityWidened(name: string): void {
-  if (capabilitiesWidenedSinceStart.has(name)) return;
-  capabilitiesWidenedSinceStart.add(name);
+function noteCapabilityWidened(surface: SurfaceId, name: string): void {
+  const seen = capabilitiesWidenedSinceStart.get(surface) ?? new Set<string>();
+  if (seen.has(name)) return;
+  seen.add(name);
+  capabilitiesWidenedSinceStart.set(surface, seen);
   // Said once, in the Activity panel, at the moment it happens. Someone who switches a
   // capability on and then wonders why ChatGPT still cannot see the new tool has the answer in
   // front of them instead of having to run Diagnostics to find it.
@@ -236,9 +238,15 @@ function noteCapabilityWidened(name: string): void {
   );
 }
 
-/** Which capabilities have appeared since a connector last fetched its tool list. */
-export function capabilitiesAddedSinceConnectorSnapshot(): string[] {
-  return [...capabilitiesWidenedSinceStart].sort();
+/**
+ * Which capabilities have appeared on one surface since a connector last fetched its tool list.
+ *
+ * Per surface, because a capability only matters where it adds a tool: switching `command` on
+ * changes Core and nothing on Desktop, and telling the Desktop connector to recreate itself over
+ * a Core capability sends someone to redo the wrong thing.
+ */
+export function capabilitiesAddedSinceConnectorSnapshot(surface: SurfaceId): string[] {
+  return [...(capabilitiesWidenedSinceStart.get(surface) ?? [])].sort();
 }
 
 /**
@@ -279,6 +287,11 @@ function exposureFor(surface: SurfaceId): SurfaceExposure {
  */
 export function forgetExposedSurface(): void {
   surfaceExposure.clear();
+  // The widening note exists to say "your connector predates this tool". Resetting the exposed
+  // surface is exactly the moment a fresh snapshot becomes possible, so the note stops being
+  // true here — leaving it set kept Diagnostics telling the user to start a new chat long after
+  // there was any reason to, until the app was restarted.
+  capabilitiesWidenedSinceStart.clear();
 }
 
 export async function startMcpServer(getContext: () => ToolContext): Promise<McpEndpoint> {
@@ -307,7 +320,6 @@ export async function startMcpServer(getContext: () => ToolContext): Promise<Mcp
   // TOOL_DISABLED result while the live capability is off. A fresh app/server start
   // resets the surface to the permissions that are enabled at that point.
   forgetExposedSurface();
-  capabilitiesWidenedSinceStart.clear();
   const stableContext = (surface: SurfaceId): ToolContext => {
     const live = getContext();
     const exposed = exposureFor(surface);
@@ -322,7 +334,7 @@ export async function startMcpServer(getContext: () => ToolContext): Promise<Mcp
         // and reported `browser` missing while the app was serving it. Remember what grew, so
         // Diagnostics can say the connector needs recreating instead of leaving someone to
         // conclude the tool does not exist.
-        if (live.caps[key] && !exposed.caps[key]) noteCapabilityWidened(key);
+        if (live.caps[key] && !exposed.caps[key]) noteCapabilityWidened(surface, key);
         if (live.caps[key]) exposed.caps[key] = true;
       }
     }

@@ -331,15 +331,20 @@ describe('macOS desktop safety hardening', () => {
   it('paces a drag so the system reads it as one, rather than as a click', () => {
     expect(swift).toContain('private let dragPressHoldMicroseconds');
     expect(swift).toContain('private let dragDropDwellMicroseconds');
-    expect(swift).toContain('private func dragSteps(from start: CGPoint, to end: CGPoint)');
+    expect(swift).toContain('private func dragSteps(from start: CGPoint, to end: CGPoint, steps: Int)');
     // Hold after the press, travel, then dwell before releasing — in that order.
     expect(swift).toMatch(
       /postMouse\(down[\s\S]*usleep\(dragPressHoldMicroseconds\)[\s\S]*dragSteps\(from: current[\s\S]*usleep\(dragDropDwellMicroseconds\)[\s\S]*postMouse\(up/
     );
     // Every interpolated event still re-proves the target; pacing must not cost the fence.
     expect(swift).toMatch(/for step in dragSteps[\s\S]{0,200}try assertDragTarget\(\)/);
-    // And the interpolation is bounded, so a long drag cannot post unbounded events.
-    expect(swift).toMatch(/min\(count, 240\)/);
+    // Bounded for the whole path, not per hop. Per hop, a 64-waypoint drag could spend two
+    // minutes inside a 15-second parent deadline — and a helper killed there never reaches the
+    // release, leaving the button logically held down.
+    expect(swift).toContain('private let dragMaxTotalSteps = 180');
+    expect(swift).toContain('private func dragStepBudget(_ points: [CGPoint]) -> [Int]');
+    expect(swift).toMatch(/guard wantedTotal > dragMaxTotalSteps, total > 0 else \{ return wanted \}/);
+    expect(swift).not.toMatch(/min\(count, 240\)/);
   });
 
   it('says why no pointer was drawn, instead of drawing nothing silently', () => {

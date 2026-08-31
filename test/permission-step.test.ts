@@ -122,7 +122,7 @@ describe('the markup the step is painted into', () => {
     expect(document.querySelector('[data-step="desktop"]')).not.toBeNull();
     // The step participates in the wizard's own completion model rather than sitting beside it.
     expect(main).toContain("const order = ['folder', 'tunnel', 'key', 'connect', 'chatgpt', 'desktop', 'browser'];");
-    expect(main).toContain("if (paintDesktopPermissions(next)) done.add('desktop');");
+    expect(main).toContain("if (desktopSettled) done.add('desktop');");
   });
 
   it('offers the exact System Settings panes the main process will open', () => {
@@ -268,7 +268,13 @@ describe('the live re-read', () => {
     expect(ipc).toMatch(/handle\('desktop:refreshAccess'[\s\S]{0,200}refreshMacOSDesktopAccess\(\);/);
     expect(preload).toContain("refreshDesktopAccess: () => call<AppState>('desktop:refreshAccess')");
     expect(main).toContain('api.refreshDesktopAccess()');
-    expect(main).toMatch(/watchDesktopPermissions[\s\S]*!step\('desktop'\)\.classList\.contains\('is-done'\)/);
+    // The cadence is told, not read off the DOM: `is-done` is written later in the same apply()
+    // pass, so reading it here answered with the previous render and armed the fast cadence a
+    // whole slow period late — precisely after a revocation, when it is wanted soonest.
+    expect(main).toContain('function watchDesktopPermissions(next: AppState, settled: boolean)');
+    expect(main).toContain('const outstanding = applies && !settled;');
+    expect(main).toContain('const desktopSettled = paintDesktopPermissions(next);');
+    expect(main).toContain('watchDesktopPermissions(next, desktopSettled);');
     expect(main).toMatch(/watchDesktopPermissions[\s\S]*clearInterval\(desktopPermissionTimer\)/);
     // Two cadences, and the slow one keeps running after everything is granted. Stopping there
     // made the list one-way: it could see a permission appear and never see one go away, so

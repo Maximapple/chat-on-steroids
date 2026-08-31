@@ -441,11 +441,14 @@ let desktopPermissionTimer: number | null = null;
 /** The cadence the armed timer is running at, so a change of speed re-arms it. */
 let desktopPermissionPeriod: number | null = null;
 
-function watchDesktopPermissions(next: AppState): void {
+function watchDesktopPermissions(next: AppState, settled: boolean): void {
   const applies =
     next.platform?.family === 'macos' &&
     (next.config.capabilities.screen || (next.config.capabilities.control && !next.config.readOnly));
-  const outstanding = applies && !step('desktop').classList.contains('is-done');
+  // Told, not read off the DOM. The `is-done` class is written later in this same apply() pass,
+  // so reading it here answered with the previous render — and after a permission was revoked
+  // the fast cadence armed a whole slow period late, exactly when it was most wanted.
+  const outstanding = applies && !settled;
 
   // Watch in both directions, at two speeds.
   //
@@ -1045,8 +1048,9 @@ function apply(next: AppState): void {
   // this optional step is hidden and deliberately cannot block the wizard.
   // Painted first because it also decides whether the step applies at all: off macOS, or
   // with no Desktop capability enabled, there is nothing to grant and nothing to block on.
-  if (paintDesktopPermissions(next)) done.add('desktop');
-  watchDesktopPermissions(next);
+  const desktopSettled = paintDesktopPermissions(next);
+  if (desktopSettled) done.add('desktop');
+  watchDesktopPermissions(next, desktopSettled);
   if (!browserRequired || next.bridge.present) done.add('browser');
   const current = order.find((name) => !done.has(name)) ?? null;
   for (const name of order) {

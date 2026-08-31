@@ -2315,10 +2315,44 @@ function tabIsExecuting(data) {
 /**
  * Tabs currently held back from Chrome's Memory Saver, so the flag is only written on change.
  *
- * Not persisted on purpose: `autoDiscardable` is per-tab browser state that dies with the tab,
- * and a stale set restored into a new browser session would describe tabs that no longer exist.
+ * Kept in session storage, which is exactly the lifetime this needs: it survives the worker
+ * being torn down — MV3 does that routinely — and dies with the browser session, along with the
+ * per-tab `autoDiscardable` state it describes.
+ *
+ * In memory alone it was worse than useless. After a restart the set came back empty, so the
+ * release read `false === false`, skipped the write, and left the tab exempt from Memory Saver
+ * for the rest of the session. Writing unconditionally instead would put a tabs.update on every
+ * idle poll of every chat, which is a lot of calls to undo something that was never done.
  */
 const heldTabs = new Set();
+let heldTabsLoaded = false;
+
+/** Brings the held set back after a worker restart, once. */
+async function loadHeldTabs() {
+  if (heldTabsLoaded) return;
+  heldTabsLoaded = true;
+  try {
+    const store = globalThis.chrome?.storage?.session ?? globalThis.browser?.storage?.session;
+    if (!store) return;
+    const saved = await store.get('heldTabs');
+    for (const id of Array.isArray(saved?.heldTabs) ? saved.heldTabs : []) {
+      if (Number.isSafeInteger(id)) heldTabs.add(id);
+    }
+  } catch {
+    // Session storage is unavailable on older builds. The set then behaves as it did before:
+    // correct within one worker lifetime, and a tab may keep its hold until the browser closes.
+  }
+}
+
+/** Records the held set so the next worker instance can give these tabs back. */
+async function saveHeldTabs() {
+  try {
+    const store = globalThis.chrome?.storage?.session ?? globalThis.browser?.storage?.session;
+    await store?.set({ heldTabs: [...heldTabs] });
+  } catch {
+    // Never fatal: this is an optimisation of Chrome's memory policy, not a correctness fence.
+  }
+}
 
 /**
  * Keeps Chrome from reclaiming a tab that is still doing the work.
@@ -2338,12 +2372,14 @@ const heldTabs = new Set();
  */
 async function holdTabForExecution(tabId, executing) {
   if (!Number.isSafeInteger(tabId) || tabId < 0) return;
+  await loadHeldTabs();
   const held = heldTabs.has(tabId);
   if (held === executing) return;
   try {
     await webext.tabs.update(tabId, { autoDiscardable: !executing });
     if (executing) heldTabs.add(tabId);
     else heldTabs.delete(tabId);
+    await saveHeldTabs();
   } catch {
     // An older browser, a tab that just closed, or a build without the property. Leave the
     // set alone so the next reply tries again rather than believing something it did not do.
