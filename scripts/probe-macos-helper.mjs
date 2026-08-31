@@ -94,15 +94,24 @@ async function probe(label, request) {
   return reply;
 }
 
-// Answering at all is the first thing worth knowing.
-await probe('the helper starts and answers', { op: 'warm' });
+// Answering at all is the first thing worth knowing, and warm also states both TCC verdicts —
+// which is what makes a later refusal interpretable rather than merely assumed.
+const warm = await probe('the helper starts and answers', { op: 'warm' });
+const screenGranted = warm?.['screenPermission'] === true;
+if (warm?.ok === true) {
+  console.log(`      screenPermission=${warm['screenPermission']} accessibilityPermission=${warm['accessibilityPermission']}`);
+}
 
 // The pointer, read through the main-queue hop because NSCursor is AppKit. This is the exact
 // call the window compositor depends on, and the one whose nil case is the open question.
 const cursor = await probe('it can be asked for the cursor', { op: 'cursor' });
 if (cursor?.ok === true) {
-  const where = cursor['x'] !== undefined ? `at ${cursor['x']},${cursor['y']}` : JSON.stringify(cursor).slice(0, 160);
-  console.log(`      cursor: ${where}`);
+  console.log(`      cursor=${JSON.stringify(cursor['cursor'])} foreground=${cursor['foreground']}`);
+  // The compositor cannot place a pointer it was never given a position for.
+  if (cursor['cursor'] === undefined || cursor['cursor'] === null) {
+    console.log('FAIL  the cursor op answered without a cursor');
+    failed = true;
+  }
 }
 
 await probe('it can enumerate windows', { op: 'windows' });
@@ -112,7 +121,7 @@ await probe('it can enumerate windows', { op: 'windows' });
 const shot = await probe('a capture either works or is refused by name', {
   op: 'capture',
   full: true,
-  max_width: 640,
+  maxWidth: 640,
   file: path.join(process.env['TMPDIR'] ?? '/tmp', 'cos-probe-capture.png')
 });
 if (shot?.ok === true) {
@@ -122,7 +131,13 @@ if (shot?.ok === true) {
     failed = true;
   }
 } else if (shot) {
-  console.log(`      no pixels here, as expected on a runner without Screen Recording: ${shot['message'] ?? ''}`);
+  console.log(`      refused: ${shot['error_code'] ?? '?'} — ${shot['message'] ?? ''}`);
+  // Tolerant only where tolerance is earned. Without the grant a refusal is the correct
+  // behaviour; with the grant, a refusal is a real failure and must not pass quietly.
+  if (screenGranted) {
+    console.log('FAIL  Screen Recording is granted here, so a refused capture is a defect');
+    failed = true;
+  }
 }
 
 child.stdin.end();
