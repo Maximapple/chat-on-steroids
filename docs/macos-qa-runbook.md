@@ -117,8 +117,9 @@ actually serves:
 Answers on loopback and offers 3 tools: browser, computer, observe
 ```
 
-If `browser` is in that line, the app publishes it and the connector in ChatGPT needs
-recreating — a connector keeps the tool list it saw when it was made. If `browser` is absent,
+If `browser` is in that line, the app is serving it and ChatGPT is looking at an older list: a
+chat keeps the tool list it loaded, so start a **new chat** first, and only recreate the
+connector if that still does not show it. If `browser` is absent,
 `control` is not switched on for this connector: check that **See and use the desktop** is on and
 that **Read only** is off, since read-only strips control while leaving screenshots.
 
