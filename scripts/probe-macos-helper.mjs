@@ -140,6 +140,65 @@ if (shot?.ok === true) {
   }
 }
 
+/*
+ * The window path, which is the one that was broken.
+ *
+ * A full-screen capture goes through SCContentFilter(display:) and gets the pointer from
+ * ScreenCaptureKit — that is the "system" verdict above, and it exercises none of the code that
+ * was wrong. Window capture uses SCContentFilter(desktopIndependentWindow:), where showsCursor
+ * has no effect and the pointer is composited by hand at its hotspot. That is the code the first
+ * fix got wrong, and until now nothing had ever run it.
+ *
+ * So: find a window, put the pointer inside it, capture it, and see what the compositor says.
+ * The pointer is moved deliberately — parked at 10,10 it would sit outside any window and the
+ * honest answer would be outside_region, which proves the geometry check and nothing else.
+ */
+const listed = await probe('it lists windows to capture', { op: 'windows' });
+// The op reports state as foreground/open/minimized — there is no onScreen field. A minimized
+// window has no pixels to capture, so anything else will do.
+const windows = listed?.['windows'] ?? [];
+const candidate = windows.find((w) =>
+  w && w['state'] !== 'minimized' && Number(w['width']) >= 120 && Number(w['height']) >= 120
+);
+console.log(`      ${windows.length} windows listed, ${windows.filter((w) => w?.['state'] !== 'minimized').length} not minimized`);
+
+if (!candidate) {
+  // Not a failure: a bare runner may genuinely have no ordinary window on screen. Say so, so
+  // a passing probe is never mistaken for having covered this.
+  console.log('      no on-screen window here, so the hand-composited pointer path is UNCOVERED');
+} else {
+  const cx = Math.round(Number(candidate['x']) + Number(candidate['width']) / 2);
+  const cy = Math.round(Number(candidate['y']) + Number(candidate['height']) / 2);
+  console.log(`      window ${candidate['id']} "${String(candidate['title'] ?? '').slice(0, 40)}" at ${candidate['x']},${candidate['y']} ${candidate['width']}x${candidate['height']}`);
+
+  const moved = await probe('it can put the pointer inside that window',
+    { op: 'act', actions: [{ type: 'move', x: cx, y: cy }] });
+  if (moved?.ok !== true) {
+    console.log(`      pointer could not be moved (${moved?.['error_code'] ?? '?'}) — act requires Accessibility, which a runner rarely grants, so expect outside_region below`);
+  }
+
+  const windowShot = await probe('it captures that window', {
+    op: 'capture',
+    id: candidate['id'],
+    maxWidth: 640,
+    file: path.join(process.env['TMPDIR'] ?? '/tmp', 'cos-probe-window.png')
+  });
+  if (windowShot?.ok === true) {
+    const verdict = windowShot['pointer'];
+    console.log(`      pointer=${verdict} captureMode=${windowShot['captureMode']}`);
+    if (windowShot['captureMode'] !== 'window') {
+      console.log(`      fell back to ${windowShot['captureMode']}, so the hand-composited path is still UNCOVERED`);
+    } else if (verdict === 'drawn') {
+      console.log('      the hand-composited pointer ran and drew — this is the path that was broken');
+    } else if (verdict === 'outside_region' && moved?.ok !== true) {
+      console.log('      outside_region, consistent with the pointer move being refused');
+    } else {
+      console.log(`FAIL  window capture returned pointer=${verdict} with the pointer moved inside it`);
+      failed = true;
+    }
+  }
+}
+
 child.stdin.end();
 await new Promise((resolve) => setTimeout(resolve, 500));
 child.kill();
