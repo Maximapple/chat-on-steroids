@@ -202,14 +202,48 @@ if (!candidate) {
     console.log(`      pointer could not be moved (${moved?.['error_code'] ?? '?'}) — act requires Accessibility, which a runner rarely grants, so expect outside_region below`);
   }
 
+  /*
+   * A warp is not a guarantee. The pointer is shared with whoever is sitting at the machine, so
+   * a hand on the trackpad between the warp and the capture makes outside_region the honest
+   * answer — the runbook's table calls that "not a defect". This probe used to report it as a
+   * compositor failure anyway. On the first real run against a granted Mac it did exactly that,
+   * did not reproduce in the eleven runs that followed, and named the one piece of code that was
+   * innocent: the compositor the whole exercise exists to judge.
+   *
+   * So bracket the capture with cursor reads and judge the compositor only when the pointer
+   * demonstrably stayed inside the window across it. Otherwise say inconclusive — which a probe
+   * is allowed to be, and which a red build is not.
+   */
+  const insideCandidate = (c) =>
+    c != null &&
+    Number(c['x']) >= Number(candidate['x']) &&
+    Number(c['x']) < Number(candidate['x']) + Number(candidate['width']) &&
+    Number(c['y']) >= Number(candidate['y']) &&
+    Number(c['y']) < Number(candidate['y']) + Number(candidate['height']);
+
+  /** The cursor, read without recording an answer: these reads bracket a check, they are not one. */
+  const readCursor = async () => {
+    try {
+      const reply = JSON.parse(await ask({ op: 'cursor' }));
+      return reply?.ok === true ? reply['cursor'] ?? null : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const cursorBefore = await readCursor();
   const windowShot = await probe('it captures that window', {
     op: 'capture',
     id: candidate['id'],
     maxWidth: 640,
     file: path.join(process.env['TMPDIR'] ?? '/tmp', 'cos-probe-window.png')
   });
+  const cursorAfter = await readCursor();
+  const stayedInside = insideCandidate(cursorBefore) && insideCandidate(cursorAfter);
+
   if (windowShot?.ok === true) {
     const verdict = windowShot['pointer'];
+    const where = `before=${JSON.stringify(cursorBefore)} after=${JSON.stringify(cursorAfter)}`;
     console.log(`      pointer=${verdict} captureMode=${windowShot['captureMode']}`);
     if (windowShot['captureMode'] !== 'window') {
       console.log(`      fell back to ${windowShot['captureMode']}, so the hand-composited path is still UNCOVERED`);
@@ -217,8 +251,11 @@ if (!candidate) {
       console.log('      the hand-composited pointer ran and drew — this is the path that was broken');
     } else if (verdict === 'outside_region' && moved?.ok !== true) {
       console.log('      outside_region, consistent with the pointer move being refused');
+    } else if (verdict === 'outside_region' && !stayedInside) {
+      console.log(`      INCONCLUSIVE: the pointer left the window during the capture (${where}), so`);
+      console.log('      outside_region is honest and the compositor is unjudged — rerun without touching the mouse');
     } else {
-      console.log(`FAIL  window capture returned pointer=${verdict} with the pointer moved inside it`);
+      console.log(`FAIL  window capture returned pointer=${verdict} with the pointer inside the window throughout (${where})`);
       failed = true;
     }
 
