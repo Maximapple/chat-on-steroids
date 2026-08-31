@@ -1,7 +1,7 @@
 # macOS QA runbook
 
 Everything in this repository that can be checked without a Mac has been. `verify:ci` is green
-(1910 passed, 22 skipped), the browser driver scores 16/16 against real Chrome 152 and against
+(1910 passed, 22 skipped), the browser driver scores 23/23 against real Chrome 152 and against
 Edge, and all six release platforms build. What is left needs a physical Mac, a real pointer at
 a real position, and macOS's own permission dialogs. That is this list.
 
@@ -32,6 +32,13 @@ CLF_DEBUG=1 "/Applications/Chat On Steroids.app/Contents/MacOS/Chat On Steroids"
 ## 1. The pointer in a window screenshot
 
 This is the one that was reported wrong before, and the one prior claims about were wrong about.
+
+**Status, 2026-08-31:** the hand-composited path has now been run and the picture inspected —
+`pointer=drawn captureMode=window`, glyph centred on the addressed pixel, in
+`docs/qa/reports/2026-08-31-claude-mac-automated.md`. That was through
+`scripts/probe-macos-helper.mjs` against a Terminal window. The steps below drive the same code
+through the **app**, which additionally covers its TCC handling and its Activity logging, so they
+are still worth doing — but you are no longer looking for a first answer, you are confirming one.
 `SCStreamConfiguration.showsCursor` cannot reach a desktop-independent window filter, so for
 window captures the pointer is composited by hand at its hotspot; display captures get the
 system's own. An absent pointer used to look identical whichever cause produced it, so each
@@ -86,8 +93,10 @@ Chrome's real window, not the bubble.
 
 ## 4. Browser control, on this platform
 
-The driver is proven on Windows against Chrome 152 and Edge (`npm run verify:browser`, 16/16).
-The same script runs on macOS and finds Chrome, Chrome for Testing or Edge at the usual paths:
+The driver is proven on Windows against Chrome 152 and Edge (`npm run verify:browser`, 23/23),
+and now on macOS against Chrome for Testing 152 (23/23 — see
+`docs/qa/reports/2026-08-31-claude-mac-automated.md`). The same script runs here and finds
+Chrome, Chrome for Testing or Edge at the usual paths:
 
 ```sh
 npm run verify:browser
