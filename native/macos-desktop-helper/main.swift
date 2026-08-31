@@ -239,8 +239,37 @@ private func windowRow(_ id: CGWindowID) -> WindowRow? {
     allWindowRows().first { $0.id == id }
 }
 
+/**
+ * Which application is active, read fresh rather than from a cache nobody is refilling.
+ *
+ * `NSWorkspace.shared.frontmostApplication` is served from an internal running-applications
+ * cache that AppKit keeps current by delivering notifications on a run loop. The standalone
+ * helper has none: it reads commands with `readLine()` on the main thread and never returns to
+ * a run loop, so the cache is fixed at first access and every application launched afterwards
+ * stays invisible to it — for the life of the process.
+ *
+ * The app runs one long-lived helper, which makes that permanent. QA reproduced it directly:
+ * two helpers on the same desktop at the same moment, one that had queried before TextEdit was
+ * launched and one started after. The first reported no foreground window and kept doing so; the
+ * second was correct throughout. Window *enumeration* was fine either way, because that goes
+ * through CGWindowListCopyWindowInfo — so the window was listed, capturable and visibly in
+ * front, while nothing would call it foreground. That is the `No foreground window` the release
+ * was held for, and it is a second, independent cause of the same symptom as the transient
+ * child-window case fixed earlier.
+ *
+ * Draining the run loop's ready sources first lets those pending notifications arrive. Bounded
+ * and non-blocking: each pass returns immediately when there is nothing to deliver, and in the
+ * in-process build — where Electron's main thread is already running a real run loop — there is
+ * never anything pending here and the loop exits on its first pass.
+ */
 private func frontmostPID() -> pid_t? {
-    NSWorkspace.shared.frontmostApplication?.processIdentifier
+    onMainQueue {
+        var drained = 0
+        while drained < 32, CFRunLoopRunInMode(.defaultMode, 0, true) == .handledSource {
+            drained += 1
+        }
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
 }
 
 private func windowServerFrontWindowID(rows suppliedRows: [WindowRow]? = nil) -> CGWindowID? {
