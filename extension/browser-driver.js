@@ -707,10 +707,27 @@ async function readScrollPosition(send) {
 
 export const browserDriver = {
   /** What is under control right now, for the popup, the app and the stop button. */
-  status() {
-    return session
-      ? { attached: true, tabId: session.tabId, url: session.url, title: session.title }
-      : { attached: false, tabId: null, url: null, title: null };
+  /**
+   * Where the driver is now, not where it started.
+   *
+   * The address and title were captured when the tab was taken and never updated, so after any
+   * navigation — the driver's own, or the person clicking a link — status answered with the page
+   * the run began on. status is precisely what a caller uses to confirm where it is, so a stale
+   * answer is worse than no answer: it reads as confirmation.
+   *
+   * A tab that cannot be read leaves the last known values in place, which beats answering
+   * nothing about a session that is genuinely still attached.
+   */
+  async status() {
+    if (!session) return { attached: false, tabId: null, url: null, title: null };
+    try {
+      const tab = await chrome.tabs.get(session.tabId);
+      session.url = tab?.url || tab?.pendingUrl || session.url;
+      session.title = tab?.title || session.title;
+    } catch {
+      // Keep what we knew.
+    }
+    return { attached: true, tabId: session.tabId, url: session.url, title: session.title };
   },
 
   async attach(tabId) {
@@ -852,12 +869,26 @@ export const browserDriver = {
     } catch {
       throw fail('BROWSER_PERMISSION_REQUIRED', 'browser control is off; turn it on in the extension popup');
     }
-    const candidate = tabs
-      .filter((tab) => Number.isSafeInteger(tab?.id) && !refusedUrl(tab.url || tab.pendingUrl))
+    const usable = tabs.filter((tab) => Number.isSafeInteger(tab?.id));
+    const candidate = usable
+      .filter((tab) => !refusedUrl(tab.url || tab.pendingUrl))
       .sort((left, right) => (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0))[0];
     if (candidate) {
       await this.attach(candidate.id);
       return;
+    }
+    // "No page is open" and "no page whose address I may read" are different problems with
+    // different fixes, and only the second one is the user's to solve. Chrome answers `tab.url`
+    // with undefined wherever the extension has no access, and those tabs are refused rather
+    // than driven — correct, but saying nothing is open when the browser is full of pages sends
+    // someone to open one more, which changes nothing.
+    if (usable.length > 0 && usable.every((tab) => !(tab.url || tab.pendingUrl))) {
+      throw fail(
+        'BROWSER_PERMISSION_REQUIRED',
+        `${usable.length} tab(s) are open but none of their addresses can be read, so none can be ` +
+          'shown safe to drive. Open the Chat On Steroids extension popup, turn browser control ' +
+          'off and on again, and accept the site access it asks for.'
+      );
     }
     // Nothing to take. If the caller brought an address — navigate is the only action that
     // does — open it, because the alternative is the dead end QA walked into twice: "open the

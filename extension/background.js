@@ -2209,7 +2209,7 @@ const HANDLERS = {
    */
   async browser_status() {
     const driver = await browserControl();
-    return { ok: true, granted: await driver.hasBrowserPermissions(), ...driver.browserDriver.status() };
+    return { ok: true, granted: await driver.hasBrowserPermissions(), ...(await driver.browserDriver.status()) };
   },
   async browser_attach(message) {
     return browserResult(async (driver) => driver.browserDriver.attach(Number(message.tabId)), 'BROWSER_ATTACH_FAILED');
