@@ -16,7 +16,7 @@ paste into Claude on the Mac if part 1 does not already explain it.
 
 Read the **window title** of Chat On Steroids.
 
-- `Chat On Steroids 2.0.2+b556b8b` — current, carry on.
+- `Chat On Steroids 2.0.2+<commit>`, where the commit matches the DMG you installed — carry on.
 - `Chat On Steroids 2.0.2` with no commit, or just `Chat On Steroids` — **an older build**. Install
   the current DMG first; everything below would describe the wrong app.
 

@@ -32,10 +32,11 @@ nicht — macOS merkt sich die Antwort pro Prozess.
 **Der schnellste Test ist der Fenstertitel.** Er muss lauten:
 
 ```
-Chat On Steroids 2.0.2+b556b8b
+Chat On Steroids 2.0.2+<commit>
 ```
 
-Steht dort nur `2.0.2` ohne Commit, läuft eine ältere App — dann gar nicht erst weitertesten.
+Der Commit muss der des DMG sein, das du gerade installiert hast — er steht in den Release-Notizen.
+Fehlt der Teil hinter dem `+` ganz, läuft eine ältere App: dann gar nicht erst weitertesten.
 
 Ausführlicher in der App: **Home** → Karte **Health** → **Run checks**.
 
