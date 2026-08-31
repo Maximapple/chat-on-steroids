@@ -634,7 +634,7 @@ describe('surface boundaries', () => {
   it('advertises exactly Desktop’s tools on Desktop, with nothing from Core', async () => {
     everything();
     const names = toolNames(await desktop('tools/list'));
-    expect(names).toEqual(['computer', 'observe']);
+    expect(names).toEqual(['browser', 'computer', 'observe']);
     for (const name of surfaceDefinition('core').tools) expect(names, name).not.toContain(name);
   });
 
@@ -750,9 +750,12 @@ describe('surface boundaries', () => {
     const desktopTools = toolList(await desktop('tools/list'));
 
     // Counts are the design: Core is capped at seven live schemas because find and the exec
-    // pair cannot both exist, and Desktop is two.
+    // pair cannot both exist. Desktop is three — observe and computer drive the operating
+    // system, and browser drives a web page, which is a different problem: Chromium keeps its
+    // renderer accessibility tree off until a real assistive client asks, so the OS-level
+    // driver sees a browser window as one opaque pane and has pixels and nothing else inside it.
     expect(coreTools).toHaveLength(7);
-    expect(desktopTools).toHaveLength(2);
+    expect(desktopTools).toHaveLength(3);
 
     // And the size, which is what a discovery pull actually costs the model on every
     // conversation that touches the connector. The ceilings sit just above what the
@@ -762,7 +765,15 @@ describe('surface boundaries', () => {
     const coreBytes = Buffer.byteLength(JSON.stringify(coreTools), 'utf8');
     const desktopBytes = Buffer.byteLength(JSON.stringify(desktopTools), 'utf8');
     expect(coreBytes, `core tools/list is ${coreBytes} bytes`).toBeLessThan(18_000);
-    expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(8_500);
+    // Desktop grew from about 7.9k to about 12.4k when `browser` was added, and that is a real
+    // cost: it is paid on every conversation that connects the Desktop surface, including the
+    // ones that never drive a web page. It buys the only way to see inside one — Chromium keeps
+    // its renderer accessibility tree off until a real assistive client asks, so without this
+    // the OS-level driver has pixels and nothing else in a browser. The action union is already
+    // as small as the capability allows: attach, detach and status were removed because the
+    // driver takes the newest ordinary tab on its own, which is bookkeeping the model should
+    // never have had to carry.
+    expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(12_800);
 
     // Per tool as well as per surface, so one schema cannot quietly eat the whole budget
     // while the total stays under it. `computer` is the largest by design: fourteen
@@ -786,7 +797,9 @@ describe('surface boundaries', () => {
               ? 3_400
               : tool.name === 'exec_command'
                 ? 3_700
-                : 3_000;
+                : tool.name === 'browser'
+                  ? 4_900
+                  : 3_000;
       expect(bytes, `${tool.name} schema is ${bytes} bytes`).toBeLessThan(budget);
     }
   });

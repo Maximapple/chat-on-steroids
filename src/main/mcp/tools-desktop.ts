@@ -30,7 +30,8 @@ import {
   type VerificationSpec
 } from '../computer/index.js';
 import { logInfo } from '../logger.js';
-import { noteCount, noteDetail } from './call-context.js';
+import { currentCall, noteCount, noteDetail } from './call-context.js';
+import { runBrowserCommand } from '../browser-control.js';
 import {
   cropArg,
   fail,
@@ -68,6 +69,37 @@ function desktopImageResult(text: string, data: string): { content: ToolContent[
   }
   return result;
 }
+
+/**
+ * Web-page control, which is a different problem from desktop control.
+ *
+ * The desktop driver can already click anywhere in a browser window, but it cannot see a web
+ * page: Chromium keeps its renderer accessibility tree off until a real assistive client asks
+ * for it, so a UIA/AX walk returns the toolbar and one opaque pane. Inside a page the desktop
+ * driver has pixels and nothing else — which is exactly where refs stop being available.
+ *
+ * So this addresses elements by ref from `observe`, and the driver re-resolves a ref against
+ * the live document immediately before acting on it. Coordinates remain available for the
+ * cases refs cannot express, and they are in the screenshot's own pixels: the driver captures
+ * at a scale where one image pixel is one CSS pixel is one input unit.
+ */
+const browserActionArg = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('observe') }).strict().describe('Page, refs, screenshot.'),
+  z.object({ type: z.literal('navigate'), url: z.string().min(1).max(2_000) }).strict().describe('Go to a URL.'),
+  z.object({ type: z.literal('back') }).strict().describe('Back.'),
+  z.object({ type: z.literal('forward') }).strict().describe('Forward.'),
+  z.object({ type: z.literal('reload') }).strict().describe('Reload.'),
+  z.object({ type: z.literal('click_ref'), ref: z.string().min(1).max(16), button: mouseButtonArg.optional() }).strict().describe('Click a ref.'),
+  z.object({ type: z.literal('set_value'), ref: z.string().min(1).max(16), text: z.string().max(20_000) }).strict().describe('Replace a field by ref.'),
+  z.object({ type: z.literal('click'), x: z.number().int(), y: z.number().int(), button: mouseButtonArg.optional() }).strict().describe('Click at pixels.'),
+  z.object({ type: z.literal('double_click'), x: z.number().int(), y: z.number().int() }).strict().describe('Double-click at pixels.'),
+  z.object({ type: z.literal('move'), x: z.number().int(), y: z.number().int() }).strict().describe('Move the pointer.'),
+  z.object({ type: z.literal('drag'), path: z.array(pointArg).min(2).max(64), button: mouseButtonArg.optional() }).strict().describe('Drag along a path.'),
+  z.object({ type: z.literal('scroll'), x: z.number().int(), y: z.number().int(), scroll_x: z.number().int().optional(), scroll_y: z.number().int().optional() }).strict().describe('Scroll at a point.'),
+  z.object({ type: z.literal('type'), text: z.string().max(4_000) }).strict().describe('Type into focus.'),
+  z.object({ type: z.literal('keypress'), keys: z.array(z.string().max(20)).min(1).max(6) }).strict().describe('Press keys.'),
+  z.object({ type: z.literal('wait'), ms: z.number().int().min(0).max(10_000).optional() }).strict().describe('Pause.')
+]);
 
 const computerActionArg = z.discriminatedUnion('type', [
   z.object({ type: z.literal('click_ref'), ref: z.string().min(1).max(64) }).strict().describe('Click a control by ref from observe.'),
@@ -579,6 +611,84 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
             );
           }
           return ok(done);
+        })
+    );
+
+    /**
+     * Web-page control, carried out by the extension rather than the operating system.
+     *
+     * Everything here goes through the ChatGPT page that issued the call: the app parks one
+     * action, that page collects it on its next activity poll, and the extension's service
+     * worker performs it over the DevTools protocol. The worker is the only part that can hold
+     * such a session, and a DevTools session is the only route to trusted input — events a
+     * content script dispatches are `isTrusted: false` and real pages reject them.
+     *
+     * Refused for ChatGPT's own tabs before anything else, in the driver: the model asking for
+     * this is sitting in one, and a driver able to attach there could drive its own
+     * conversation.
+     */
+    if (exposedCaps.control) reg.register(
+      'browser',
+      {
+        title: 'Control a web page',
+        description:
+          'Drive a web page. observe first: refs plus a screenshot whose pixels are the coordinates. ' +
+          'Prefer refs — re-resolved before use, so a moved element is hit and a vanished one refuses. ' +
+          'Takes the newest ordinary tab; ChatGPT tabs are never driven. Needs browser control on in the extension popup.',
+        inputSchema: z.object({ actions: z.array(browserActionArg).min(1).max(20) }).strict(),
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+      },
+      async (input) =>
+        reg.guarded('control', 'browser', async () => {
+          // The conversation is the address: the action is delivered to the page showing it,
+          // which is the same evidence every identity-sensitive route in this app uses.
+          const conversationId = currentCall()?.caller.conversationId ?? null;
+          if (!conversationId) {
+            return fail(
+              'CALLER_IDENTITY_REQUIRED: browser control is delivered to the ChatGPT page that asked for it, ' +
+                'and this call could not be attributed to a conversation. No browser action was taken.'
+            );
+          }
+
+          const lines: string[] = [];
+          let shot: { data: string; width: number; height: number } | null = null;
+          for (const [index, action] of input.actions.entries()) {
+            const reply = await runBrowserCommand(conversationId, action as Record<string, unknown>);
+            if (!reply.ok) {
+              // Stops at the first failure rather than pressing on: later actions were chosen
+              // for a page state that this one did not produce.
+              return fail(
+                `${reply.error ?? 'BROWSER_FAILED'}: ${reply.detail ?? 'the browser action did not complete'}. ` +
+                  `Completed ${index} of ${input.actions.length}.`
+              );
+            }
+            const data = reply.data ?? {};
+            if (action.type === 'observe') {
+              const elements = Array.isArray(data['elements']) ? (data['elements'] as Array<Record<string, unknown>>) : [];
+              lines.push(
+                `page: ${String(data['url'] ?? '')}`,
+                `title: ${String(data['title'] ?? '')}`,
+                ...elements.map(
+                  (element) =>
+                    `${String(element['ref'])} ${String(element['role'])} ${JSON.stringify(String(element['name'] ?? ''))}` +
+                    `${element['disabled'] === true ? ' disabled' : ''} at ${String(element['x'])},${String(element['y'])}`
+                )
+              );
+              const picture = data['screenshot'] as { data: string; width: number; height: number } | null | undefined;
+              if (picture && typeof picture.data === 'string') shot = picture;
+            } else {
+              lines.push(`${action.type}: ok`);
+            }
+          }
+
+          const body = lines.join('\n');
+          if (shot) {
+            return desktopImageResult(
+              `${body}\nScreenshot ${shot.width}x${shot.height}; its pixels are the coordinates for this page.`,
+              shot.data
+            );
+          }
+          return ok(body);
         })
     );
   }

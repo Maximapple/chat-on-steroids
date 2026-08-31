@@ -132,7 +132,7 @@ const DESKTOP: SurfaceDefinition = {
   cardSummary:
     'Screenshots, windows, mouse/keyboard control and the clipboard. Optional — connect it only if you want desktop automation.',
   required: false,
-  tools: ['observe', 'computer']
+  tools: ['observe', 'computer', 'browser']
 };
 
 export const SURFACES: Record<SurfaceId, SurfaceDefinition> = { core: CORE, desktop: DESKTOP };
