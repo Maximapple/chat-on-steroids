@@ -45,6 +45,12 @@
   --red-wash: #fbf0f0;
   --red-line: #eccdcd;
 
+  /* Not-determined: macOS has not been asked yet, which is not the same as refused, and
+     painting it red would tell the user something is broken when nothing is. */
+  --amber: #8a5a00;
+  --amber-wash: #fdf5e7;
+  --amber-line: #eddcbc;
+
   /* Card lift. Barely there on paper, absent in the dark theme below. */
   --lift: 0 1px 1px rgb(12 12 14 / 3%), 0 10px 26px -18px rgb(12 12 14 / 22%);
   /* The switch knob has to read against its own track in both states, and the track
@@ -90,6 +96,10 @@
   --green: #63c795;
   --green-wash: #10201a;
   --green-line: #24402f;
+
+  --amber: #e0b256;
+  --amber-wash: #221b0d;
+  --amber-line: #40331b;
 
   --red: #ef8a8a;
   --red-wash: #241416;
@@ -2317,4 +2327,59 @@ nav button.is-sel::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ----------------------------------------------- macOS permission rows (setup step) */
+
+/*
+ * One row per macOS permission, inside the setup step that asks for them.
+ *
+ * Each row states the verdict twice — as a colour and as a word — because a colour alone is
+ * not a status anyone can act on, and a word alone is not one anyone scans. The state comes
+ * from the native backend that performs the protected operation, so what is shown here is
+ * what the OS will actually answer, not what a settings row believes.
+ */
+.perm-list { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }
+
+.perm-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+}
+
+.perm-dot { width: 9px; height: 9px; border-radius: var(--pill); background: var(--faint); }
+.perm-row[data-state='granted'] { border-color: var(--green-line); background: var(--green-wash); }
+.perm-row[data-state='granted'] .perm-dot { background: var(--green); }
+.perm-row[data-state='granted'] .perm-pill { color: var(--green); }
+.perm-row[data-state='missing'] { border-color: var(--red-line); background: var(--red-wash); }
+.perm-row[data-state='missing'] .perm-dot { background: var(--red); }
+.perm-row[data-state='missing'] .perm-pill { color: var(--red); }
+.perm-row[data-state='unknown'] { border-color: var(--amber-line); background: var(--amber-wash); }
+.perm-row[data-state='unknown'] .perm-dot { background: var(--amber); }
+.perm-row[data-state='unknown'] .perm-pill { color: var(--amber); }
+
+.perm-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.perm-text strong { font-size: 13px; font-weight: 600; }
+.perm-text span { font-size: 12px; color: var(--soft); line-height: 1.45; }
+.perm-pill { font-size: 11px; font-weight: 600; white-space: nowrap; }
+
+/*
+ * macOS caches a TCC decision for the life of the process, so a permission granted while the
+ * app is running stays invisible to it until a full quit and reopen. That is the single most
+ * common reason someone grants everything and still sees a refusal, so it is said in place
+ * rather than left for the user to discover.
+ */
+.perm-restart {
+  margin: 10px 0 0;
+  padding: 9px 11px;
+  border: 1px solid var(--amber-line);
+  border-radius: var(--r-sm);
+  background: var(--amber-wash);
+  font-size: 12px;
+  line-height: 1.45;
 }
