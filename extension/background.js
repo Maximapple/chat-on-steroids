@@ -2223,6 +2223,30 @@ const HANDLERS = {
       'BROWSER_ACTION_FAILED'
     );
   },
+  /**
+   * Reports a browser action's outcome back to the app.
+   *
+   * Through the worker because the pairing token lives here and never in a content script —
+   * the same reason every other route the page needs is proxied rather than called directly.
+   */
+  async browser_result(message) {
+    await load();
+    try {
+      return await call('/browser/result', {
+        method: 'POST',
+        body: JSON.stringify({
+          conversationId: String(message.conversationId || ''),
+          id: String(message.id || ''),
+          ok: message.ok === true,
+          data: message.data,
+          error: message.error,
+          detail: message.detail
+        })
+      });
+    } catch (error) {
+      return { ok: false, error: 'bridge_unreachable', detail: String(error?.message ?? error) };
+    }
+  },
   async browser_observe(message) {
     return browserResult(
       async (driver) => driver.browserDriver.observe({ includeScreenshot: message.includeScreenshot !== false }),

@@ -111,6 +111,7 @@ import {
   touchContinuation
 } from './session/continuation.js';
 import { noteResumeOpening } from './session/resume-gate.js';
+import { collectBrowserCommand, settleBrowserCommand } from './browser-control.js';
 import { readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
 import { APP_VERSION, BRIDGE_PROTOCOL } from './version.js';
 import { requestCorrelation } from './session/correlation.js';
@@ -1174,6 +1175,36 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
   }
 
+  /**
+   * The answer to a browser action, from the page that carried it.
+   *
+   * Deliberately not trusted by id alone: the command is looked up under this conversation, so
+   * a result aimed at another chat, or a late one from a command that already timed out, is
+   * refused rather than resolving somebody else's tool call.
+   */
+  if (route === '/browser/result' && req.method === 'POST') {
+    let body: Record<string, unknown>;
+    try {
+      body = (await readBody(req)) as Record<string, unknown>;
+    } catch (err) {
+      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
+      return json(res, 400, { error: 'bad_request' }, origin);
+    }
+    const id = conversationId(body['conversationId']);
+    if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    const commandId = typeof body['id'] === 'string' ? body['id'] : '';
+    if (!commandId) return json(res, 400, { error: 'bad_request' }, origin);
+    const settled = settleBrowserCommand(id, commandId, {
+      ok: body['ok'] === true,
+      data: body['data'] && typeof body['data'] === 'object'
+        ? (body['data'] as Record<string, unknown>)
+        : undefined,
+      error: typeof body['error'] === 'string' ? body['error'] : undefined,
+      detail: typeof body['detail'] === 'string' ? body['detail'] : undefined
+    });
+    return json(res, 200, { ok: true, settled }, origin);
+  }
+
   if (route === '/closed' && req.method === 'POST') {
     let body: Record<string, unknown>;
     try {
@@ -1439,6 +1470,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         job: resumeJobFor(live.sessionId),
         // Caller-scoped orchestration state for the mutable status panel. Never another prime's run.
         swarm: browserSwarmForPrime(id),
+        // One browser action, handed to the page that is already polling. Collected here
+        // rather than pushed, so a command can only reach a document that proved it owns
+        // this conversation — the same rule every other identity-sensitive route uses.
+        browserCommand: collectBrowserCommand(id),
         // The goal loop: whether it is on, whether it *can* be on, and whatever draft this
         // chat currently has in flight. The draft's text grows on this feed, which is what
         // the panel above the composer streams — there is no second connection to hold open.

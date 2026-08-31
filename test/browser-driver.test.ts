@@ -261,6 +261,9 @@ describe('reading a page', () => {
     expect(page.url).toBe('https://example.com/page');
     expect(page.title).toBe('Fixture page');
     expect(page.elements).toHaveLength(4);
+    // Every element is addressable by ref, and carries a path the driver re-resolves with.
+    expect(page.elements.map((e) => e.ref)).toEqual(['e0', 'e1', 'e2', 'e3']);
+    expect(page.elements.every((e) => typeof e.path === 'string' && (e.path as string).length > 0)).toBe(true);
     expect(page.elements.map((e) => [e.role, e.name])).toEqual([
       ['link', 'Next page'],
       ['button', 'Save'],
