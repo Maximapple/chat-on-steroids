@@ -51,15 +51,55 @@ while Chrome asks, by design. If the dialog does not appear — because it opene
 window, or was dismissed — the visible result is exactly "nothing happened", and the request is
 abandoned rather than refused.
 
-While the console is open, paste this in and press Enter:
+### The one paste that answers everything
+
+With the popup's DevTools console open, paste this whole block and press Enter. It reports what
+is loaded, instruments the toggle, and then you click it once.
 
 ```js
-chrome.permissions.getAll(p => console.log('held:', JSON.stringify(p)));
-chrome.runtime.getManifest().permissions;
+(() => {
+  const m = chrome.runtime.getManifest();
+  console.log('MANIFEST permissions          :', JSON.stringify(m.permissions));
+  console.log('MANIFEST optional_permissions :', JSON.stringify(m.optional_permissions));
+  console.log('debugger is required          :', (m.permissions || []).includes('debugger'));
+  console.log('chrome.debugger available     :', typeof chrome.debugger);
+  chrome.permissions.getAll((p) => console.log('HELD', JSON.stringify(p)));
+
+  const t = document.getElementById('browserControlToggle');
+  console.log('toggle found                  :', Boolean(t));
+  console.log('row hidden                    :', t && t.closest('.row') ? t.closest('.row').hidden : 'n/a');
+  console.log('error element present         :', Boolean(document.getElementById('browserControlError')));
+  console.log('checked before                :', t && t.checked);
+
+  // Does a change event reach a listener at all?
+  if (t) t.addEventListener('change', () => console.log('CHANGE fired, checked =', t.checked), true);
+
+  // Anything thrown inside the app's own handler would otherwise be invisible.
+  window.addEventListener('error', (e) => console.log('THREW:', e.message, e.filename, e.lineno));
+  window.addEventListener('unhandledrejection', (e) => console.log('REJECTED:', String(e.reason)));
+
+  console.log('--- now click the Browser control toggle once ---');
+})();
 ```
 
-The first prints what the extension currently holds. The second must include `"debugger"`. If it
-does not, Chrome is running the old manifest — go back to step 2.
+Then click the toggle once and copy **everything** the console printed, including whatever
+appears after the click.
+
+If the popup closes on the click, reopen it with Inspect popup — the console window stays open
+and keeps its history.
+
+### What each answer means
+
+- **`debugger is required: false`** — Chrome is running the old manifest. Reload the extension in
+  `chrome://extensions`. Nothing else matters until this says true.
+- **`toggle found: false`** or **`row hidden: true`** — the popup decided the browser cannot do
+  this at all; send the whole output.
+- **`CHANGE fired` never appears** — the click is not reaching the control. Send the output plus
+  whether the checkbox visibly moved.
+- **`CHANGE fired` appears and then nothing** — the handler ran and stalled or threw silently.
+  This is the case I would most like to see, and `THREW`/`REJECTED` lines are the evidence.
+- **The popup closes and the toggle is off when reopened** — Chrome's permission prompt took the
+  popup with it and was never answered. That is a real defect in the flow and not your doing.
 
 ---
 
