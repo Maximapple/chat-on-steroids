@@ -1652,13 +1652,30 @@ async function actLocked(
           scroll_x: action.scroll_x ?? 0,
           scroll_y: action.scroll_y ?? 0
         };
-      case 'drag':
-        return {
-          type: 'drag',
-          xs: action.path.map((p) => toScreenX(p.x)),
-          ys: action.path.map((p) => toScreenY(p.y)),
-          button: action.button ?? 'left'
-        };
+      case 'drag': {
+        const xs = action.path.map((p) => toScreenX(p.x));
+        const ys = action.path.map((p) => toScreenY(p.y));
+        // A drag that goes nowhere is not a drag, and must not be reported as one.
+        //
+        // Mapped coordinates are clamped into the frame's region, which is right for a click at
+        // the edge and wrong for a path: a route that lies outside the frame collapses to a
+        // single point, no threshold is crossed, no drag session begins, and the helper answers
+        // ok because every event it was asked to post was posted. That is the "success with no
+        // effect" QA has now reported twice, and the caller cannot tell it from a real drag.
+        //
+        // The likely cause is a frame mismatch — coordinates read off one screenshot and sent
+        // against another, or against a stale one — so the refusal says that rather than merely
+        // reporting a zero length.
+        const distinct = xs.some((x, index) => x !== xs[0] || ys[index] !== ys[0]);
+        if (!distinct) {
+          throw new ComputerError(
+            `DRAG_PATH_COLLAPSED: every point of this drag maps to ${xs[0]},${ys[0]} once clamped into frame ` +
+              `${frame.id} (${frame.region.width}x${frame.region.height} at ${frame.region.x},${frame.region.y}). ` +
+              'Nothing was sent. Take a fresh screenshot and read the coordinates off that image.'
+          );
+        }
+        return { type: 'drag', xs, ys, button: action.button ?? 'left' };
+      }
       case 'type':
         return { type: 'type', text: action.text };
       case 'keypress':
