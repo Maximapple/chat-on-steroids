@@ -147,7 +147,16 @@ as needing evidence.
     limitation.
 25. Detach browser control. Confirm the pointer overlay disappears and the tab behaves normally.
 
-## F. Onboarding and the permission step
+## F. Onboarding and the permission step — ask the user, do not drive it
+
+**You cannot perform this section yourself, and must not try.** Chat On Steroids deliberately
+hides its own windows from everything you can see: it must not be able to drive the app that is
+driving it. A previous run correctly refused to bypass that and marked the whole section skipped
+— the right call, and a flaw in how these checks were written rather than in the run.
+
+Ask the user to look and report back, one question at a time, and record their answers as the
+result. Say in the report that these were observed by the user rather than measured by you. The
+same applies to checks 35 and 36.
 
 26. Ask the app for its setup state. Report which steps it considers finished.
 27. Look at the onboarding screen's permission list. For each of the two permissions, report the
@@ -176,11 +185,14 @@ These cover behaviour that changed since the last run and was never exercised.
 34. **Setting a value replaces rather than appends.** In a browser text field that already
     contains text, set a new value. The field must contain **only** the new text. Then set an
     empty value and confirm the field is empty, not merely one character shorter.
-35. **The permission list notices a revocation on its own.** With everything granted, turn one
-    permission off in System Settings and return to the app **without restarting**. Within about
-    30 seconds the row must turn red by itself. Report how long it took.
-36. **The restart note only when a restart helps.** With a permission at "Not asked yet" and none
-    refused, confirm the amber restart note is **absent**. Then refuse one and confirm it appears.
+35. **The permission list notices a revocation on its own.** (User-observed — see section F.)
+    Ask the user to turn one permission off in System Settings with everything else granted, and
+    to watch the app's row **without restarting**. It should turn red by itself within about ten
+    seconds; the poll runs every six. Ask how long it actually took.
+36. **The restart note only when a restart helps.** (User-observed.) With no permission refused,
+    the amber restart note must be **absent**; after one is refused it must appear. Note that
+    macOS cannot distinguish "never asked" from "refused" — both read as "Not granted" — so this
+    check is only about the note, not about which label a reset produces.
 37. **A pointer outside the captured window.** Move the pointer well outside a window, capture
     that window, and read the reported pointer line. It must say the pointer is outside the frame
     rather than print image coordinates that fall outside the image.
