@@ -196,6 +196,30 @@ if (!candidate) {
   const cy = Math.round(Number(candidate['y']) + Number(candidate['height']) / 2);
   console.log(`      window ${candidate['id']} "${String(candidate['title'] ?? '').slice(0, 40)}" at ${candidate['x']},${candidate['y']} ${candidate['width']}x${candidate['height']}`);
 
+  /*
+   * Foreground resolution, which is the subsystem the last release was held for.
+   *
+   * QA reported `No foreground window` while Chrome was plainly active, because Chrome's
+   * link-preview bubble was WindowServer's topmost window while AX focus — and the typing —
+   * belonged to the real window. That report was written against a build 93 minutes older than
+   * its own fix, so the fix has never been exercised anywhere. This cannot reproduce the bubble,
+   * but it can prove the ordinary case resolves at all rather than answering nothing, which is
+   * the failure that was actually observed.
+   */
+  const front = await probe('it names a foreground window', { op: 'cursor' });
+  if (front?.ok === true) {
+    const id = Number(front['foreground']);
+    console.log(`      foreground=${id}, the opened window is ${candidate['id']}`);
+    if (id === 0) {
+      console.log('FAIL  a window is open and frontmost, but no foreground window was named');
+      failed = true;
+    } else if (id !== Number(candidate['id'])) {
+      // Not necessarily wrong — another window could legitimately be in front — but worth
+      // seeing, because the whole defect was about naming the wrong one.
+      console.log('      note: foreground is a different window than the one just opened');
+    }
+  }
+
   const moved = await probe('it can put the pointer inside that window',
     { op: 'act', actions: [{ type: 'move', x: cx, y: cy }] });
   if (moved?.ok !== true) {
