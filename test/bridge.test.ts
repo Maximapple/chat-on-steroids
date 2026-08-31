@@ -49,6 +49,7 @@ const {
   unpair
 } = await import('../src/main/bridge.js');
 const { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } = await import('../src/main/durable.js');
+const { runBrowserCommand, resetBrowserControlForTests } = await import('../src/main/browser-control.js');
 const {
   GOAL_OBJECTIVES_STATE,
   goalObjectiveFor,
@@ -3677,6 +3678,111 @@ describe('the goal loop over the bridge', () => {
     expect(second.status).toBe(200);
     expect(second.body.goal.objective).toBe('');
     expect(repairWarnings()).toBe(warningsBefore + 1);
+  });
+
+  /**
+   * Browser control, from the app parking an action to the answer arriving back.
+   *
+   * The driver that performs the action lives in an extension service worker and cannot be
+   * reached from a test, but everything between the caller and that worker can be, and it is
+   * the part with the interesting failure modes: an action handed out twice, a result from
+   * another conversation resolving somebody's call, a late answer to something that already
+   * gave up.
+   */
+  describe('carrying a browser action', () => {
+    const CHAT = 'cafe0005-0000-4000-8000-000000000005';
+
+    async function liveChat() {
+      await pair();
+      await request('POST', '/events', {
+        body: {
+          conversationId: CHAT,
+          events: [{ kind: 'user_message', time: Date.now(), text: 'drive the browser', messageId: 'm-browser-1' }]
+        }
+      });
+    }
+
+    it('hands the action to the page that polls, once, and answers the caller', async () => {
+      await liveChat();
+      resetBrowserControlForTests();
+
+      const pending = runBrowserCommand(CHAT, { type: 'click', x: 10, y: 20 });
+
+      const first = await request('GET', `/activity?conversationId=${CHAT}`);
+      expect(first.status).toBe(200);
+      const carried = first.body.browserCommand;
+      expect(carried).toMatchObject({ action: { type: 'click', x: 10, y: 20 } });
+      expect(typeof carried.id).toBe('string');
+
+      // Handed out once: a second tab showing the same chat must not perform the same click.
+      const second = await request('GET', `/activity?conversationId=${CHAT}`);
+      expect(second.body.browserCommand).toBeNull();
+
+      const settled = await request('POST', '/browser/result', {
+        body: { conversationId: CHAT, id: carried.id, ok: true, data: { clicked: { x: 10, y: 20 } } }
+      });
+      expect(settled.status).toBe(200);
+      expect(settled.body).toMatchObject({ settled: true });
+
+      await expect(pending).resolves.toMatchObject({ ok: true, data: { clicked: { x: 10, y: 20 } } });
+    });
+
+    it('refuses a second action while one is still outstanding', async () => {
+      await liveChat();
+      resetBrowserControlForTests();
+
+      const first = runBrowserCommand(CHAT, { type: 'click', x: 1, y: 1 });
+      // Ordered actions: running two at once means running them in an order nobody chose.
+      await expect(runBrowserCommand(CHAT, { type: 'click', x: 2, y: 2 })).resolves.toMatchObject({
+        ok: false,
+        error: 'BROWSER_BUSY'
+      });
+
+      const feed = await request('GET', `/activity?conversationId=${CHAT}`);
+      await request('POST', '/browser/result', {
+        body: { conversationId: CHAT, id: feed.body.browserCommand.id, ok: true, data: {} }
+      });
+      await expect(first).resolves.toMatchObject({ ok: true });
+    });
+
+    it('refuses a result that names the wrong command or the wrong chat', async () => {
+      await liveChat();
+      resetBrowserControlForTests();
+
+      const pending = runBrowserCommand(CHAT, { type: 'click', x: 3, y: 3 });
+      const feed = await request('GET', `/activity?conversationId=${CHAT}`);
+      const id = feed.body.browserCommand.id;
+
+      // A late answer to something that already gave up, or an id from another run.
+      const wrongId = await request('POST', '/browser/result', {
+        body: { conversationId: CHAT, id: 'bc-not-this-one', ok: true, data: {} }
+      });
+      expect(wrongId.body).toMatchObject({ settled: false });
+
+      // Another chat's page must not be able to resolve this conversation's call.
+      const other = 'cafe0006-0000-4000-8000-000000000006';
+      const wrongChat = await request('POST', '/browser/result', {
+        body: { conversationId: other, id, ok: true, data: {} }
+      });
+      expect(wrongChat.body).toMatchObject({ settled: false });
+
+      await request('POST', '/browser/result', {
+        body: { conversationId: CHAT, id, ok: false, error: 'BROWSER_BAD_REF', detail: 'e3 is no longer on this page' }
+      });
+      // A failure is an answer: the caller learns why rather than waiting for a timeout.
+      await expect(pending).resolves.toMatchObject({
+        ok: false,
+        error: 'BROWSER_BAD_REF',
+        detail: 'e3 is no longer on this page'
+      });
+    });
+
+    it('carries nothing when nothing is waiting', async () => {
+      await liveChat();
+      resetBrowserControlForTests();
+      const feed = await request('GET', `/activity?conversationId=${CHAT}`);
+      expect(feed.body.browserCommand).toBeNull();
+    });
   });
 
   /** The page needs to know three things, and it gets them on the feed it already polls. */
