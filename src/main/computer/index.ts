@@ -1139,8 +1139,16 @@ async function screenshotFromReply(
   rememberFrame(frame);
   const encodeStartedAt = Date.now();
   const data = png.toString('base64');
+  // The pointer note rides along here rather than in the Screenshot contract: it answers one
+  // question, and only for a person reading a log. A pointer missing from a macOS window
+  // capture looks identical whether the system would not describe a cursor, the pointer was
+  // outside the window, or the buffer failed, and telling those apart from the picture alone
+  // is impossible — which has already cost one round of guessing. Windows and older helpers
+  // that do not report it log "unreported" rather than inventing a verdict.
+  const pointerNote = typeof reply['pointer'] === 'string' ? reply['pointer'] : 'unreported';
   logInfo(
-    `desktop timing screenshot_read_ms=${readMs} screenshot_base64_ms=${Date.now() - encodeStartedAt} screenshot_bytes=${png.length}`
+    `desktop timing screenshot_read_ms=${readMs} screenshot_base64_ms=${Date.now() - encodeStartedAt} ` +
+      `screenshot_bytes=${png.length} pointer=${pointerNote}`
   );
   return {
     data,
