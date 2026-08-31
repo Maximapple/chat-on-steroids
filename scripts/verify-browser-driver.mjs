@@ -541,6 +541,26 @@ try {
   check('detach removes the overlay',
     (await readPage(`Boolean(document.getElementById('__cos_pointer__'))`)) === false);
 
+  // The group is the visible answer to "is this tab being driven" — a blue band above the tab,
+  // labelled with the app's name. It was created on attach and never removed, so every session
+  // left one behind: a tab still advertising that something drives it when nothing does. An
+  // indicator that exists to be trusted is the worst one to leave lying.
+  const grouping = await run(`(async () => {
+    const driver = globalThis.__driver.browserDriver;
+    await driver.act({ type: 'navigate', url: 'http://127.0.0.1:${pagePort}/' });
+    const held = await driver.status();
+    const during = (await chrome.tabs.get(held.tabId)).groupId;
+    await driver.detach();
+    const after = (await chrome.tabs.get(held.tabId)).groupId;
+    return JSON.stringify({ during, after });
+  })()`);
+  const bands = (() => {
+    try { return JSON.parse(String(grouping.value ?? '{}')); } catch { return {}; }
+  })();
+  check('letting go of a tab takes it back out of the driven group',
+    Number.isInteger(bands.during) && bands.during !== -1 && bands.after === -1,
+    grouping.value ?? grouping.error);
+
   // The refusal list guards attach and navigate. A click is the third way a driven tab can
   // change page, and it went through neither: click a link and the tab lands wherever the link
   // points, with the debugger session still on it. The list exists so the driver can never
