@@ -27,6 +27,7 @@ import {
 
 import type { Capabilities, Check, Diagnosis, MacOSDesktopAccessStatus } from '../shared/types.js';
 import { surfaceIsUseful, type SurfaceId } from './mcp/surfaces.js';
+import { APP_VERSION, BUILD_REVISION } from './version.js';
 import { capabilitiesAddedSinceConnectorSnapshot } from './mcp/server.js';
 import { refreshMacOSDesktopAccess } from './computer/index.js';
 
@@ -300,6 +301,15 @@ function developerMode(seen: number | null, called: number | null): Check {
 
 export async function runDiagnostics(): Promise<Diagnosis> {
   const checks: Check[] = [];
+  // First, because it decides what every line under it means. Two builds can carry the same
+  // version and different code, and a QA run spent itself on an app that predated the feature it
+  // was testing with nothing on screen able to say so.
+  checks.push({
+    name: 'Build',
+    status: 'pass',
+    ok: true,
+    detail: `Chat On Steroids ${APP_VERSION}, built from ${BUILD_REVISION} on ${process.platform}-${process.arch}.`
+  });
   const config = getConfig();
   const caps = effectiveCapabilities(config);
   const status = getStatus();

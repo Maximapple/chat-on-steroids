@@ -8,6 +8,7 @@ import { getConfig, initConfigPath, loadConfig } from './config.js';
 import { connect, disconnect, getStatus, onStatusChange, shutdownConnection } from './connection.js';
 import { registerIpc } from './ipc.js';
 import { logError, logInfo, logWarn } from './logger.js';
+import { APP_VERSION, BUILD_REVISION } from './version.js';
 import { unifiedExecManager } from './codex/manager.js';
 import { initSecretsPath } from './secrets.js';
 import { setBrowserOpener, shutdownBridge, startBridge } from './bridge.js';
@@ -222,6 +223,9 @@ void app.whenReady().then(async () => {
   // This guard is intentionally before even app.getPath/init* calls. A secondary instance, or a
   // primary that was told to quit before ready, must never touch the primary's shared userData.
   if (!shouldBeginAppBootstrap(hasSingleInstanceLock, quitting)) return;
+  // Named once, first, so every line below it in a log or a bug report is attributable to a
+  // specific build. Version alone cannot do that: two builds carry the same one.
+  logInfo(`Chat On Steroids ${APP_VERSION} (${BUILD_REVISION}) starting on ${process.platform}-${process.arch}`);
   const userData = app.getPath('userData');
   initConfigPath(userData);
   initSecretsPath(userData);

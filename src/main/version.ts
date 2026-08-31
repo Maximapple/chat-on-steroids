@@ -15,6 +15,18 @@
 export const APP_VERSION = '2.0.2';
 
 /**
+ * The commit this build came from, or 'unknown' outside a build.
+ *
+ * The version alone cannot distinguish two builds, and that gap cost a whole QA run: the app
+ * under test called itself 2.0.2 and predated the feature the run existed to exercise, and
+ * nothing visible could have said so. Substituted at bundle time; the declaration below is what
+ * tests and `tsx` see.
+ */
+declare const __BUILD_REVISION__: string | undefined;
+export const BUILD_REVISION =
+  typeof __BUILD_REVISION__ === 'string' ? __BUILD_REVISION__ : 'unknown';
+
+/**
  * Standalone extension recovery must stay on the app's own release. Using GitHub's moving
  * `latest` asset can pair an older installed app with a newer, incompatible bridge protocol.
  */
