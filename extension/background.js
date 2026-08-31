@@ -2189,8 +2189,70 @@ const HANDLERS = {
     // response itself was lost; the outbox is now the sole retry path.
     await forgetDeferredRevival(message.id);
     return result;
+  },
+
+  /**
+   * Browser control, which lives here because the worker is the only part of the extension
+   * allowed to hold a debugger session — the same reason it is the only part that holds the
+   * pairing token. A content script asks; it never drives.
+   *
+   * Loaded on first use rather than imported at the top. The worker is started for every
+   * ordinary observation and almost none of those touch a browser session, so the driver
+   * should not be on that path; and this file is also evaluated as a plain script by its own
+   * tests, where a static import is a parse error.
+   */
+  async browser_status() {
+    const driver = await browserControl();
+    return { ok: true, granted: await driver.hasBrowserPermissions(), ...driver.browserDriver.status() };
+  },
+  async browser_attach(message) {
+    return browserResult(async (driver) => driver.browserDriver.attach(Number(message.tabId)), 'BROWSER_ATTACH_FAILED');
+  },
+  async browser_detach() {
+    const driver = await browserControl();
+    return { ok: true, ...(await driver.browserDriver.detach()) };
+  },
+  async browser_act(message) {
+    return browserResult(
+      async (driver) => ({ result: await driver.browserDriver.act(message.action) }),
+      'BROWSER_ACTION_FAILED'
+    );
+  },
+  async browser_observe(message) {
+    return browserResult(
+      async (driver) => driver.browserDriver.observe({ includeScreenshot: message.includeScreenshot !== false }),
+      'BROWSER_OBSERVE_FAILED'
+    );
   }
 };
+
+/**
+ * The browser driver, loaded once and only when something actually asks for it.
+ *
+ * Dynamic rather than static so the module is off the hot path of ordinary observation, and
+ * so this file still parses where it is evaluated as a classic script.
+ */
+let browserControlModule = null;
+async function browserControl() {
+  if (!browserControlModule) {
+    browserControlModule = await import('./browser-driver.js');
+    // Registered here rather than at load: a session the browser tears down — a closed tab,
+    // Cancel on the debugging banner, DevTools opening — must not leave this worker believing
+    // it still owns one.
+    browserControlModule.installBrowserDriverLifecycle();
+  }
+  return browserControlModule;
+}
+
+/** Every browser handler answers the same shape, so one refusal path serves all of them. */
+async function browserResult(run, fallbackCode) {
+  try {
+    const driver = await browserControl();
+    return { ok: true, ...(await run(driver)) };
+  } catch (error) {
+    return { ok: false, error: error?.code ?? fallbackCode, detail: String(error?.message ?? error) };
+  }
+}
 
 webext.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const handler = message && typeof message.type === 'string' ? HANDLERS[message.type] : null;
