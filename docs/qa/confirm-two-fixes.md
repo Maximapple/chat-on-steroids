@@ -3,13 +3,34 @@
 Both come from the same run that produced the drag ablation and the TCC series. Neither takes
 long, and each settles something currently believed rather than known.
 
-Paste the block below into Claude Code on the Mac, in a clone of
-`integrate/browser-and-desktop-064733` at `582e8f7` or later.
+Paste everything below the line into Claude Code on the Mac. **No DMG and no installed app are
+needed** — this drives the helper the repository builds, so it can be done while a package is
+still building.
 
 ---
 
 Two questions, both answered by measurement rather than by reading the source. Report what you
 observe, including if it contradicts what the code says should happen.
+
+Start by getting the repository and building the helper. Skip the clone line if the directory is
+already there:
+
+```sh
+git clone https://github.com/Maximapple/chat-on-steroids.git ~/chat-on-steroids
+cd ~/chat-on-steroids
+git fetch origin
+git checkout integrate/browser-and-desktop-064733
+git pull --ff-only
+npm ci
+node scripts/prepare-macos-desktop-helper.mjs --platform darwin --arch arm64
+```
+
+That leaves the helper at
+`resources/packaging/desktop/darwin/arm64/macos-desktop-helper`, which speaks newline-delimited
+JSON on stdin and stdout. Both questions below drive it directly.
+
+Screen Recording and Accessibility must be granted to whichever application owns the terminal —
+macOS attaches the grant to the GUI ancestor, usually `Terminal.app`, not to `node`.
 
 ## 1. Is the frozen running-applications cache actually gone?
 
