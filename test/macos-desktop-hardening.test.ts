@@ -308,6 +308,39 @@ describe('macOS desktop safety hardening', () => {
    *
    * Every clause still has to hold. They just judge one observation instead of two.
    */
+  /**
+   * The active application is read fresh, not from a cache nobody refills.
+   *
+   * NSWorkspace serves frontmostApplication from a running-applications cache that AppKit keeps
+   * current by delivering notifications on a run loop. The standalone helper has none — it reads
+   * commands with readLine() on the main thread and never returns to one — so the cache was
+   * fixed at first access and every application launched afterwards stayed invisible to it, for
+   * the life of the process. The app runs one long-lived helper, which made that permanent.
+   *
+   * QA reproduced it with two helpers on one desktop: the one that had queried before TextEdit
+   * launched reported no foreground window and kept doing so, while a freshly started one was
+   * correct throughout. Window enumeration was unaffected either way, because that goes through
+   * CGWindowListCopyWindowInfo — hence a window listed, capturable and plainly in front that
+   * nothing would call foreground.
+   *
+   * This is a second, independent cause of the same symptom as the transient child-window case.
+   * Fixing that one did not touch this one.
+   */
+  it('reads the frontmost application fresh rather than from a frozen cache', () => {
+    expect(swift).toMatch(
+      /private func frontmostPID\(\) -> pid_t\? \{[\s\S]{0,400}CFRunLoopRunInMode\(\.defaultMode, 0, true\)/
+    );
+    // Bounded and non-blocking: a zero timeout returns at once when nothing is pending, and the
+    // pass count is capped so a busy run loop cannot hold a command hostage.
+    expect(swift).toContain('while drained < 32, CFRunLoopRunInMode(.defaultMode, 0, true) == .handledSource');
+    // Behind the main-queue hop, like every other AppKit read in this file, and reached only
+    // after the drain — an unguarded call elsewhere would reintroduce the stale answer.
+    expect(swift).toMatch(/private func frontmostPID[\s\S]{0,900}onMainQueue \{/);
+    expect(swift).toMatch(
+      /CFRunLoopRunInMode[\s\S]{0,200}NSWorkspace\.shared\.frontmostApplication\?\.processIdentifier/
+    );
+  });
+
   it('judges one reading of the focused window, not two', () => {
     expect(swift).toMatch(
       /private func foregroundWindowID[\s\S]*let focused = AXIsProcessTrusted\(\) \? focusedAXWindowID\(for: pid, rows: rows\) : nil/

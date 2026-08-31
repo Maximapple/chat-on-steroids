@@ -217,7 +217,47 @@ if (!candidate) {
     const claimed = windows.find((w) => w?.['state'] === 'foreground');
     console.log(`      foreground=${id}, opened window ${candidate['id']}, window list claims ${claimed?.['id'] ?? 'none'}`);
     if (!claimed) {
-      console.log('      no window claims foreground on this runner, so there is nothing to judge');
+      /*
+       * Nothing claims foreground. On a CI runner that is honest — there is no user session. On
+       * a real desktop it is the defect itself, and skipping here is how the check that exists
+       * to find it stopped running: QA saw "nothing to judge" in four runs out of four while a
+       * window was plainly in front.
+       *
+       * A second helper, started after that window opened, tells the two apart. NSWorkspace
+       * serves the frontmost application from a cache refreshed on a run loop, and a helper
+       * without one is fixed at first access — so a fresh process sees an application the old
+       * one never will. If the newcomer names a foreground window and this one does not, the
+       * desktop has one and this helper has gone blind.
+       */
+      const second = spawn(helper, [], { stdio: ['pipe', 'pipe', 'ignore'] });
+      let secondSaw = null;
+      try {
+        let buffered = '';
+        const answer = new Promise((resolve) => {
+          second.stdout.on('data', (chunk) => {
+            buffered += chunk;
+            const newline = buffered.indexOf('\n');
+            if (newline >= 0) resolve(buffered.slice(0, newline));
+          });
+          setTimeout(() => resolve(''), 15_000);
+        });
+        second.stdin.write(`${JSON.stringify({ op: 'cursor' })}\n`);
+        const line = await answer;
+        secondSaw = line ? (JSON.parse(line)['foreground'] ?? 0) : null;
+      } catch {
+        secondSaw = null;
+      }
+      second.kill();
+
+      if (secondSaw === null) {
+        console.log('      no window claims foreground, and a second helper could not be asked');
+      } else if (Number(secondSaw) > 0) {
+        console.log(`FAIL  a freshly started helper names foreground window ${secondSaw}; this one sees none`);
+        console.log('      the running-application cache is stale — see frontmostPID');
+        failed = true;
+      } else {
+        console.log('      neither this helper nor a fresh one sees a foreground window, so there is nothing to judge');
+      }
     } else if (id === 0) {
       console.log(`FAIL  window ${claimed['id']} claims foreground, but no foreground window was named`);
       failed = true;
