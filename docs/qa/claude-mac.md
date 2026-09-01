@@ -71,23 +71,24 @@ checks skip these and say why. This machine can answer them.
 npm run verify:browser -- --headed
 ```
 
-Thirty-four checks against real Chrome. Scroll is the one to watch, and it has just been rebuilt
-on the strength of the last run from this machine, which found two separate things: the wheel
-event did not work at all, and the check that should have caught that printed a green SKIP over a
-swallowed timeout.
+Thirty-six checks against real Chrome. Scroll was the thing to watch, and the last run from this
+machine is what finally explained it — the fault was in the harness, not in the browser. It opened
+the extension popup as a new tab, which left the page under test in the *background*, and a
+background tab is given no frames. `--headed` never helped because headed against headless was
+never the axis; active against inactive was. Measured there: `visibilityState` was `"hidden"` while
+the browser window stood plainly in front.
 
-`Input.dispatchMouseEvent` with `mouseWheel` is now only a fallback; `Input.synthesizeScrollGesture`
-is tried first, because it drives the compositor rather than posting an event into it. On a build
-machine, which had never seen a wheel event reach the page at all, the page now reports
-`wheel deltaY=294 trusted=true` — but nothing composites it, so the check says so with the numbers
-instead of pretending.
+The fixture is activated before the scroll check now, and the direction is judged rather than
+skipped — `0 → 300` even on a build machine with no screen at all, which is the first time this has
+been judged anywhere.
 
 Report the tally and every FAIL verbatim, and then specifically:
 
-- Did **a positive scroll_y moves the page down** pass, or print the SKIP line? On a machine with a
-  screen it should pass — that would be the first time this has ever been judged anywhere.
+- Did **a positive scroll_y moves the page down** pass? It should, with real numbers on both sides.
 - What `scrollTop` did it report before and after?
 - Did **the page sees a trusted wheel event going down** pass, and with what deltaY?
+- If a SKIP line appears at all, quote it in full. That would mean this machine cannot composite
+  what it is being sent, which is a new finding rather than the old one.
 
 **2b. The helper, running for real.**
 
