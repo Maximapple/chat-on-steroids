@@ -1022,7 +1022,15 @@ export async function getWindowState(opts: {
       });
       const value = reply['window'];
       const window = value && typeof value === 'object' ? (value as WindowInfo) : null;
-      if (!window) throw new ComputerError('WINDOW_NOT_FOUND: no matching visible window is available');
+      // Name it. A caller that asked for one window in particular should not have to guess whether
+      // it closed, was never valid, or the desktop is empty.
+      if (!window) {
+        throw new ComputerError(
+          opts.window === undefined
+            ? 'WINDOW_NOT_FOUND: no window is in the foreground to read'
+            : `WINDOW_NOT_FOUND: window ${opts.window} is no longer on screen`
+        );
+      }
       const shot = file ? await screenshotFromReply(reply, file, window.id) : null;
       const frame = shot ? frameById(shot.frameId) : null;
       const unavailableValue = reply['uiUnavailable'];
@@ -1404,8 +1412,32 @@ export async function actAndCapture(
         captureFallback = `target window ${capture.window} closed or changed before result capture; captured the primary display instead`;
       }
     }
+    // Describe the pointer against the picture that is going back, not the one that was current
+    // before the actions ran. The cursor was computed inside actLocked, so a call that moved the
+    // pointer and then captured a window reported an image coordinate belonging to some earlier
+    // frame — true, and about a different image than the one in the caller's hands. QA read that
+    // as a regression, and it is at least an ambiguity worth removing.
+    const shotFrame = result.cursor ? frameById(resultScreenshot.frameId) : null;
+    const previous = result.cursor;
+    const cursor = shotFrame && previous
+      ? (() => {
+          const inFrame = {
+            x: Math.round((previous.screen.x - shotFrame.region.x) * shotFrame.scale),
+            y: Math.round((previous.screen.y - shotFrame.region.y) * shotFrame.scale)
+          };
+          const inside =
+            inFrame.x >= 0 && inFrame.y >= 0 && inFrame.x < shotFrame.width && inFrame.y < shotFrame.height;
+          return {
+            screen: previous.screen,
+            image: inside ? inFrame : null,
+            frameId: shotFrame.id,
+            imageSize: { width: shotFrame.width, height: shotFrame.height }
+          };
+        })()
+      : result.cursor;
     return {
       ...result,
+      cursor,
       screenshot: resultScreenshot,
       verification,
       captureFallback

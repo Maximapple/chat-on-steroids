@@ -871,9 +871,37 @@ private func postMouse(_ type: CGEventType, point: CGPoint, button: CGMouseButto
     event.post(tap: .cghidEventTap)
 }
 
-private func movePointer(_ point: CGPoint) throws {
+/**
+ * Moves the pointer, and — when asked — checks that it went.
+ *
+ * Posting is not moving. A run asked for a move using coordinates read off a frame that had since
+ * gone stale, was told `Done 1/1 via sendinput: move`, and the pointer had not left where it
+ * started; the same move through a fresh frame worked. The answer described the event rather than
+ * the desktop, which is the failure this whole layer exists to avoid.
+ *
+ * Only the explicit `move` action verifies. A drag is a hundred interpolated steps of a pixel or
+ * two, and reading the position back after each would cost more than it proves — the drag already
+ * judges itself by what it moved.
+ */
+private func movePointer(_ point: CGPoint, verify: Bool = false) throws {
     try requirePointOnActiveDisplay(point)
+    let before = CGEvent(source: nil)?.location ?? .zero
     try postMouse(.mouseMoved, point: point, button: .left)
+    // A move to where the pointer already is has nothing to prove.
+    guard verify, hypot(point.x - before.x, point.y - before.y) > 1 else { return }
+    let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+    while ProcessInfo.processInfo.systemUptime < deadline {
+        let now = CGEvent(source: nil)?.location ?? .zero
+        if hypot(point.x - now.x, point.y - now.y) <= 2 { return }
+        usleep(5_000)
+    }
+    let ended = CGEvent(source: nil)?.location ?? .zero
+    throw fail(
+        "POINTER_DID_NOT_MOVE",
+        "asked for \(Int(point.x)),\(Int(point.y)); the pointer is at \(Int(ended.x)),\(Int(ended.y)) " +
+            "and did not move. Nothing else in this batch ran. Take a fresh screenshot and use " +
+            "coordinates from it — a frame from earlier can describe a desktop that has changed."
+    )
 }
 
 private func click(_ point: CGPoint, button: CGMouseButton, count: Int, targetWindow: CGWindowID? = nil) throws {
@@ -2024,7 +2052,7 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     routes.append(string(reply["route"], default: "uia"))
                 case "move":
                     if let frame { _ = try assertFrameTarget(frame) }
-                    try movePointer(CGPoint(x: int(action["x"]), y: int(action["y"])))
+                    try movePointer(CGPoint(x: int(action["x"]), y: int(action["y"])), verify: true)
                     routes.append("sendinput")
                 case "click", "double_click":
                     if let frame { _ = try assertFrameTarget(frame) }
