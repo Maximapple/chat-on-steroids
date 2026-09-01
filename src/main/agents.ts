@@ -351,6 +351,22 @@ let criticalPersistFlight: Promise<boolean> | null = null;
 let retiredPersist: (() => void) | null = null;
 let retiredPersistNow: ((snapshot: RetiredWorkersSnapshot) => Promise<void>) | null = null;
 const RETIRED_WORKER_TTL_MS = 30 * 60_000;
+/**
+ * How long a parked run's sleeping workers keep the power to refuse calls nobody could identify.
+ *
+ * Not how long the run lives — a dormant run is the user's to resume whenever they like, and
+ * nothing here deletes one. This bounds only the blanket refusal it casts over *unidentified*
+ * calls, which was unbounded: `hasRetiredWorkerLeases` prunes before it answers and this one
+ * checked no clock at all, so a run parked at any point in the past made every call without proof
+ * of identity fail, for good. A QA run met exactly that — the whole Desktop surface refused before
+ * anything reached macOS, because of a swarm parked days earlier.
+ *
+ * The same half hour the retired lease uses, and for the same reason: past it, an unproven call is
+ * far likelier to be an ordinary chat whose extension has not re-attached than a sleeping worker.
+ * What is still protected past it is the thing worth protecting — a relative file operation with
+ * no proven workspace is refused on its own terms, by its own guard.
+ */
+const DORMANT_WORKER_LEASE_TTL_MS = 30 * 60_000;
 const retiredWorkers = new Map<string, RetiredChat>();
 /** Worker objects created by a spawn whose public durable acceptance has not succeeded yet. */
 const unpublishedAgents = new WeakSet<Agent>();
@@ -3152,7 +3168,11 @@ export function dormantWorkerNotice(conversationId: string | null | undefined): 
 
 /** Any dormant worker conversation remains an identity fence, reusable or terminal. */
 export function hasDormantWorkerLeases(): boolean {
+  const cutoff = Date.now() - DORMANT_WORKER_LEASE_TTL_MS;
   for (const dormant of dormantRuns.values()) {
+    // Parked long enough ago that refusing every unidentified call in its name costs more than it
+    // protects. The run itself stays exactly where it is, resumable.
+    if (dormant.parkedAt < cutoff) continue;
     if (
       [...dormant.agents.values()].some(
         (agent) => agent.info.role === 'worker' && Boolean(agent.info.conversationId)
