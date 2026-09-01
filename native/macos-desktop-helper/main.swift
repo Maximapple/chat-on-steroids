@@ -428,6 +428,23 @@ private func axName(_ element: AXUIElement) -> String {
     return ""
 }
 
+/**
+ * Whether two titles name the same window, when one of them carries decoration the other does not.
+ *
+ * A window's accessibility title and its title in the window list are not the same string. Chrome
+ * lists "Example Domain" and answers "Example Domain - Google Chrome - mydealz" — the browser name
+ * and the profile appended. Comparing them for equality therefore matched nothing, and the tie-break
+ * built on it did nothing at all for the application it was written for: a QA run met two Chrome
+ * windows of identical size with plainly different titles and still could not address either.
+ *
+ * Containment is the honest relation between them. It is one-sided by design: if two windows both
+ * carry the shorter title, they remain ambiguous, which is correct.
+ */
+private func titlesAgree(_ a: String?, _ b: String?) -> Bool {
+    guard let a, let b, !a.isEmpty, !b.isEmpty else { return false }
+    return a == b || a.contains(b) || b.contains(a)
+}
+
 private func axWindowNumber(_ element: AXUIElement) -> CGWindowID? {
     (axAttribute(element, "AXWindowNumber" as CFString) as? NSNumber)?.uint32Value
 }
@@ -462,7 +479,7 @@ private func unambiguousWindowID(
     guard candidates.count > 1, candidates[1].distance - winner.distance < 32 else { return winner.id }
     // Geometry cannot separate them. The title often can, and it is already here.
     if let title, !title.isEmpty {
-        let titled = candidates.filter { $0.title == title }
+        let titled = candidates.filter { titlesAgree(title, $0.title) }
         if titled.count == 1 { return titled[0].id }
     }
     return nil
@@ -755,7 +772,9 @@ private func matchingAXWindow(_ row: WindowRow, deadline suppliedDeadline: TimeI
          * one of the pairs on that desktop shared its title too — but when it does, it costs one
          * attribute read and turns an impossible request into an ordinary one.
          */
-        let titled = geometryCandidates.filter { axString($0.element, kAXTitleAttribute as CFString) == row.title }
+        let titled = geometryCandidates.filter {
+            titlesAgree(axString($0.element, kAXTitleAttribute as CFString), row.title)
+        }
         if titled.count == 1 { return titled[0].element }
         // Still ambiguous. Name the candidates: "ambiguous" with nothing else leaves the caller
         // with no move to make, and the one move that works — close or move one of them — needs
@@ -767,7 +786,11 @@ private func matchingAXWindow(_ row: WindowRow, deadline suppliedDeadline: TimeI
             return title.isEmpty ? "an untitled window \(size)" : "\"\(title)\" \(size)"
         }.joined(separator: "; ")
         throw fail(
-            "UIA_FAILED",
+            // Its own code, because the caller's next move differs. `UIA_FAILED` also means "there
+            // is no accessibility window here at all", and a QA run measured `focusable` reporting
+            // a save dialog with no accessibility representation as "ambiguous" — telling someone to
+            // move one of two windows when there was only ever one.
+            "UIA_AMBIGUOUS_WINDOW",
             "window \(row.id) cannot be told apart from another window of the same application: " +
                 "\(described). Nothing was done. Nothing here can address them apart either — a focus " +
                 "would meet the same ambiguity — so move or close one of them from the application " +
@@ -2095,7 +2118,7 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                      */
                     entry["focusable"] = NSNull()
                     entry["focusableUnknown"] =
-                        (error as? HelperFailure)?.code == "UIA_FAILED" ? "ambiguous" : "unavailable"
+                        (error as? HelperFailure)?.code == "UIA_AMBIGUOUS_WINDOW" ? "ambiguous" : "unavailable"
                 }
                 return entry
             }

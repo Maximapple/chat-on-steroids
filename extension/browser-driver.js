@@ -985,10 +985,17 @@ export const browserDriver = {
         const usable = r.width >= 1 && r.height >= 1 && r.bottom > 0 && r.right > 0 &&
           r.top < innerHeight && r.left < innerWidth &&
           s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) !== 0;
-        return JSON.stringify({
-          found: true, usable,
-          x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2)
-        });
+        const x = Math.round(r.left + r.width / 2);
+        const y = Math.round(r.top + r.height / 2);
+        // What is actually at that point. A ref resolves to fresh coordinates, but coordinates are
+        // not the element: a page can lay something over it, and the click then lands on the cover
+        // while every part of the call still succeeds.
+        const at = document.elementFromPoint(x, y);
+        const hit = at
+          ? at.tagName.toLowerCase() + (at.id ? '#' + at.id : '')
+          : null;
+        const covered = Boolean(at) && at !== el && !el.contains(at) && !at.contains(el);
+        return JSON.stringify({ found: true, usable, x, y, hit, covered });
       })()`,
       contextId,
       returnByValue: true
@@ -998,7 +1005,12 @@ export const browserDriver = {
     if (!found.found) throw fail('BROWSER_BAD_REF', `${ref} is no longer on this page`);
     if (!found.usable) throw fail('BROWSER_BAD_REF', `${ref} is on the page but not visible or reachable`);
     // Back into the top-level page's coordinates, which is the space input events use.
-    return { x: Math.round(found.x + offset.x), y: Math.round(found.y + offset.y) };
+    return {
+      x: Math.round(found.x + offset.x),
+      y: Math.round(found.y + offset.y),
+      hit: found.hit ?? null,
+      covered: Boolean(found.covered)
+    };
   },
 
   /**
@@ -1142,8 +1154,18 @@ export const browserDriver = {
         return { reloaded: true };
 
       case 'click_ref': {
+        /*
+         * Say what the click actually landed on.
+         *
+         * A QA run clicked a freshly observed link, got `ok`, and the page did not move — twice,
+         * a second apart. Everything in the call had succeeded: the ref resolved, the element was
+         * visible, the click was trusted. Nothing in the answer could distinguish that from a link
+         * that simply does not navigate. So the answer now carries what was under the point, and
+         * says plainly when something else is covering it.
+         */
         const at = await this.resolveRef(action.ref);
-        return this.act({ ...action, type: 'click', x: at.x, y: at.y });
+        const clicked = await this.act({ ...action, type: 'click', x: at.x, y: at.y });
+        return { ...clicked, hit: at.hit, covered: at.covered };
       }
       case 'set_value': {
         const at = await this.resolveRef(action.ref);

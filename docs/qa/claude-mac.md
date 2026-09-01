@@ -149,7 +149,8 @@ This part was a hypothesis until the last run from this machine settled it, and 
 me. `FOCUS_FAILED` was not about Chromium's accessibility tree. Chrome's main window focuses in
 every state tried — page loaded, cursor in a page text field, focus in the address bar — and
 TextEdit never refuses at all. The one thing that refuses is the **transient omnibox container**:
-a second Chrome window that appears on Cmd+L, `1402x136`, titled "Google Chrome window", which
+a second Chrome window that appears on Cmd+L, `136` tall and as wide as its parent (the last run
+measured 874, not the 1402 an earlier one did), titled "Google Chrome window", which
 `{"op":"windows"}` lists like any other and which a caller can address by mistake. Press Escape and
 it disappears, and the main window focuses again.
 
