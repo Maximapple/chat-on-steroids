@@ -736,6 +736,39 @@ export function requestBrowserPermissions() {
 }
 
 /** Where the page is scrolled to, or null when it cannot be read. */
+/**
+ * Waits until the page has stopped moving and painted what it moved to.
+ *
+ * A scroll gesture animates. The command returns as soon as it is accepted, so a screenshot taken
+ * straight afterwards catches the page mid-flight: a run got an entirely white picture of a page
+ * that had plainly scrolled, and on a simpler page the newly exposed strip was blank while the
+ * old content still sat at its old height. The scroll had worked; the evidence of it had not.
+ *
+ * That is the failure this whole layer exists to prevent — an answer that says `ok` beside a
+ * picture that shows something else — so scrolling waits for the position to settle and then for
+ * two animation frames, which is the browser's own promise that a paint has happened.
+ */
+async function settleAfterScroll(send) {
+  let last = null;
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    const now = await readScrollPosition(send);
+    if (now !== null && last !== null && now.x === last.x && now.y === last.y) break;
+    last = now;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  try {
+    await send('Runtime.evaluate', {
+      expression:
+        'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(1))))',
+      awaitPromise: true,
+      returnByValue: true
+    }, SCROLL_TIMEOUT_MS);
+  } catch {
+    // A page that will not run script still scrolled; the wait above is the part that matters.
+  }
+}
+
 async function readScrollPosition(send) {
   try {
     const reply = await send('Runtime.evaluate', {
@@ -1207,6 +1240,10 @@ export const browserDriver = {
             if (error?.code !== 'BROWSER_TIMEOUT') throw error;
             acknowledged = false;
           }
+          after = await readScrollPosition(send);
+        }
+        if (moveFrom(after)) {
+          await settleAfterScroll(send);
           after = await readScrollPosition(send);
         }
         const moved = moveFrom(after);

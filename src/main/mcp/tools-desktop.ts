@@ -691,7 +691,11 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
               // Stops at the first failure rather than pressing on: later actions were chosen
               // for a page state that this one did not produce.
               return fail(
-                `${reply.error ?? 'BROWSER_FAILED'}: ${reply.detail ?? 'the browser action did not complete'}. ` +
+                // The detail is a sentence written by the driver and often ends in one already;
+                // appending a second full stop produced "let go of.." in a run's report. Small,
+                // but it is the kind of thing that makes an error message look unfinished.
+                `${reply.error ?? 'BROWSER_FAILED'}: ` +
+                  `${(reply.detail ?? 'the browser action did not complete').replace(/\.\s*$/, '')}. ` +
                   `Completed ${index} of ${input.actions.length}.`
               );
             }
