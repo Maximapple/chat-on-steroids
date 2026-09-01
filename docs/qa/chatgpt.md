@@ -46,8 +46,23 @@ browser check below will therefore fail for that reason and not their own.
 
 ## What changed since the last run
 
-**One defect, and it was the one you found.** Your last run failed check 33 on two independent
-pages and was right both times; my previous attempt at it treated a symptom.
+**Nothing on the surface you can reach.** This build's changes are in the macOS helper — window
+matching and a new opt-in field — and none of them is exposed to you. So this run is a regression
+pass, and its whole value is in whether the last two rounds' fixes still hold under a full sweep.
+
+Two things you should *not* find, because the last run reported them and both were wording rather
+than behaviour:
+
+- A `move` to where the pointer already is answers `Done`, and that is correct — the postcondition
+  is that the pointer is at the requested point. `POINTER_DID_NOT_MOVE` exists for a move that was
+  sent and not delivered, which asking for the current position cannot produce.
+- A capture taken straight after a Finder file operation can still show the file where it was.
+  Finder repaints on its own schedule; the shell is the settled answer.
+
+Report either only if it behaves differently from that.
+
+**The two that matter most, from the round before.** Your last run failed check 33 on two
+independent pages and was right both times; my previous attempt at it treated a symptom.
 
 - **Every screenshot of a scrolled page was wrong, not just one taken after scrolling.** A capture
   clip is given in *document* coordinates, and the driver always asked for `y: 0` — the top of the
