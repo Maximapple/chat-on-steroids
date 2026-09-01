@@ -713,6 +713,7 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
               // These answer a question about the session rather than doing something to a page,
               // so "ok" is not an answer. Say which tab is held, or that none is.
               const attached = data['attached'] === true;
+              const released = data['released'] as Record<string, unknown> | undefined;
               blocks.push({ observed: false, lines: [
                 attached
                   ? `${action.type}: holding tab ${String(data['tabId'])} — ${String(data['title'] ?? '')} ` +
@@ -723,7 +724,11 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
                     (data['groupId'] === null || data['groupId'] === undefined
                       ? ', not in a driven group'
                       : `, in driven group ${String(data['groupId'])}`)
-                  : `${action.type}: no tab is under control`
+                  : released
+                    ? `${action.type}: let go of tab ${String(released['tabId'])} — ` +
+                      `${String(released['title'] ?? '')} (${String(released['url'] ?? '')}); ` +
+                      'no tab is under control'
+                    : `${action.type}: no tab is under control`
               ] });
             } else {
               blocks.push({ observed: false, lines: [`${action.type}: ok`] });

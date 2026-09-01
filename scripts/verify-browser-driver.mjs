@@ -473,6 +473,13 @@ try {
    * must leave the page further down than it started. The sign is the part worth guarding — the
    * driver once negated both deltas and scrolled every page backwards, and nothing noticed.
    */
+  // Bring the fixture to the front first. Opening the extension popup earlier made it the active
+  // tab, so the page under test sat in the background — and a background tab is given no frames,
+  // which is why this printed a skip even on a machine with a screen. Measured on a Mac:
+  // visibilityState was "hidden" while the browser window was plainly in front, and activating the
+  // tab made the same scroll move the page 300 pixels immediately.
+  await fetch(`http://127.0.0.1:${port}/json/activate/${pageTarget.id}`, { method: 'PUT' }).catch(() => {});
+  await sleep(400);
   const before = Number(await readPage(`document.scrollingElement.scrollTop`));
   const scrolled = await run(`(async () => {
     try {

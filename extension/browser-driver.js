@@ -855,8 +855,12 @@ export const browserDriver = {
     } catch {
       // The tab may already be gone, which is the state we were heading for anyway.
     }
+    const released = { tabId, url: session.url, title: session.title };
     session = null;
-    return { attached: false, tabId: null, url: null, title: null };
+    // Say what was let go of. "No tab is under control" is the state afterwards and it is true,
+    // but as the answer to detach it reads as though there had been nothing to detach — which is
+    // the one thing it cannot distinguish. Naming the tab makes the effect legible.
+    return { attached: false, tabId: null, url: null, title: null, released };
   },
 
   /**
