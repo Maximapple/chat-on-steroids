@@ -61,6 +61,12 @@ than behaviour:
 
 Report either only if it behaves differently from that.
 
+**Check 23 now answers the question your last run could not.** You clicked a freshly observed Bing
+result, got `ok`, and the page did not move — and nothing in the reply could tell that apart from a
+link that simply does not navigate. `click_ref` now reports `hit`, the element actually under the
+click point, and `covered` when something else is lying over the one you named. If it fails again,
+quote both: they say whether the click missed or the page ignored it.
+
 **One from the last run that is still open, and needs a careful answer rather than a quick one.**
 Check 17's Tab returned `Done` twice and inserted nothing, on a run where two earlier rounds had it
 inserting a tab character correctly. I could not reproduce it from a machine without macOS, and

@@ -414,9 +414,23 @@ if (!candidate) {
 
 if (openedWindow) {
   try {
-    execFileSync('/usr/bin/osascript', ['-e', 'tell application "TextEdit" to quit saving no']);
-  } catch {
-    // Leaving an editor open on a throwaway runner harms nothing; failing the probe for it would.
+    /*
+     * Close the one document this script opened — not the application.
+     *
+     * Quitting TextEdit outright is refused whenever any *other* document has unsaved changes: the
+     * modal save sheet answers "User cancelled" (-128) and the quit never happens, leaving this
+     * script's own window behind. That is not harmless on a machine somebody uses. A run two rounds
+     * ago inherited a stray Finder window from the run before it and lost a drag to the ambiguity;
+     * a later run found several `cos-probe-window.txt` windows stacked up from previous probes.
+     */
+    execFileSync('/usr/bin/osascript', [
+      '-e',
+      'tell application "TextEdit" to close (every document whose name is "cos-probe-window.txt") saving no'
+    ]);
+  } catch (error) {
+    // Said out loud rather than swallowed: a window left behind is what the next run trips over.
+    console.log(`      could not close the window this probe opened (${String(error.message).slice(0, 120)})`);
+    console.log('      close cos-probe-window.txt by hand, or the next run may inherit it');
   }
 }
 
