@@ -367,6 +367,7 @@ try {
         return JSON.stringify({
           title: o.title, viewport: o.viewport,
           shot: o.screenshot ? { w: o.screenshot.width, h: o.screenshot.height } : null,
+          data: o.screenshot?.data ?? null,
           elements: o.elements.map((e) => ({ ref: e.ref, name: e.name }))
         });
       } catch (e) { return JSON.stringify({ retry: (e.code || '') + ' ' + e.message }); }
@@ -383,9 +384,23 @@ try {
     names.includes('Run the thing') && names.includes('Your name'), names.join(' | '));
   check('finds the control inside the iframe', names.includes('Inside the frame'), names.join(' | '));
   check('omits what a pointer cannot reach', !names.includes('Never'), names.join(' | '));
-  check('one screenshot pixel is one CSS pixel',
-    Boolean(view.shot) && view.shot.w === view.viewport?.width && view.shot.h === view.viewport?.height,
-    JSON.stringify({ shot: view.shot, viewport: view.viewport }));
+  /*
+   * Decoded, not taken on trust. This compared the driver's reported width against the viewport
+   * width — and the driver reported the width it had *asked* for, so the two were the same number
+   * from the same source and the check could not fail. Underneath it, on every Retina display, the
+   * image was coming back at twice that: a clip's scale multiplies the display's scale factor
+   * rather than replacing it. A Mac run measured 2400x1630 while this printed 1200x815 and passed.
+   */
+  if (!view.shot || !view.data) {
+    check('one screenshot pixel is one CSS pixel', false, JSON.stringify({ shot: view.shot }));
+  } else {
+    const firstShot = path.join(profile, 'first-observe.png');
+    writeFileSync(firstShot, Buffer.from(view.data, 'base64'));
+    const decoded = readPNG(firstShot);
+    check('one screenshot pixel is one CSS pixel',
+      decoded.width === view.viewport?.width && decoded.height === view.viewport?.height,
+      JSON.stringify({ png: { w: decoded.width, h: decoded.height }, reported: view.shot, viewport: view.viewport }));
+  }
 
   const refFor = (name) => (view.elements ?? []).find((e) => e.name === name)?.ref;
   const act = async (action) => {
@@ -567,7 +582,10 @@ try {
       const i = (y * image.width + 40) * image.channels;
       return [image.data[i], image.data[i + 1], image.data[i + 2]];
     };
-    const isBand = ([r, g, b]) => Math.abs(r - 0) < 40 && Math.abs(g - 96) < 40 && Math.abs(b - 255) < 40;
+    // Blue-dominant rather than one exact triple: a wide-gamut display transforms an sRGB colour
+    // on its way into the capture, and a Mac run had the band plainly painted while an exact-match
+    // test called it absent.
+    const isBand = ([r, g, b]) => b > 150 && b - r > 60 && b - g > 60;
     if (row < 20 || row > image.height - 20) {
       check('a screenshot of a scrolled page shows where the page is', false,
         `the page stopped at ${deepTop}, which puts the band at row ${row} — outside the image, so ` +

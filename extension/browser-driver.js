@@ -285,7 +285,32 @@ async function viewport() {
   // coordinates, not in viewport ones — see `screenshot`.
   const x = Math.round(visual.pageX ?? layout.pageX ?? 0);
   const y = Math.round(visual.pageY ?? layout.pageY ?? 0);
-  return { width, height, x, y };
+  // The display's scale factor, from the two viewports the browser already reports: one measured
+  // in CSS pixels and one in device pixels. Derived rather than asked for, so it needs no script
+  // in the page and is right on a page that refuses to run any.
+  const devicePixels = Number(metrics.visualViewport?.clientWidth ?? 0);
+  const cssPixels = Number(visual.clientWidth ?? layout.clientWidth ?? 0);
+  const ratio = devicePixels > 0 && cssPixels > 0 ? devicePixels / cssPixels : 1;
+  return { width, height, x, y, ratio };
+}
+
+/**
+ * The size a PNG actually is, read from its header.
+ *
+ * Because the alternative is to report the size that was asked for, which is what this did, and
+ * an image that came back at twice the requested size was described as if it had not.
+ */
+function pngSize(base64) {
+  try {
+    const head = atob(String(base64).slice(0, 64));
+    if (head.slice(12, 16) !== 'IHDR') return null;
+    const at = (i) =>
+      (head.charCodeAt(i) << 24) | (head.charCodeAt(i + 1) << 16) |
+      (head.charCodeAt(i + 2) << 8) | head.charCodeAt(i + 3);
+    return { width: at(16), height: at(20) };
+  } catch {
+    return null;
+  }
 }
 
 /** CDP's mouse-button vocabulary, from the one this product uses everywhere else. */
@@ -614,15 +639,23 @@ async function collectElements() {
  *
  * So the clip starts where the viewport starts. It is what Chrome's own tooling does — Puppeteer
  * adds the layout viewport's `pageX`/`pageY` to every clip it sends, for this reason.
+ *
+ * And the scale is `1 / ratio`, not `1`. A clip's scale multiplies the display's own scale factor
+ * rather than replacing it, so `scale: 1` on a Retina display returned an image at twice the size
+ * it claimed — and the claim was the requested size, never the picture's, so nothing noticed for
+ * as long as this has existed. Every coordinate a model read off one of those images was out by
+ * a factor of two on every Mac made in the last decade. The size reported now comes from the
+ * PNG's own header.
  */
 async function screenshot() {
-  const { width, height, x, y } = await viewport();
+  const { width, height, x, y, ratio } = await viewport();
   const { data } = await send('Page.captureScreenshot', {
     format: 'png',
     captureBeyondViewport: false,
-    clip: { x, y, width, height, scale: 1 }
+    clip: { x, y, width, height, scale: 1 / (ratio || 1) }
   }, COMPOSITOR_TIMEOUT_MS);
-  return { data, width, height };
+  const actual = pngSize(data);
+  return { data, width: actual?.width ?? width, height: actual?.height ?? height };
 }
 
 async function currentTab(tabId) {
