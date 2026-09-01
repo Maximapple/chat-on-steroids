@@ -1085,7 +1085,11 @@ describe('a pipeline stopped early by Select-Object -First', () => {
     expect(run(`${generator} | Select-Object -First 5 | Out-Null`)).not.toBe(0);
     // -Wait drains instead of stopping, which is the remedy the note hands the model.
     expect(run(`${generator} | Select-Object -First 5 -Wait | Out-Null`)).toBe(0);
-  });
+    // Two PowerShell starts, and the second one drains all twenty thousand lines rather than
+    // cutting the pipeline — that is the whole point of the second assertion. On a loaded arm64
+    // Windows machine that has twice run past the default thirty seconds and failed as a timeout,
+    // which says nothing about pipelines. The count stays; the budget is the part that was wrong.
+  }, 120_000);
 });
 
 describe('hinting at a search path that does not exist', () => {

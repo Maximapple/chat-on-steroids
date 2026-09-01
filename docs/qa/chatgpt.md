@@ -72,10 +72,18 @@ pages and was right both times; my previous attempt at it treated a symptom.
   helper's own operation, tested from the Mac. Nothing in this document asks you to test it.
 
 Still worth confirming from earlier rounds: typing no longer loses text past a newline (check 7);
-a click cannot escape the window it is leased to (check 10); a move that does not move refuses by
-name; the pointer line names the frame it was handed (check 37); a missing window is named
-(check 31); `detach` says what it let go of (check 25); and `/hello` reports `spoken`, so
-`compatible: false` on a plain curl is expected rather than a mismatch.
+a click cannot escape the window it is leased to (check 10); the pointer line names the frame it
+was handed (check 37); a missing window is named (check 31); `detach` says what it let go of
+(check 25); and `/hello` reports `spoken`, so `compatible: false` on a plain curl is expected
+rather than a mismatch.
+
+**Two things earlier wording sent a run chasing, so they are stated plainly here.** A `move` whose
+target is where the pointer already is answers `Done`, and that is correct: the postcondition is
+that the pointer is at the requested point, and it is. The refusal that exists —
+`POINTER_DID_NOT_MOVE` — is for a move that was *sent and not delivered*, and asking for the
+current position cannot exercise it. And a capture taken immediately after a Finder file operation
+can still show the file where it was: Finder repaints on its own schedule, and the shell is the
+settled answer. Neither is a defect; report them only if they behave differently from this.
 
 From the run before that, and still worth confirming: the window title carries the build again and
 `/hello` reports it; scrolling goes through a scroll gesture because the wheel event does nothing
@@ -214,7 +222,7 @@ need a document in it.
 
 **Environment** — macOS version, Mac model, Chrome version, and the `build` string from `/hello`.
 
-**Summary** — how many of the 34 checks passed, failed, or could not be run, and the three most
+**Summary** — how many of the 33 checks passed, failed, or could not be run, and the three most
 serious problems in one line each.
 
 **Check by check** — number, PASS / FAIL / NOT PERFORMABLE, whether it differs from the previous
