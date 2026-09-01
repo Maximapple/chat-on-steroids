@@ -3,7 +3,7 @@
 | Wer | Was | Datei |
 |---|---|---|
 | **ChatGPT** | der vollständige Durchlauf: 40 Prüfungen über Bildschirmfotos, Mauszeiger, Klicken, Fenster, Scrollen, Erweiterung, Onboarding, Robustheit | [chatgpt.md](chatgpt.md) |
-| **Claude Code auf dem Mac** | eine Messung: warum ein sichtbares Chrome-Fenster nicht fokussiert wird | [claude-mac.md](claude-mac.md) |
+| **Claude Code auf dem Mac** | sechs Teile: die Suiten, die drei Dinge, die nur ein echter Bildschirm beurteilen kann, der Fokus-Fehler, Eingaben unterhalb der App, und die installierte Fassung | [claude-mac.md](claude-mac.md) |
 
 Vorher waren es sechs Dokumente, von denen vier überholt waren. Sie stehen in der Git-Historie.
 
