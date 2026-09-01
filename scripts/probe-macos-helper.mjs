@@ -359,8 +359,13 @@ if (!candidate) {
         try {
           const a = readPNG(withPointer);
           const b = readPNG(parked);
-          const diff = differenceRegion(a, b);
           const scale = a.width / Number(candidate['width']);
+          // Ignore the title bar. Its buttons light up as the pointer passes and macOS animates
+          // them, so two captures of an otherwise still window differ up there nearly every time —
+          // which widened the box until this check gave up and said the window had redrawn. The
+          // pointer is put in the middle of the window, nowhere near these rows.
+          const titleBar = Math.round(32 * scale);
+          const diff = differenceRegion(a, b, 24, titleBar);
           const expected = {
             x: Math.round((cx - Number(candidate['x'])) * scale),
             y: Math.round((cy - Number(candidate['y'])) * scale)
@@ -379,7 +384,10 @@ if (!candidate) {
               expected.x >= diff.box.x - 24 && expected.x <= diff.box.x + diff.box.width + 24 &&
               expected.y >= diff.box.y - 24 && expected.y <= diff.box.y + diff.box.height + 24;
             if (!localised) {
-              console.log('      the window redrew between captures, so position could not be judged');
+              console.log(
+                `      the window redrew between captures below its title bar (first ${titleBar} rows ` +
+                  'ignored), so position could not be judged'
+              );
             } else if (near) {
               console.log('      PIXELS CONFIRM the pointer is drawn, at the position it was moved to');
             } else {
