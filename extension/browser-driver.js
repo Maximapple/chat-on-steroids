@@ -281,7 +281,11 @@ async function viewport() {
   const layout = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};
   const width = Math.max(1, Math.round(visual.clientWidth ?? layout.clientWidth ?? 0));
   const height = Math.max(1, Math.round(visual.clientHeight ?? layout.clientHeight ?? 0));
-  return { width, height };
+  // Where the viewport sits in the document. Needed because a capture clip is given in document
+  // coordinates, not in viewport ones — see `screenshot`.
+  const x = Math.round(visual.pageX ?? layout.pageX ?? 0);
+  const y = Math.round(visual.pageY ?? layout.pageY ?? 0);
+  return { width, height, x, y };
 }
 
 /** CDP's mouse-button vocabulary, from the one this product uses everywhere else. */
@@ -593,18 +597,30 @@ async function collectElements() {
 }
 
 /**
- * A screenshot in which one pixel is one CSS pixel.
+ * A screenshot of what is on screen, in which one pixel is one CSS pixel.
  *
- * The explicit clip at `scale: 1` is the whole point: without it the image comes back in
- * device pixels and every coordinate the model reads off it is wrong by the display's scale
- * factor, on exactly the high-DPI machines people actually use.
+ * The clip carries two facts, and both were learned the hard way.
+ *
+ * `scale: 1` is why the clip exists at all: without it the image comes back in device pixels and
+ * every coordinate the model reads off it is wrong by the display's scale factor, on exactly the
+ * high-DPI machines people actually use.
+ *
+ * The origin is why this went wrong for months. A capture clip is given in **document**
+ * coordinates, not viewport ones, and this asked for `0,0` — the top of the document. On any
+ * scrolled page that is not what is on screen: the requested region has mostly never been
+ * rasterised, so it comes back blank, with the sliver that does overlap the viewport stranded far
+ * down the image. Two QA runs reported it as "the screenshot after scrolling is wrong"; it was
+ * every screenshot of a scrolled page, whoever scrolled it and however long ago.
+ *
+ * So the clip starts where the viewport starts. It is what Chrome's own tooling does — Puppeteer
+ * adds the layout viewport's `pageX`/`pageY` to every clip it sends, for this reason.
  */
 async function screenshot() {
-  const { width, height } = await viewport();
+  const { width, height, x, y } = await viewport();
   const { data } = await send('Page.captureScreenshot', {
     format: 'png',
     captureBeyondViewport: false,
-    clip: { x: 0, y: 0, width, height, scale: 1 }
+    clip: { x, y, width, height, scale: 1 }
   }, COMPOSITOR_TIMEOUT_MS);
   return { data, width, height };
 }

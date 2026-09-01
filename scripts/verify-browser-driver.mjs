@@ -38,6 +38,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { readPNG } from './lib/read-png.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workspace = path.join(os.tmpdir(), `cos-browser-driver-${process.pid}`);
@@ -106,6 +107,10 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Driver fixture</title>
 <iframe id="frame" src="/frame" style="width:320px;height:80px;border:1px solid #ccc"></iframe>
 <!-- Last, so the page can scroll without pushing anything above it out of the viewport. -->
 <div id="tall" style="height:3000px">room to scroll</div>
+<!-- A band at a known place in the document, so a screenshot of a scrolled page can be judged by
+     its pixels instead of by a scroll counter. Well below the fold and transparent to the pointer,
+     so no other check can see it. -->
+<div id="band" style="position:absolute;left:0;top:1400px;width:100%;height:300px;background:#0060ff;pointer-events:none"></div>
 <script>
 document.getElementById('go').addEventListener('click', (e) => {
   document.getElementById('log').textContent = 'clicked trusted=' + e.isTrusted;
@@ -513,9 +518,57 @@ try {
   check('the page sees a trusted wheel event going down',
     /trusted=true/.test(wheelLog) && /deltaY=[1-9]/.test(wheelLog), wheelLog);
 
+  /*
+   * Where the *picture* says the page is, which is a different fact from where the counter says.
+   *
+   * Every scroll check above reads `scrollTop`, and every one of them passed while screenshots of
+   * scrolled pages came back showing the top of the document behind a blank band. Two QA runs
+   * reported it and nothing here could see it, because no check had ever looked at a pixel of a
+   * scrolled page — the one that decodes an image only compares its dimensions.
+   *
+   * The fixture carries a band at a known document offset, so the row it must land on is
+   * arithmetic: band centre 1550, minus wherever the page now sits.
+   */
+  await run(`(async () => {
+    try { await globalThis.__driver.browserDriver.act({ type: 'scroll', x: 400, y: 300, scroll_y: 900 }); } catch {}
+  })()`);
+  await sleep(700);
+  const deepTop = Number(await readPage(`document.scrollingElement.scrollTop`));
+  const deepShot = await run(`(async () => {
+    try {
+      const o = await globalThis.__driver.browserDriver.observe({ includeScreenshot: true });
+      return JSON.stringify({ data: o.screenshot?.data ?? null, w: o.screenshot?.width ?? 0 });
+    } catch (error) { return JSON.stringify({ error: (error.code || '') + ': ' + error.message }); }
+  })()`);
+  const deep = JSON.parse(String(deepShot.value ?? '{}'));
+  if (!deep.data) {
+    check('a screenshot of a scrolled page shows where the page is', false,
+      `no image came back: ${deep.error ?? deepShot.error ?? 'unknown'}`);
+  } else {
+    const file = path.join(profile, 'scrolled.png');
+    writeFileSync(file, Buffer.from(deep.data, 'base64'));
+    const image = readPNG(file);
+    const row = 1550 - deepTop;
+    const at = (y) => {
+      const i = (y * image.width + 40) * image.channels;
+      return [image.data[i], image.data[i + 1], image.data[i + 2]];
+    };
+    const isBand = ([r, g, b]) => Math.abs(r - 0) < 40 && Math.abs(g - 96) < 40 && Math.abs(b - 255) < 40;
+    if (row < 20 || row > image.height - 20) {
+      check('a screenshot of a scrolled page shows where the page is', false,
+        `the page stopped at ${deepTop}, which puts the band at row ${row} — outside the image, so ` +
+          'this check could not be run rather than having passed');
+    } else {
+      // The band where the arithmetic puts it, and not where it would be if the capture had
+      // ignored the scroll: that second row is what the old clip returned, whitish and wrong.
+      check('a screenshot of a scrolled page shows where the page is', isBand(at(row)),
+        `scrollTop=${deepTop}, band expected at row ${row}, found rgb(${at(row).join(',')})`);
+    }
+  }
+
   // Back to the top, so the checks after this one see the page where they expect it.
   await run(`(async () => {
-    try { await globalThis.__driver.browserDriver.act({ type: 'scroll', x: 400, y: 300, scroll_y: -600 }); } catch {}
+    try { await globalThis.__driver.browserDriver.act({ type: 'scroll', x: 400, y: 300, scroll_y: -2400 }); } catch {}
   })()`);
 
   // Navigation, and the history either side of it. back must return the document that was

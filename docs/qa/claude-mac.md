@@ -8,11 +8,27 @@ below turns three of those skips into answers.
 Nothing here needs ChatGPT, and nothing here needs a person: every step is a command you can run.
 Parts 1–4 do not even need the installed app; part 5 does.
 
-Since the last run from this machine, five things changed because of what it found: the window
-title carries the build again and `/hello` reports it too, scrolling goes through
-`Input.synthesizeScrollGesture` because the wheel event does nothing in Chrome 152, a window being
-moved is read a second time instead of being called inaccessible, a refused focus names the window
-in front, and the browser check that hid a hard failure behind a green SKIP no longer does.
+Your last run was the cleanest of the series, and three things changed because of it.
+
+**The probe measured whatever window happened to be first in the list**, not the one it opens for
+itself — on a used desktop that was a Chrome new-tab page, whose contents animate, and 19,097
+pixels differed between two captures of a window nobody had touched. It now looks for its own
+window by title first.
+
+**Its pointer verdict is no longer judged by a bounding box.** You were right that a single box
+around every changed pixel is the wrong measure: the title-bar exclusion I added last round bought
+one run before a blinking text caret took the verdict away again, 39 pixels against the pointer's
+99. It now compares how busy the neighbourhood of the expected point is against the rest of the
+frame. Checked against both sets of numbers you measured: the caret case confirms by a factor of
+252, and the live Chrome window is still withheld, at 1.15.
+
+**Part 3 asked for a refusal that should not happen** — `find_ui` on the omnibox container. You
+measured that it answers with the container's own tree, and the source comment agrees. That
+demand is gone from part 3 below.
+
+Separately, a defect the ChatGPT run found: every screenshot of a *scrolled* page came back showing
+the top of the document, because a capture clip is in document coordinates and the driver asked for
+`y: 0`. `verify:browser` has a new check for it — part 2a below says what to look for.
 
 Paste everything below the line into Claude Code on the Mac.
 
@@ -89,6 +105,11 @@ Report the tally and every FAIL verbatim, and then specifically:
 - Did **the page sees a trusted wheel event going down** pass, and with what deltaY?
 - If a SKIP line appears at all, quote it in full. That would mean this machine cannot composite
   what it is being sent, which is a new finding rather than the old one.
+- Did **a screenshot of a scrolled page shows where the page is** pass? This is new, and it is the
+  check that finally caught a defect two QA rounds reported and nothing here could see: the fixture
+  carries a coloured band at a known document offset, and the check works out which image row it
+  must land on. It fails on the old code and passes on the new — both were watched. Report the
+  scrollTop and the row it names.
 
 **2b. The helper, running for real.**
 
@@ -99,6 +120,13 @@ node scripts/probe-macos-helper.mjs arm64
 Report the tally and every failure. With permissions actually granted, checks that a build machine
 sees refused should now do the thing instead — say which ones changed behaviour compared to what
 the script says to expect.
+
+Two changes since your last run, both from what you measured. It now prefers **its own** window —
+the one titled `cos-probe-window.txt` — over the first usable one in the list. And the pointer
+check reports `N changed within 32px of the pointer, M elsewhere` with both densities, then either
+confirms or says the whole window was repainting. **Run it once on a busy desktop**, browser
+windows and all, and say whether it still reaches a verdict. That was the condition it failed under
+before, and it is the condition that matters.
 
 **2c. The pointer, in a picture.** This is the oldest disputed claim in this project: the pointer
 was reported as drawn when it was not, twice.
@@ -146,11 +174,15 @@ N)`, with N the main window, and N must appear in `{"op":"windows"}`. Then dismi
 that focuses the main window first, since a keystroke on its own is refused:
 `{"op":"act","actions":[{"type":"focus","window":<main>},{"type":"keypress","keys":["escape"]}]}`.
 
-**Then ask `find_ui` about the container.** It used to answer with the *main* window's tree and
-`ok: true`, because Chrome gives both windows the same accessibility id — so a caller clicking
-those elements clicked into a window it never named. It must now refuse with `UIA_NO_OWN_WINDOW`,
-naming both sizes. A snapshot of that same window should still return its picture, with the
-controls reported unavailable rather than the whole call failing. Check both.
+**Then ask `find_ui` about the container, addressing it under `id`.** Expect it to answer with the
+container's *own* tree, at the container's own size — that is the correct behaviour and your last
+run measured it. `UIA_NO_OWN_WINDOW` guards a case no known application produces; if you ever see
+it fire here, that is the finding.
+
+**And confirm the wrong key is still refused.** `{"op":"find_ui","window":N}` must answer
+`BAD_REQUEST` naming both keys, rather than silently reading 0 and answering about the foreground
+window. That silence cost you a whole round; check it on `find_ui`, `focus`, `capture` and
+`snapshot`.
 
 **3b. The open question, which is a judgement rather than a measurement.** `windows` lists that
 transient container as an ordinary window, and it is not one anybody would want to drive. Say

@@ -18,7 +18,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { readPNG, differenceRegion } from './lib/read-png.mjs';
+import { readPNG, differenceRegion, differenceAround } from './lib/read-png.mjs';
 
 if (process.platform !== 'darwin') {
   throw new Error(`probe-macos-helper.mjs must run on macOS, got ${process.platform}`);
@@ -178,9 +178,16 @@ const listed = await probe('it lists windows to capture', { op: 'windows' });
 // The op reports state as foreground/open/minimized — there is no onScreen field. A minimized
 // window has no pixels to capture, so anything else will do.
 const windows = listed?.['windows'] ?? [];
-const candidate = windows.find((w) =>
-  w && w['state'] !== 'minimized' && Number(w['width']) >= 120 && Number(w['height']) >= 120
-);
+const usable = (w) =>
+  w && w['state'] !== 'minimized' && Number(w['width']) >= 120 && Number(w['height']) >= 120;
+// The window this script opened, before anything else. Taking the first usable window off the
+// list meant that on a desktop somebody was actually using, this measured a stranger: one run
+// landed on a Chrome new-tab page, whose contents animate, and 19,097 pixels differed between two
+// captures of a window nobody had touched. The probe opens a window precisely so it has something
+// still to look at; it should then look at that one.
+const candidate =
+  windows.find((w) => usable(w) && /cos-probe-window/.test(String(w['title'] ?? ''))) ??
+  windows.find(usable);
 console.log(`      ${windows.length} windows listed, ${windows.filter((w) => w?.['state'] !== 'minimized').length} not minimized`);
 
 if (!candidate) {
@@ -360,12 +367,7 @@ if (!candidate) {
           const a = readPNG(withPointer);
           const b = readPNG(parked);
           const scale = a.width / Number(candidate['width']);
-          // Ignore the title bar. Its buttons light up as the pointer passes and macOS animates
-          // them, so two captures of an otherwise still window differ up there nearly every time —
-          // which widened the box until this check gave up and said the window had redrawn. The
-          // pointer is put in the middle of the window, nowhere near these rows.
-          const titleBar = Math.round(32 * scale);
-          const diff = differenceRegion(a, b, 24, titleBar);
+          const diff = differenceRegion(a, b);
           const expected = {
             x: Math.round((cx - Number(candidate['x'])) * scale),
             y: Math.round((cy - Number(candidate['y'])) * scale)
@@ -377,22 +379,28 @@ if (!candidate) {
             console.log('FAIL  the two captures are identical — nothing was drawn into the pixels');
             failed = true;
           } else {
-            // A pointer is a small thing. A box covering most of the frame means the window
-            // redrew itself and this comparison proves nothing either way.
-            const localised = diff.box.width <= a.width / 3 && diff.box.height <= a.height / 3;
-            const near =
-              expected.x >= diff.box.x - 24 && expected.x <= diff.box.x + diff.box.width + 24 &&
-              expected.y >= diff.box.y - 24 && expected.y <= diff.box.y + diff.box.height + 24;
-            if (!localised) {
-              console.log(
-                `      the window redrew between captures below its title bar (first ${titleBar} rows ` +
-                  'ignored), so position could not be judged'
-              );
-            } else if (near) {
-              console.log('      PIXELS CONFIRM the pointer is drawn, at the position it was moved to');
-            } else {
-              console.log('FAIL  pixels changed, but nowhere near where the pointer was put');
+            /*
+             * Busy where the pointer was put, quiet everywhere else. Asking instead whether one box
+             * around every changed pixel is small enough has now cost this verdict twice — to the
+             * title bar's buttons, then to a blinking text caret — because a handful of pixels
+             * anywhere else stretches that box across the frame. Densities do not care how many
+             * other things moved, only whether this place moved more.
+             */
+            const around = differenceAround(a, b, expected.x, expected.y, 32);
+            console.log(
+              `      ${around.near} changed within 32px of the pointer, ${around.far} elsewhere ` +
+                `(density ${around.nearDensity.toFixed(4)} vs ${around.farDensity.toFixed(4)})`
+            );
+            if (around.near < 20) {
+              console.log('FAIL  nothing was drawn where the pointer was put');
               failed = true;
+            } else if (around.nearDensity < around.farDensity * 4) {
+              console.log(
+                '      the whole window was repainting between captures, so a change at the ' +
+                  'pointer proves nothing — position could not be judged'
+              );
+            } else {
+              console.log('      PIXELS CONFIRM the pointer is drawn, at the position it was moved to');
             }
           }
         } catch (error) {

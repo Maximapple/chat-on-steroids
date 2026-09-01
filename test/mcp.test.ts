@@ -811,7 +811,12 @@ describe('surface boundaries', () => {
     // taken a page then had no way to give it back. Saying so in the description costs bytes
     // here and is worth them: a run was lost to a model looking for an attach action, not
     // finding one, and reaching for desktop automation to open a tab instead.
-    expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(12_800);
+    //
+    // Raised from 12,800 on 2026-09-01 for one sentence on `computer.actions`: only one
+    // UI-changing action goes per call. The rule was enforced and unstated, so a QA run met it as
+    // a rejected call and reported the schema and the runtime as disagreeing — which they did.
+    // Same trade as the paragraph above: bytes at discovery against a round trip in every run.
+    expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(12_900);
 
     // Per tool as well as per surface, so one schema cannot quietly eat the whole budget
     // while the total stays under it. `computer` is the largest by design: fourteen
@@ -828,7 +833,9 @@ describe('surface boundaries', () => {
       const bytes = Buffer.byteLength(JSON.stringify(tool), 'utf8');
       const budget =
         tool.name === 'computer'
-          ? 6_000
+          // Raised from 6,000 for the one sentence naming the batching rule on `actions`. It was
+          // enforced and unstated, so a QA run met it as a rejected call; see the surface ceiling.
+          ? 6_100
           : tool.name === 'apply_patch'
             ? 5_000
             : tool.name === 'agents'
