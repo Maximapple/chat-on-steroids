@@ -15,7 +15,12 @@ passed on the last run; they are the ones to do by hand when there is time, and 
 1. Install the current DMG and open the app.
 2. Reload the extension in `chrome://extensions`. The browser driver ships inside the extension,
    not the app, so a new package alone changes nothing in Chrome.
-3. Delete and recreate the Desktop connector in ChatGPT, then open a new chat. A connector keeps
+3. **Then reload the ChatGPT tab itself** — Cmd+R. Reloading an extension orphans its content
+   script in every page already open, and that script is the first link in the chain that tells the
+   app which conversation is calling. Skipping this cost an entire run: with a multi-agent run
+   parked in the past, every Desktop call was refused with `CALLER_IDENTITY_REQUIRED` before it
+   reached macOS, and all 33 checks came back unperformable.
+4. Delete and recreate the Desktop connector in ChatGPT, then open a new chat. A connector keeps
    the tool list it fetched when it was made; three runs were lost to skipping this.
 
 That is all. Paste everything below the line.

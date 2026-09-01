@@ -502,13 +502,13 @@ async function dispatchTracked(
         : retiredLeaseAmbiguous
         ? Promise.resolve(
             fail(
-              'CALLER_IDENTITY_REQUIRED: a recently retired worker tab may still be open, and the connector could not prove this call belongs to a different chat. No local tool was run. Reload the extension evidence path or wait for the retired lease to expire.'
+              'CALLER_IDENTITY_REQUIRED: a recently retired worker tab may still be open, and this call carried no proof of which chat made it. No local tool was run. Identity comes from the extension running on the ChatGPT page, so reload this tab and try again — that is the fix, and it is the person at the keyboard who can apply it. Failing that, the retired lease expires half an hour after retirement.'
             )
           )
         : dormantLeaseAmbiguous
         ? Promise.resolve(
             fail(
-              'CALLER_IDENTITY_REQUIRED: a dormant worker chat still belongs to its prime history, and the connector could not prove this call belongs to a different conversation. No local tool was run. Restore the browser-extension identity path and retry.'
+              'CALLER_IDENTITY_REQUIRED: a parked multi-agent run still has sleeping worker chats, and this call carried no proof of which ChatGPT conversation made it. No local tool was run. Identity comes from the extension running on the ChatGPT page, so reload this tab and try again — that is the fix, and it is the person at the keyboard who can apply it. Failing that, the block lifts by itself half an hour after the run was parked.'
             )
           )
         : swarmRunning() && identitySensitive && !context.caller.conversationId

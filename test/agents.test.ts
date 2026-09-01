@@ -34,6 +34,7 @@ const {
   claimWorkerRevival,
   currentRunId,
   dormantWorkerNotice,
+  hasDormantWorkerLeases,
   failAgent,
   finishAgent,
   finishWorkerConversation,
@@ -421,6 +422,35 @@ describe('at-least-once delivery', () => {
     // After endRun the kernel stops assigning `agent:prime`; the conversation key therefore
     // has to carry forward the newest workspace rather than reviving the pre-swarm project.
     expect(workspaceForChat(PRIME_CHAT)?.virtual).toBe('/root/project-b');
+  });
+
+  it('stops a long-parked run from refusing every call nobody could identify', () => {
+    startSwarm(1);
+    const worker = startWorker('worker-1');
+    finishAgent(worker.caller, 'done');
+    expect(releaseQuiescentRun()).toBe(true);
+
+    // Freshly parked, its sleeping workers are exactly the reason an unproven call is refused:
+    // one of them might be the caller, and nothing in the request says otherwise.
+    expect(hasDormantWorkerLeases()).toBe(true);
+
+    const snapshot = snapshotSwarm()!;
+    const aged = {
+      ...snapshot,
+      dormantRuns: (snapshot.dormantRuns ?? []).map((entry) => ({
+        ...entry,
+        parkedAt: Date.now() - 31 * 60_000
+      }))
+    };
+    resetAgentsForTests();
+    restoreSwarm(aged);
+
+    // The history is untouched and still resumable — this bounds the refusal, not the run.
+    expect(dormantWorkerNotice('c-worker-1')).toMatch(/WORKER_SLEEPING.*worker-1/i);
+    // But it no longer speaks for calls it cannot identify. This was unbounded: a run parked at
+    // any point in the past refused every unproven call for good, and a QA run lost its whole
+    // Desktop surface to a swarm parked days earlier.
+    expect(hasDormantWorkerLeases()).toBe(false);
   });
 
   it('keeps a finished worker as a durable dormant identity rather than retiring its history', () => {
