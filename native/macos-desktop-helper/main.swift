@@ -652,8 +652,15 @@ private func matchingAXWindow(_ row: WindowRow, deadline suppliedDeadline: TimeI
         //
         // What remains true without that story: an accessibility window carrying this row's id
         // while describing a rectangle nothing like it is not this row's window, and returning
-        // its tree would be answering about something else. No application is known to do this
-        // here. The guard costs one bounds read and is kept for the case rather than the anecdote.
+        // its tree would be answering about something else.
+        //
+        // On macOS 27 this branch is unreachable, and that is measured rather than assumed:
+        // `AXWindowNumber` is not an offered attribute there at all — it is absent from the 28 a
+        // Chrome window carries, and reading it directly returns kAXErrorAttributeUnsupported
+        // (-25205). Across 26 windows of 11 processes, not one matched by id; every match went
+        // through geometry. The guard stays for whatever version or application does offer the
+        // attribute, but nothing here can exercise it, and the cost of it never firing is the
+        // ambiguity handled below.
         guard let bounds = axBounds(window), !convincinglyMatchesWindow(bounds, row.bounds) else {
             return window
         }
@@ -709,7 +716,35 @@ private func matchingAXWindow(_ row: WindowRow, deadline suppliedDeadline: TimeI
         throw fail("UIA_FAILED", "no accessibility window convincingly matches window \(row.id)")
     }
     if geometryCandidates.count > 1, geometryCandidates[1].distance - winner.distance < 32 {
-        throw fail("UIA_FAILED", "multiple accessibility windows ambiguously match window \(row.id)")
+        /*
+         * Geometry alone cannot separate two windows of one application at the same place, and on
+         * macOS 27 geometry is all there is: `AXWindowNumber` is not merely nil there, it is not an
+         * offered attribute at all — reading it returns kAXErrorAttributeUnsupported (-25205), and a
+         * measurement across 26 windows of 11 processes matched exactly none of them by id. So the
+         * exact branch above never runs, and two Finder windows of identical size at identical
+         * coordinates made a QA run's drag impossible until a window was moved by hand.
+         *
+         * The title is already in the row and was going unused. It does not always separate them —
+         * one of the pairs on that desktop shared its title too — but when it does, it costs one
+         * attribute read and turns an impossible request into an ordinary one.
+         */
+        let titled = geometryCandidates.filter { axString($0.element, kAXTitleAttribute as CFString) == row.title }
+        if titled.count == 1 { return titled[0].element }
+        // Still ambiguous. Name the candidates: "ambiguous" with nothing else leaves the caller
+        // with no move to make, and the one move that works — close or move one of them — needs
+        // to know which ones they are.
+        let described = geometryCandidates.prefix(4).map { candidate -> String in
+            let title = axString(candidate.element, kAXTitleAttribute as CFString) ?? ""
+            let bounds = axBounds(candidate.element)
+            let size = bounds.map { "\(Int($0.width))x\(Int($0.height)) at \(Int($0.minX)),\(Int($0.minY))" } ?? "no bounds"
+            return title.isEmpty ? "an untitled window \(size)" : "\"\(title)\" \(size)"
+        }.joined(separator: "; ")
+        throw fail(
+            "UIA_FAILED",
+            "window \(row.id) cannot be told apart from another window of the same application: " +
+                "\(described). Nothing was done. Move or close one of them, or name a window whose " +
+                "position or title differs."
+        )
     }
     return winner.element
 }
@@ -1994,7 +2029,41 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
         result["foregroundIsSelf"] = frontmostPID() == getpid()
     case "windows":
         let foreground = foregroundWindowID()
-        result["windows"] = allWindowRows().map { $0.json(foreground: foreground) }
+        let rows = allWindowRows()
+        /*
+         * `focusable` is asked for, never given away.
+         *
+         * A transient panel an application draws over its own window — Chrome's omnibox container
+         * is the one everybody meets — is listed like any other window and reads like any other
+         * window, and the only thing that sets it apart is that it refuses to come to the front
+         * while its parent is there. Its size and its title cannot be used for that: real tool
+         * windows and inspectors are small and generically titled too.
+         *
+         * What does say it is whether `AXMain` can be set. Measured on macOS 27: false for the
+         * container, true for an ordinary window, both with a clean API result — and the reading
+         * itself costs about 0.05 ms, under 2 ms for a list of 26. But reaching the element to ask
+         * costs 112–117 ms for that same list, one round trip into every other application, and
+         * this call is made constantly. Paying that on every list to carry a field that says
+         * `true` for nearly every window in it is the wrong trade, so it is here and it is opt-in.
+         */
+        if request["focusable"] as? Bool == true {
+            result["windows"] = rows.map { row -> JSONObject in
+                var entry = row.json(foreground: foreground)
+                if let window = try? matchingAXWindow(row) {
+                    var settable = DarwinBoolean(false)
+                    let status = AXUIElementIsAttributeSettable(window, kAXMainAttribute as CFString, &settable)
+                    // A window whose answer cannot be read is reported focusable: refusing to
+                    // drive something on a failed reading would be worse than the reading's absence.
+                    entry["focusable"] = status == .success ? settable.boolValue : true
+                } else {
+                    // No accessibility grant, or no element to ask. Say nothing rather than guess.
+                    entry["focusable"] = NSNull()
+                }
+                return entry
+            }
+        } else {
+            result["windows"] = rows.map { $0.json(foreground: foreground) }
+        }
         result["screen"] = rectObject(try virtualScreenRect())
     case "active":
         result["foregroundIsSelf"] = frontmostPID() == getpid()

@@ -184,7 +184,28 @@ it fire here, that is the finding.
 window. That silence cost you a whole round; check it on `find_ui`, `focus`, `capture` and
 `snapshot`.
 
-**3b. The open question, now with one measurement attached.** Your answer last round — list it, do
+**3b. Built on your measurements — three things to check.**
+
+You answered both questions, and both answers were acted on.
+
+- **`focusable` exists, and it is opt-in.** `{"op":"windows","focusable":true}` reports it per
+  window; a plain `{"op":"windows"}` does not, and pays nothing. Your numbers are the reason: the
+  attribute costs 0.05 ms a window, reaching the element to ask costs 112–117 ms for a list of 26.
+  Check that the omnibox container comes back `false` and ordinary windows `true`, and time both
+  forms of the call. A window whose reading fails is reported `true` — refusing to drive something
+  on a failed reading is worse than the reading's absence — and one with no element at all is
+  `null`.
+- **Two identical windows can now be told apart by title.** The drag that cost you a run is the
+  case: geometry could not separate two Finder windows of the same size at the same place, and the
+  title was sitting unused in the row. Make that situation again — two Finder windows, same size,
+  same position, different titles — and confirm the drag works. Then make it with the *same* title
+  as well, and confirm the refusal now names the candidates it could not separate, rather than only
+  saying it could not.
+- **The `UIA_NO_OWN_WINDOW` comment says what you measured**: the attribute is unsupported here,
+  -25205, none of 26 windows matched by id. Nothing to test; it is recorded so the next reader is
+  not told an anecdote.
+
+**And the older open question, for reference.** Your answer last round — list it, do
 not exclude it, and carry the difference in a field such as `focusable: false` — is the one I
 agree with. Two things have to be true before it can be built, and only this machine can say
 whether they are.
