@@ -554,8 +554,13 @@ private func inputTargetRefusal(_ row: WindowRow) -> String {
     guard frontmostPID() == row.pid else { return "another application is frontmost" }
     let rows = allWindowRows(includeMinimized: false)
     let focused = focusedAXWindowID(for: row.pid, rows: rows)
-    if frontWindowID(rows: rows, focusedWindow: focused) != row.id {
-        return "another window of the same application is in front"
+    if let front = frontWindowID(rows: rows, focusedWindow: focused), front != row.id {
+        // Naming it is the whole value. A measurement on a Mac found this reason appearing only
+        // for Chrome's transient omnibox container — a second window the application opens on
+        // Cmd+L, which `windows` lists like any other and which a caller can easily address by
+        // mistake. Told only that "another window is in front", there is nothing to do about it;
+        // told which one, the caller can target that window or dismiss it.
+        return "another window of the same application is in front (window \(front))"
     }
     if focused != row.id {
         return "the application's focused window is \(windowIDDescription(focused))"
@@ -621,6 +626,36 @@ private func matchingAXWindow(_ row: WindowRow, deadline suppliedDeadline: TimeI
     }
     geometryCandidates.sort { $0.distance < $1.distance }
     guard let winner = geometryCandidates.first else {
+        /*
+         * Geometry is the fallback, and a window in motion has none that agrees.
+         *
+         * The row was scanned a moment ago and the accessibility bounds are being read now; a
+         * window dragged between the two matches nothing, because the two rectangles describe it
+         * at different instants. QA reached this by capturing a window while moving it and got
+         * "no accessibility window convincingly matches", which reads as a window that has no
+         * accessibility representation at all — and sends someone to check a permission that was
+         * never the problem.
+         *
+         * So look again with the bounds it has now. A window that has come to rest matches on the
+         * second read and the caller never learns there was a race. One still moving is told
+         * that, which is a different instruction from the one above and the only actionable one.
+         */
+        if let fresh = windowRow(row.id), fresh.bounds != row.bounds {
+            for window in windows {
+                guard ProcessInfo.processInfo.systemUptime < deadline else {
+                    throw fail("UIA_TIMEOUT", "accessibility window matching exceeded its bounded native deadline")
+                }
+                guard let bounds = axBounds(window), convincinglyMatchesWindow(bounds, fresh.bounds) else { continue }
+                return window
+            }
+            throw fail(
+                "WINDOW_MOVING",
+                "window \(row.id) moved while its accessibility tree was being read — from " +
+                    "\(Int(row.bounds.minX)),\(Int(row.bounds.minY)) to " +
+                    "\(Int(fresh.bounds.minX)),\(Int(fresh.bounds.minY)). Nothing was read. Let it " +
+                    "come to rest and ask again."
+            )
+        }
         throw fail("UIA_FAILED", "no accessibility window convincingly matches window \(row.id)")
     }
     if geometryCandidates.count > 1, geometryCandidates[1].distance - winner.distance < 32 {
