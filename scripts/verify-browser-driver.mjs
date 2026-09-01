@@ -104,6 +104,10 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Driver fixture</title>
 <div id="dlog">no dblclick</div>
 <div id="draglog">no drag</div>
 <div id="wheellog">no wheel</div>
+<!-- Reveals itself only under the pointer, and only for a real mouseover: a hover that is not
+     delivered leaves this reading "no hover", which a click could never distinguish. -->
+<button id="hovertarget" aria-label="Hover me">Hover me</button>
+<div id="hoverlog">no hover</div>
 <iframe id="frame" src="/frame" style="width:320px;height:80px;border:1px solid #ccc"></iframe>
 <!-- Last, so the page can scroll without pushing anything above it out of the viewport. -->
 <div id="tall" style="height:3000px">room to scroll</div>
@@ -120,6 +124,12 @@ document.getElementById('name').addEventListener('input', () => {
 });
 document.getElementById('name').addEventListener('keydown', (e) => {
   document.getElementById('klog').textContent = 'key:' + e.key + ' trusted=' + e.isTrusted;
+});
+document.getElementById('hovertarget').addEventListener('mouseover', (e) => {
+  document.getElementById('hoverlog').textContent = 'hovered trusted=' + e.isTrusted;
+});
+document.getElementById('hovertarget').addEventListener('click', () => {
+  document.getElementById('hoverlog').textContent = 'clicked, which a hover must not do';
 });
 document.getElementById('dbl').addEventListener('dblclick', (e) => {
   document.getElementById('dlog').textContent = 'dblclick trusted=' + e.isTrusted;
@@ -353,6 +363,14 @@ try {
   check('the driver attaches over the DevTools protocol',
     String(attached.value ?? '').includes('"attached":true'), attached.value ?? attached.error);
 
+  // A stale extension answered a whole QA round once, and its report read as three broken fixes
+  // rather than one unreloaded browser. The stamp is a digest of the running driver source, so a
+  // run can say which code it measured. It has to be present and it has to be a digest, not the
+  // word the catch clause falls back to.
+  const stamped = JSON.parse(attached.value ?? '{}');
+  check('status names the driver that answered',
+    /^[0-9a-f]{12}$/.test(String(stamped.build ?? '')), JSON.stringify({ build: stamped.build ?? null }));
+
   // Nudge the page to dirty itself, then retry: the first capture on an idle headless tab
   // waits for a frame nothing has asked for. Never awaits requestAnimationFrame, which does
   // not fire without a compositor — waiting on it is a hang, not a workaround.
@@ -427,6 +445,17 @@ try {
   // The whole reason this goes through the DevTools protocol: a content script's events are
   // isTrusted:false, and real pages reject those for anything that matters.
   check('the page received a TRUSTED click', log === 'clicked trusted=true', log);
+
+  // Named twice by QA as the one action genuinely missing. The point has to come from the ref at
+  // the moment of the move, because what a hover reveals is laid out relative to the element.
+  const hovered = await act({ type: 'move_ref', ref: refFor('Hover me') });
+  await sleep(400);
+  const hoverLog = await readPage(`document.getElementById('hoverlog').textContent`);
+  check('move_ref hovers a control and presses nothing',
+    hoverLog === 'hovered trusted=true', hoverLog);
+  const hoverResult = JSON.parse(hovered.value ?? '{}');
+  check('a hover reports what it landed on',
+    typeof hoverResult.hit === 'string' && hoverResult.covered === false, hovered.value ?? '');
 
   await act({ type: 'set_value', ref: refFor('Your name'), text: 'Maxim' });
   await sleep(400);

@@ -233,14 +233,27 @@ describe('macOS desktop safety hardening', () => {
   });
 
   it('keeps valid screenshots when only AX semantic traversal is unavailable', () => {
-    expect(swift).toContain('error.code == "ACCESSIBILITY_PERMISSION_REQUIRED" ||');
-    expect(swift).toContain('error.code == "UIA_FAILED" ||');
-    expect(swift).toContain('error.code == "UIA_TIMEOUT"');
-    // A window whose accessibility id belongs to a different window is the same kind of failure:
-    // the tree cannot be read, and the picture is still valid and still wanted. Chrome's transient
-    // omnibox container is one, and without this line asking about it would lose the screenshot
-    // too rather than just the controls.
-    expect(swift).toContain('error.code == "UIA_NO_OWN_WINDOW" ||');
+    // This test used to pin the list of codes that were let through, and pinning a list is what
+    // let the defect in: splitting `UIA_AMBIGUOUS_WINDOW` out of `UIA_FAILED` took the new code
+    // off the list, so a snapshot of a window that could not be told apart from another returned
+    // neither the tree nor the picture — while asking for the picture alone still worked. A test
+    // that enumerates cannot fail on a case nobody thought to enumerate. So it pins the property
+    // instead: the exception asks what the failure *is*.
+    expect(swift).toContain('} catch let error as HelperFailure where onlyTheTreeFailed(error.code) {');
+    // Only a target-identity failure invalidates the capture. Permission, a malformed tree, a
+    // timeout, an id belonging to another window, an ambiguous window — all leave an image that
+    // is still valid and still wanted, so none of them may appear in the refusing case.
+    expect(swift).toContain('    case "WINDOW_NOT_FOUND", "WINDOW_MOVING", "BAD_REQUEST":');
+    const decision = swift.slice(swift.indexOf('private func onlyTheTreeFailed'));
+    for (const treeOnly of [
+      'ACCESSIBILITY_PERMISSION_REQUIRED',
+      'UIA_FAILED',
+      'UIA_TIMEOUT',
+      'UIA_NO_OWN_WINDOW',
+      'UIA_AMBIGUOUS_WINDOW'
+    ]) {
+      expect(decision.slice(0, 400)).not.toContain(treeOnly);
+    }
     // A window that is gone is named rather than described as an empty desktop: a caller that
     // asked for one window in particular should not have to guess which of the two happened.
     expect(swift).toContain('is no longer on screen');

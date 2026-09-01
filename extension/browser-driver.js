@@ -687,6 +687,27 @@ async function currentTab(tabId) {
 export const BROWSER_PERMISSIONS = { permissions: ['tabs', 'tabGroups'], origins: ['<all_urls>'] };
 
 /** Held from install, not requestable. Checked, never requested and never removed. */
+/**
+ * A short digest of this file, so an answer can say which driver produced it.
+ *
+ * Installing a new build rewrites the extension folder, but Chrome keeps running the copy it
+ * already loaded until someone reloads the extension by hand. A test run then measures the old
+ * driver while reading the new source, and reports a fix as broken — which has already cost a
+ * round. Hashing the running source turns that into something visible: two runs quoting the same
+ * stamp were the same code, whatever the release notes say.
+ */
+let driverStamp = null;
+async function stamp() {
+  if (driverStamp) return driverStamp;
+  try {
+    const source = await (await fetch(chrome.runtime.getURL('browser-driver.js'))).arrayBuffer();
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', source)).slice(0, 6);
+    driverStamp = [...digest].map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    driverStamp = 'unreadable';
+  }
+  return driverStamp;
+}
 const REQUIRED_BROWSER_PERMISSIONS = { permissions: ['debugger'] };
 
 /**
@@ -845,7 +866,7 @@ export const browserDriver = {
    * nothing about a session that is genuinely still attached.
    */
   async status() {
-    if (!session) return { attached: false, tabId: null, url: null, title: null };
+    if (!session) return { attached: false, tabId: null, url: null, title: null, build: await stamp() };
     try {
       const tab = await chrome.tabs.get(session.tabId);
       session.url = tab?.url || tab?.pendingUrl || session.url;
@@ -861,7 +882,8 @@ export const browserDriver = {
       tabId: session.tabId,
       url: session.url,
       title: session.title,
-      groupId: session.groupId ?? null
+      groupId: session.groupId ?? null,
+      build: await stamp()
     };
   },
 
@@ -925,7 +947,7 @@ export const browserDriver = {
 
   /** Always safe to call, always leaves the tab as the user's own again. */
   async detach() {
-    if (!session) return { attached: false, tabId: null, url: null, title: null };
+    if (!session) return { attached: false, tabId: null, url: null, title: null, build: await stamp() };
     const { tabId, groupId } = session;
     await removePointer();
     await ungroupDrivenTab(tabId, groupId);
@@ -1166,6 +1188,21 @@ export const browserDriver = {
         const at = await this.resolveRef(action.ref);
         const clicked = await this.act({ ...action, type: 'click', x: at.x, y: at.y });
         return { ...clicked, hit: at.hit, covered: at.covered };
+      }
+      case 'move_ref': {
+        /*
+         * Point at a control without pressing anything.
+         *
+         * Two independent QA runs named this as the one action genuinely missing: menus that open
+         * on hover, tooltips, and anything that reveals its controls only under the pointer were
+         * unreachable, because the only way to a named element was a click — which commits to the
+         * thing the hover was meant to inspect first. Coordinates could not stand in: what a hover
+         * reveals is usually laid out relative to the element, so the point has to be resolved from
+         * the ref at the moment of the move, not read off an older screenshot.
+         */
+        const at = await this.resolveRef(action.ref);
+        const moved = await this.act({ type: 'move', x: at.x, y: at.y });
+        return { ...moved, hit: at.hit, covered: at.covered };
       }
       case 'set_value': {
         const at = await this.resolveRef(action.ref);

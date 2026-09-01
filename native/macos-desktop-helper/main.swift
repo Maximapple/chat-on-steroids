@@ -350,6 +350,48 @@ private func axElementAttribute(_ element: AXUIElement, _ attribute: CFString) -
     return (value as! AXUIElement)
 }
 
+/**
+ * What sits under a screen point, across every application.
+ *
+ * A scroll wheel is delivered by the window server to whatever is under the pointer, not to
+ * whatever holds the lease. When a scroll reports success and the document has not moved, the
+ * usual reason is that some other window was under that point — and an answer that only says
+ * "sent" cannot tell that apart from "the app ignored it". So read it back.
+ */
+private func elementUnderPointer(_ point: CGPoint) -> AXUIElement? {
+    var element: AXUIElement?
+    let status = AXUIElementCopyElementAtPosition(
+        AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &element
+    )
+    return status == .success ? element : nil
+}
+
+/**
+ * How far the scroller nearest this element has travelled, 0...1, or nil when nothing scrolls here.
+ *
+ * The scroll bar carries the position as a fraction, which is all that is needed to answer "did it
+ * move": comparing the same fraction before and after needs no knowledge of the document at all.
+ */
+private func scrollFraction(near element: AXUIElement) -> Double? {
+    var current: AXUIElement? = element
+    for _ in 0..<8 {
+        guard let node = current else { return nil }
+        if let bar = axElementAttribute(node, "AXVerticalScrollBar" as CFString),
+           let value = axAttribute(bar, "AXValue" as CFString) as? NSNumber {
+            return value.doubleValue
+        }
+        current = axElementAttribute(node, "AXParent" as CFString)
+    }
+    return nil
+}
+
+private func pointerScrollState(_ point: CGPoint) -> (pid: pid_t?, role: String?, fraction: Double?) {
+    guard let element = elementUnderPointer(point) else { return (nil, nil, nil) }
+    var pid: pid_t = 0
+    let owner = AXUIElementGetPid(element, &pid) == .success ? pid : nil
+    return (owner, axString(element, "AXRole" as CFString), scrollFraction(near: element))
+}
+
 private func axString(_ element: AXUIElement, _ attribute: CFString) -> String? {
     axAttribute(element, attribute) as? String
 }
@@ -440,6 +482,28 @@ private func axName(_ element: AXUIElement) -> String {
  * Containment is the honest relation between them. It is one-sided by design: if two windows both
  * carry the shorter title, they remain ambiguous, which is correct.
  */
+/**
+ * Whether a failure was only about reading the accessibility tree, leaving a capture still valid.
+ *
+ * This was written as a list of codes to let through, and a list is wrong for the job: splitting
+ * `UIA_AMBIGUOUS_WINDOW` out of `UIA_FAILED` last round quietly took the new code off it, so a
+ * snapshot of a window this scan cannot tell apart returned neither the tree *nor* the picture —
+ * while asking for the picture alone still worked, and while the very same call on a window with no
+ * accessibility representation at all returned both. The refusal even advised moving one of the
+ * windows, which is exactly what the picture would have helped with.
+ *
+ * Asking what the failure *is* survives the next split. Only a target-identity failure — the window
+ * is gone, moving, or was never named — invalidates the capture too.
+ */
+private func onlyTheTreeFailed(_ code: String) -> Bool {
+    switch code {
+    case "WINDOW_NOT_FOUND", "WINDOW_MOVING", "BAD_REQUEST":
+        return false
+    default:
+        return true
+    }
+}
+
 private func titlesAgree(_ a: String?, _ b: String?) -> Bool {
     guard let a, let b, !a.isEmpty, !b.isEmpty else { return false }
     return a == b || a.contains(b) || b.contains(a)
@@ -2164,11 +2228,7 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                 for key in ["snapshotId", "elements", "visited", "truncated"] {
                     result[key] = ui[key]
                 }
-            } catch let error as HelperFailure
-                where error.code == "ACCESSIBILITY_PERMISSION_REQUIRED" ||
-                      error.code == "UIA_FAILED" ||
-                      error.code == "UIA_NO_OWN_WINDOW" ||
-                      error.code == "UIA_TIMEOUT" {
+            } catch let error as HelperFailure where onlyTheTreeFailed(error.code) {
                 // Screen capture is an independent capability. If only the AX tree is
                 // unavailable/malformed/slow, keep the already-valid image and report typed
                 // semantic unavailability. Target-identity failures remain fatal.
@@ -2190,6 +2250,7 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
         var leasedWindow = frameWindow ?? requestedTargetWindow
         let actions = request["actions"] as? [JSONObject] ?? []
         var routes: [String] = []
+        var scrollEvidence: JSONObject?
         var completed = 0
         for (index, action) in actions.enumerated() {
             do {
@@ -2250,7 +2311,29 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                         wheel2: Int32(int(action["scroll_x"])),
                         wheel3: 0
                     ) else { throw fail("INPUT_FAILED", "could not create a scroll event") }
+                    let before = pointerScrollState(scrollAt)
                     event.post(tap: .cghidEventTap)
+                    // Long enough for an application to have drawn its answer; short enough that a
+                    // caller scrolling repeatedly does not feel it.
+                    usleep(120_000)
+                    let after = pointerScrollState(scrollAt)
+                    var evidence: JSONObject = [
+                        "targetPid": Int(scrollRow.pid),
+                        "reachedTarget": before.pid == scrollRow.pid
+                    ]
+                    evidence["hitPid"] = before.pid.map { Int($0) as Any } ?? NSNull()
+                    evidence["hitRole"] = before.role.map { $0 as Any } ?? NSNull()
+                    if let start = before.fraction, let end = after.fraction {
+                        evidence["positionBefore"] = start
+                        evidence["positionAfter"] = end
+                        evidence["moved"] = abs(end - start) > 0.0001
+                    } else {
+                        evidence["moved"] = NSNull()
+                        evidence["movedUnknown"] = before.pid == nil
+                            ? "nothing under the pointer"
+                            : "nothing scrollable under the pointer"
+                    }
+                    scrollEvidence = evidence
                     routes.append("sendinput")
                 case "drag":
                     if let frame { _ = try assertFrameTarget(frame) }
@@ -2309,7 +2392,8 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     "message": error.message,
                     "completed_count": completed,
                     "failed_index": index,
-                    "routes": routes
+                    "routes": routes,
+                    "scroll": scrollEvidence.map { $0 as Any } ?? NSNull()
                 ]
             }
         }
@@ -2317,6 +2401,7 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
         result["foreground"] = foregroundWindowID().map(Int.init) ?? 0
         result["completed_count"] = completed
         result["routes"] = routes
+        if let scrollEvidence { result["scroll"] = scrollEvidence }
     default:
         throw fail("BAD_REQUEST", "unknown operation \(operation)")
     }

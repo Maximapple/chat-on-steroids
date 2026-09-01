@@ -136,6 +136,15 @@ export interface ActionResult {
   routes: ActionRoute[];
   /** Exact single-window lease proven before this batch, when one exists. */
   targetWindow: number | null;
+  /**
+   * What became of a scroll: which window the wheel actually reached, and whether anything moved.
+   *
+   * A wheel is delivered by the window server to whatever is under the pointer, not to whatever
+   * holds the lease — so "sent" and "scrolled" are different claims, and a reply that only made the
+   * first one could not be told apart from an application ignoring the wheel. Absent for a batch
+   * with no scroll in it, and on platforms whose helper does not report it.
+   */
+  scroll: Record<string, unknown> | null;
 }
 
 export type VerificationSpec =
@@ -1723,6 +1732,7 @@ async function actLocked(
   // lock in between, which a second call from the tool layer would have done.
   const clipboard: string[] = [];
   const routes: ActionResult['routes'] = [];
+  let scrollEvidence: ActionResult['scroll'] = null;
   let completedCount = 0;
   let batch: ReturnType<typeof mapOne>[] = [];
   let batchIndices: number[] = [];
@@ -1753,6 +1763,9 @@ async function actLocked(
           : {})
       });
       helperUsed = true;
+      if (reply['scroll'] && typeof reply['scroll'] === 'object') {
+        scrollEvidence = reply['scroll'] as Record<string, unknown>;
+      }
       const helperRoutes = Array.isArray(reply['routes']) ? reply['routes'].map(String) : [];
       for (let index = 0; index < sending.length; index++) {
         const route = helperRoutes[index];
@@ -1828,7 +1841,16 @@ async function actLocked(
     reply = await runHelper({ op: 'cursor' });
   }
 
-  if (reply === null) return { cursor: null, clipboard, completedCount, routes, targetWindow: inferredTargetWindow ?? null };
+  if (reply === null) {
+    return {
+      cursor: null,
+      clipboard,
+      completedCount,
+      routes,
+      targetWindow: inferredTargetWindow ?? null,
+      scroll: scrollEvidence
+    };
+  }
 
   const raw = reply['cursor'] as { x?: unknown; y?: unknown } | undefined;
   const sx = Number(raw?.x);
@@ -1864,7 +1886,8 @@ async function actLocked(
     clipboard,
     completedCount,
     routes,
-    targetWindow: inferredTargetWindow ?? null
+    targetWindow: inferredTargetWindow ?? null,
+    scroll: scrollEvidence
   };
 }
 
