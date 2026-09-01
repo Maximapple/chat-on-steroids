@@ -190,6 +190,38 @@ describe('a browser batch offers only refs that still resolve', () => {
   });
 });
 
+/**
+ * A browser answer must carry what the driver said, not a constant.
+ *
+ * Every action but observe and status was rendered as `<type>: ok`, which threw away the whole
+ * reply. Three fixes were reported missing by QA runs that were reading that word: `hit` and
+ * `covered` on click_ref, and the driver build on status — the one field that says which
+ * extension Chrome is actually running, and therefore whether a run measured the code it thought
+ * it did. All three existed and were correct in the driver; the browser suite proved it. Nothing
+ * tested the layer above, so nothing failed.
+ *
+ * This reads the source rather than calling the tool, because the path needs a live extension
+ * session and a real browser. It pins the property that matters: the renderer reads the answer
+ * instead of enumerating the fields someone thought of.
+ */
+describe('a browser answer carries what the driver answered', () => {
+  const tool = readFileSync(path.join(process.cwd(), 'src/main/mcp/tools-desktop.ts'), 'utf8');
+
+  it('renders every field the driver returned rather than a constant', () => {
+    expect(tool).toContain('const said = Object.entries(data)');
+    // `ok` survives only as the fallback for a driver that answered with nothing at all.
+    expect(tool).toContain("`${action.type}: ${said || 'ok'}`");
+    expect(tool).not.toContain("lines: [`${action.type}: ok`]");
+  });
+
+  it('puts the running driver build on the answer that reports the session', () => {
+    expect(tool).toContain('driver build unreported');
+    expect(tool).toContain("`; driver build ${String(data['build'])}`");
+    // On every branch of status and detach, including the one that holds no tab.
+    expect(tool).toContain('].map((line) => line + build) });');
+  });
+});
+
 describe('the pointer never reports a position outside the image', () => {
   const source = readFileSync(path.join(process.cwd(), 'src/main/computer/index.ts'), 'utf8');
   const tool = readFileSync(path.join(process.cwd(), 'src/main/mcp/tools-desktop.ts'), 'utf8');

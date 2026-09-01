@@ -232,13 +232,22 @@ You answered both questions, and both answers were acted on.
   wheel went somewhere else" — the window server delivers a scroll to whatever is under the
   pointer, which need not be the window holding the lease. `act` now returns a `scroll` object:
   `hitPid`, `hitRole`, `reachedTarget`, and `positionBefore`/`positionAfter`/`moved` read from the
-  scroller itself. Measured here already: 0.076 → 0.097 on one call and 0.097 → 0.119 on the next,
-  so the readings are real and they compose. A scroll aimed at a leased window while another
-  application is in front never reaches the wheel at all — the input-target fence answers
-  `INPUT_TARGET_LOST` with `no input was sent`. So `reachedTarget` is nearly always `true` in
-  practice, and `moved` is the half that carries the answer. What is still unmeasured is the cost:
-  the reading adds a 120 ms settle to every scroll. Time ten scrolls in a row and say whether that
-  is felt — if it is, I would rather shorten it against a number than against a guess.
+  scroller itself, and both are proven: your ten scrolls composed to six decimal places, and the
+  tenth correctly reported `moved: false` at the end of the document.
+
+  **You asked the cost question and answered it, so the wait is now built on your number.** 2495 ms
+  for ten scrolls, 234 ms each, against a scroller that finished moving after 21 to 26 ms — the
+  wait was roughly five times the thing it was waiting for. I did not take your 50 ms: a second
+  fixed number would have been a second guess, and you were explicit that you had not measured an
+  animating scroller. It now polls every 10 ms until two readings agree, with your 120 ms as the
+  ceiling, so nothing waits longer than before and an animated scroller is still waited for. One
+  subtlety your data forced: the poll compares against the reading taken *before* the wheel, not
+  against itself, because at 10 ms nothing has moved yet — comparing a reading to itself would
+  answer `moved: false` a third of the way to the movement even starting.
+
+  **Re-run your ten-scroll measurement.** I expect roughly 40 ms per scroll where it moves, and the
+  full 120 ms only where it does not — the end-of-document case. If an animating scroller is within
+  reach, that is the one measurement neither of us has.
 
 **And the older open question, for reference.** Your answer last round — list it, do
 not exclude it, and carry the difference in a field such as `focusable: false` — is the one I

@@ -54,18 +54,26 @@ step 2 did not take: redo it, redo step 3, and start again rather than reporting
 
 ## What changed since the last run
 
-**Your last run reported `hit` and `covered` missing from `click_ref`.** They were in the source it
-was testing against, and there is no path through that code that omits them — which leaves one
-explanation: Chrome was still running the previous driver. That is why `status` now carries `build`
-and why the section above asks you to quote it before anything else. Treat last round's check 23
-verdict as unproven rather than failed.
+**You were right twice, and I was wrong about why.** Last round I told you `hit` and `covered` were
+missing because Chrome was probably still running the old extension. It was not. The fields were
+there, correct, in the driver — the browser suite proves it — and the tool that hands you the answer
+threw them away: every browser action except `observe` and `status` was rendered as the single word
+`ok`. Your own diagnosis this round is the right one: *one family of response-shape failures rather
+than three unrelated behavioural bugs.* The renderer now prints what the driver actually answered
+instead of the fields someone remembered to list, so `hit`, `covered`, and anything a driver adds
+later arrive on their own.
+
+**And `status` really did not report `build`.** You could not verify which driver you were testing
+because the field existed one layer below and never reached you. It does now, on every branch,
+including the one that holds no tab — `; driver build <digest>` or `; driver build unreported`. If
+it ever reads `unreported`, that is a finding, not a stale extension.
 
 **Check 14 now answers back.** You reported a native scroll returning `Done` while the document
 stayed put, and nothing in the reply could tell that apart from a wheel the application ignored.
 The `computer` reply now carries a `scroll` object, and its load-bearing half is
-`positionBefore`/`positionAfter`/`moved`, read from the scroller itself — measured on the Mac as
-0.076 → 0.097 on one call and 0.097 → 0.119 on the next, so the readings are real and they
-compose. Quote the whole object, pass or fail. `moved: null` with `movedUnknown` means nothing
+`positionBefore`/`positionAfter`/`moved`, read from the scroller itself. You reported the summary
+sentence without the object behind it; the object is now printed after the sentence, so quote it
+verbatim, pass or fail. `moved: null` with `movedUnknown` means nothing
 scrollable was under the pointer, which is an answer too.
 
 It also carries `hitPid`, `hitRole` and `reachedTarget`, for the case where the wheel reaches a
@@ -89,10 +97,10 @@ Report either only if it behaves differently from that.
 both times you were right: the only route to a named element was a click, which commits to the very
 thing a hover was meant to inspect first.
 
-**Check 23, for the second time.** `click_ref` reports `hit`, the element actually under the click
-point, and `covered` when something else is lying over the one you named. If they are absent again
-after you have confirmed a fresh `build`, that is a real finding and a serious one. If they are
-present, quote both: they say whether the click missed or the page ignored it.
+**Check 23, for the third time, and this time the evidence should actually reach you.** `click_ref`
+reports `hit`, the element under the click point, and `covered` when something else lies over the
+one you named. Quote both. Your observation that a link acquired visited styling while the tab did
+not move is exactly the case these two fields exist to settle.
 
 **One from the last run that is still open, and needs a careful answer rather than a quick one.**
 Check 17's Tab returned `Done` twice and inserted nothing, on a run where two earlier rounds had it
