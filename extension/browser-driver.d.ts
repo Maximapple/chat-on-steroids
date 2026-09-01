@@ -39,6 +39,8 @@ export interface BrowserSessionStatus {
   tabId: number | null;
   url: string | null;
   title: string | null;
+  /** The driven-tab group, when one is held — the blue band a person sees above the tab. */
+  groupId?: number | null;
 }
 
 export interface BrowserElement {

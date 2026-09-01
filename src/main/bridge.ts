@@ -113,7 +113,7 @@ import {
 import { noteResumeOpening } from './session/resume-gate.js';
 import { abandonBrowserCommands, collectBrowserCommand, settleBrowserCommand } from './browser-control.js';
 import { readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
-import { APP_VERSION, BRIDGE_PROTOCOL } from './version.js';
+import { APP_VERSION, BRIDGE_PROTOCOL, BUILD_VERSION } from './version.js';
 import { requestCorrelation } from './session/correlation.js';
 import { execProcessIdsForConversation } from './codex/ownership.js';
 import { unifiedExecManager } from './codex/manager.js';
@@ -929,6 +929,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       {
         app: 'chat-on-steroids',
         version: APP_VERSION,
+        // The version is what peers compare against, and it deliberately stays bare for that.
+        // `build` is what anything asking "which app is actually running" needs, and until now
+        // there was nowhere to ask: the window title carries it but a machine cannot read one,
+        // and a QA run on macOS could not determine the build it was measuring at all. This is
+        // the loopback answer to that question, so a check can be a command instead of a person.
+        build: BUILD_VERSION,
         bridge: BRIDGE_PROTOCOL,
         compatible: protocolCompatible(req),
         paired: stored !== null && stored !== BROWSER_DISCONNECTED,

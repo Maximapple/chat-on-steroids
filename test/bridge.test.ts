@@ -9,7 +9,7 @@
 
 import http from 'node:http';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { APP_VERSION, BRIDGE_PROTOCOL } from '../src/main/version.js';
+import { APP_VERSION, BUILD_VERSION, BRIDGE_PROTOCOL } from '../src/main/version.js';
 import type { ContinuationSnapshot } from '../src/main/session/continuation.js';
 import type { SwarmSnapshot } from '../src/main/agents.js';
 
@@ -319,10 +319,19 @@ describe('who is allowed to talk to it', () => {
     // Against the constant, not a literal: what matters is that the handshake reports the
     // build's own version, and a hard-coded number here only ever fails on release day.
     expect(reply.body.version).toBe(APP_VERSION);
+    // The version is what peers compare against and stays bare for that. `build` is what anything
+    // asking "which app is actually running" needs, and there was nowhere to ask: the window title
+    // carries it but no machine can read one, and a QA run on macOS could not determine the build
+    // it was measuring at all. It is a commit from a public repository, offered on a loopback
+    // route that already refuses every web-page origin — so this is identification, not status.
+    expect(reply.body.build).toBe(BUILD_VERSION);
     expect(reply.body.bridge).toBe(BRIDGE_PROTOCOL);
     expect(reply.body.paired).toBe(false);
-    // Identification must not double as a status leak.
-    expect(Object.keys(reply.body)).toEqual(['app', 'version', 'bridge', 'compatible', 'paired', 'disconnected']);
+    // Identification must not double as a status leak: the list is exact, so nothing about what
+    // the app is currently doing can be added here without this failing first.
+    expect(Object.keys(reply.body)).toEqual(
+      ['app', 'version', 'build', 'bridge', 'compatible', 'paired', 'disconnected']
+    );
     expect(reply.body.disconnected).toBe(false);
     expect(reply.body.compatible).toBe(true);
   });
