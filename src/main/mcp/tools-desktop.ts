@@ -651,7 +651,7 @@ Scroll: ${
                   : result.scroll['moved'] === false
                     ? `nothing moved, still at ${String(result.scroll['positionAfter'])}`
                     : `whether it moved is unreadable (${String(result.scroll['movedUnknown'] ?? 'no scroller')})`
-              }.`
+              }. ${JSON.stringify(result.scroll)}`
             : '';
           const done = `Done ${result.completedCount}/${parsed.length} via ${routeSummary}: ${parsed.map((a) => a.type).join(', ')}. ${pointer}${clipboard ? `\n${clipboard}` : ''}${verified}${captureFallback}${scroll}`;
           const shot = result.screenshot;
@@ -742,6 +742,14 @@ Scroll: ${
               // so "ok" is not an answer. Say which tab is held, or that none is.
               const attached = data['attached'] === true;
               const released = data['released'] as Record<string, unknown> | undefined;
+              // The digest of the driver Chrome is actually running. Installing a package
+              // rewrites the extension folder, but Chrome keeps the copy it already loaded until
+              // someone reloads it by hand — so a run can measure old code while reading new
+              // release notes, and has. This is the only place a caller can ask which code
+              // answered, which is why it belongs on the answer that reports the session.
+              const build = data['build'] === undefined || data['build'] === null
+                ? '; driver build unreported'
+                : `; driver build ${String(data['build'])}`;
               blocks.push({ observed: false, lines: [
                 attached
                   ? `${action.type}: holding tab ${String(data['tabId'])} — ${String(data['title'] ?? '')} ` +
@@ -757,9 +765,22 @@ Scroll: ${
                       `${String(released['title'] ?? '')} (${String(released['url'] ?? '')}); ` +
                       'no tab is under control'
                     : `${action.type}: no tab is under control`
-              ] });
+              ].map((line) => line + build) });
             } else {
-              blocks.push({ observed: false, lines: [`${action.type}: ok`] });
+              // Everything the driver answered with, rather than the fields this renderer
+              // happens to know about. `ok` threw away three separate pieces of evidence a QA
+              // run needed — `hit`, `covered`, and the driver build — and no test could catch
+              // it, because all three existed and were correct one layer below. A run then
+              // reported working fixes as missing, twice. Reading the answer instead of
+              // enumerating it means the next field a driver adds arrives on its own.
+              const said = Object.entries(data)
+                .filter(([, value]) => value !== undefined)
+                .map(([key, value]) => {
+                  const text = value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
+                  return `${key}=${text.length > 200 ? `${text.slice(0, 200)}…` : text}`;
+                })
+                .join(' ');
+              blocks.push({ observed: false, lines: [`${action.type}: ${said || 'ok'}`] });
             }
           }
 

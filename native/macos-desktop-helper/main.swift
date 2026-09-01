@@ -385,6 +385,43 @@ private func scrollFraction(near element: AXUIElement) -> Double? {
     return nil
 }
 
+/**
+ * Wait only as long as the scroll actually takes, then read it.
+ *
+ * This was a flat 120 ms, chosen without a measurement, and a QA run supplied the measurement:
+ * ten scrolls cost 2495 ms, 234 ms each, while the scroller itself finished moving after 21 to
+ * 26 ms — the wait was roughly five times the thing it was waiting for, on every single scroll.
+ *
+ * A shorter flat number would have been a second guess. Polling until two readings agree costs
+ * about 30 ms where 120 was spent, and — unlike any fixed figure — it still waits for an
+ * application whose scrolling is animated rather than instant, which the measurement explicitly
+ * did not cover. The 120 ms survives as the ceiling, so nothing can wait longer than before.
+ */
+private func settledScrollState(_ point: CGPoint, startedAt start: Double?) -> (pid: pid_t?, role: String?, fraction: Double?) {
+    // Nothing scrollable is under the pointer, so there is no reading to settle. Give the
+    // application a moment anyway — the answer still reports what was hit.
+    guard let start else {
+        usleep(30_000)
+        return pointerScrollState(point)
+    }
+    var last: (pid: pid_t?, role: String?, fraction: Double?) = (nil, nil, nil)
+    var elapsed: useconds_t = 0
+    var moved = false
+    while elapsed < 120_000 {
+        usleep(10_000)
+        elapsed += 10_000
+        let current = pointerScrollState(point)
+        guard let now = current.fraction else { return current }
+        // Two readings agree only once the scroll has actually begun. Comparing a reading to
+        // itself before then would answer "nothing moved" at 10 ms, which is a third of the way
+        // to the movement even starting — the measurement puts that at 21 to 26 ms.
+        if now != start { moved = true }
+        if moved, let previous = last.fraction, previous == now { return current }
+        last = current
+    }
+    return last.fraction == nil ? pointerScrollState(point) : last
+}
+
 private func pointerScrollState(_ point: CGPoint) -> (pid: pid_t?, role: String?, fraction: Double?) {
     guard let element = elementUnderPointer(point) else { return (nil, nil, nil) }
     var pid: pid_t = 0
@@ -2313,10 +2350,7 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     ) else { throw fail("INPUT_FAILED", "could not create a scroll event") }
                     let before = pointerScrollState(scrollAt)
                     event.post(tap: .cghidEventTap)
-                    // Long enough for an application to have drawn its answer; short enough that a
-                    // caller scrolling repeatedly does not feel it.
-                    usleep(120_000)
-                    let after = pointerScrollState(scrollAt)
+                    let after = settledScrollState(scrollAt, startedAt: before.fraction)
                     var evidence: JSONObject = [
                         "targetPid": Int(scrollRow.pid),
                         "reachedTarget": before.pid == scrollRow.pid
@@ -2386,15 +2420,18 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                 }
                 completed += 1
             } catch let error as HelperFailure {
-                return [
+                // Only when a scroll happened. A `"scroll": null` on every refused keystroke is a
+                // field that means nothing about the answer it rides on, and it rode on all of them.
+                var failure: JSONObject = [
                     "ok": false,
                     "error_code": error.code,
                     "message": error.message,
                     "completed_count": completed,
                     "failed_index": index,
-                    "routes": routes,
-                    "scroll": scrollEvidence.map { $0 as Any } ?? NSNull()
+                    "routes": routes
                 ]
+                if let scrollEvidence { failure["scroll"] = scrollEvidence }
+                return failure
             }
         }
         result["cursor"] = cursorObject()
