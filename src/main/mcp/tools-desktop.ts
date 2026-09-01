@@ -678,7 +678,12 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
             );
           }
 
-          const lines: string[] = [];
+          // One block per action rather than one flat list, because an earlier observation has
+          // to be removable at the end: the driver keeps only the newest observation's refs
+          // addressable and replaces that map wholesale each time. Printing every observation's
+          // refs hands back a list whose earlier half is already dead, with nothing marking
+          // which half — a model would pick one, be refused, and have no reason why.
+          const blocks: Array<{ observed: boolean; lines: string[] }> = [];
           let shot: { data: string; width: number; height: number } | null = null;
           for (const [index, action] of input.actions.entries()) {
             const reply = await runBrowserCommand(conversationId, action as Record<string, unknown>);
@@ -693,7 +698,7 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
             const data = reply.data ?? {};
             if (action.type === 'observe') {
               const elements = Array.isArray(data['elements']) ? (data['elements'] as Array<Record<string, unknown>>) : [];
-              lines.push(
+              blocks.push({ observed: true, lines: [
                 `page: ${String(data['url'] ?? '')}`,
                 `title: ${String(data['title'] ?? '')}`,
                 ...elements.map(
@@ -701,24 +706,34 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
                     `${String(element['ref'])} ${String(element['role'])} ${JSON.stringify(String(element['name'] ?? ''))}` +
                     `${element['disabled'] === true ? ' disabled' : ''} at ${String(element['x'])},${String(element['y'])}`
                 )
-              );
+              ] });
               const picture = data['screenshot'] as { data: string; width: number; height: number } | null | undefined;
               if (picture && typeof picture.data === 'string') shot = picture;
             } else if (action.type === 'detach' || action.type === 'status') {
               // These answer a question about the session rather than doing something to a page,
               // so "ok" is not an answer. Say which tab is held, or that none is.
               const attached = data['attached'] === true;
-              lines.push(
+              blocks.push({ observed: false, lines: [
                 attached
                   ? `${action.type}: holding tab ${String(data['tabId'])} — ${String(data['title'] ?? '')} (${String(data['url'] ?? '')})`
                   : `${action.type}: no tab is under control`
-              );
+              ] });
             } else {
-              lines.push(`${action.type}: ok`);
+              blocks.push({ observed: false, lines: [`${action.type}: ok`] });
             }
           }
 
-          const body = lines.join('\n');
+          const newestObservation = blocks.reduce(
+            (latest, block, index) => (block.observed ? index : latest),
+            -1
+          );
+          const body = blocks
+            .flatMap((block, index) =>
+              block.observed && index !== newestObservation
+                ? ['observe: superseded by a later observation in this call; those refs are gone']
+                : block.lines
+            )
+            .join('\n');
           if (shot) {
             return desktopImageResult(
               `${body}\nScreenshot ${shot.width}x${shot.height}; its pixels are the coordinates for this page.`,

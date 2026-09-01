@@ -170,6 +170,26 @@ describe('the Windows drag is paced like a real one', () => {
  * Outside the frame there is no image coordinate to give, and saying so is the whole fix: the
  * desktop position is still reported, and it is the one that was never in doubt.
  */
+/**
+ * A batch prints one set of refs, and it is the live one.
+ *
+ * The driver keeps only the newest observation addressable, replacing its ref map wholesale on
+ * every observe. A call may carry several — observe, click, observe is an ordinary shape — and
+ * printing all of them handed back a list whose earlier half no longer resolved, with nothing
+ * marking where the dead half ended. A model picking from it would be refused and told only that
+ * the ref was not from the most recent observation, which is true and unactionable.
+ */
+describe('a browser batch offers only refs that still resolve', () => {
+  const tool = readFileSync(path.join(process.cwd(), 'src/main/mcp/tools-desktop.ts'), 'utf8');
+
+  it('drops every observation but the last from what it prints', () => {
+    expect(tool).toContain('const newestObservation = blocks.reduce(');
+    expect(tool).toMatch(/index !== newestObservation[\s\S]{0,120}superseded by a later observation/);
+    // The screenshot must come from that same last observation, not from an earlier one.
+    expect(tool).toMatch(/if \(picture && typeof picture\.data === 'string'\) shot = picture;/);
+  });
+});
+
 describe('the pointer never reports a position outside the image', () => {
   const source = readFileSync(path.join(process.cwd(), 'src/main/computer/index.ts'), 'utf8');
   const tool = readFileSync(path.join(process.cwd(), 'src/main/mcp/tools-desktop.ts'), 'utf8');
