@@ -236,7 +236,15 @@ describe('macOS desktop safety hardening', () => {
     expect(swift).toContain('error.code == "ACCESSIBILITY_PERMISSION_REQUIRED" ||');
     expect(swift).toContain('error.code == "UIA_FAILED" ||');
     expect(swift).toContain('error.code == "UIA_TIMEOUT"');
-    expect(swift).toContain('throw fail("WINDOW_NOT_FOUND", "no matching visible window is available")');
+    // A window whose accessibility id belongs to a different window is the same kind of failure:
+    // the tree cannot be read, and the picture is still valid and still wanted. Chrome's transient
+    // omnibox container is one, and without this line asking about it would lose the screenshot
+    // too rather than just the controls.
+    expect(swift).toContain('error.code == "UIA_NO_OWN_WINDOW" ||');
+    // A window that is gone is named rather than described as an empty desktop: a caller that
+    // asked for one window in particular should not have to guess which of the two happened.
+    expect(swift).toContain('is no longer on screen');
+    expect(swift).not.toContain('no matching visible window is available');
   });
 
   it('retains the documented process-global AX timeout contract', () => {

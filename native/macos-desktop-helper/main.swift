@@ -577,6 +577,32 @@ private func windowIDDescription(_ id: CGWindowID?) -> String {
     return "window \(id)"
 }
 
+/**
+ * A leased window has to contain the point, or the lease meant nothing.
+ *
+ * `assertInputTarget` proves which window keyboard input reaches. It says nothing about where a
+ * pointer event lands, and nothing did: QA leased a window, asked for a click at 5,5 — a corner of
+ * the desktop outside every window — and the click was sent, with `Done 1/1`. The fence proved the
+ * wrong fact, and the caller was told the right one had been proved.
+ *
+ * Clicking already requires a lease, so input in this helper always belongs to a window by
+ * construction. Requiring the point to be in that window is the other half of the same rule.
+ *
+ * One pixel of slack on each edge, because a window's own border is part of it and a coordinate
+ * read off a screenshot can land exactly on it.
+ */
+private func requirePointInWindow(_ point: CGPoint, _ row: WindowRow, _ what: String) throws {
+    guard row.bounds.insetBy(dx: -1, dy: -1).contains(point) else {
+        throw fail(
+            "OUTSIDE_TARGET_WINDOW",
+            "\(what) at \(Int(point.x)),\(Int(point.y)) is outside window \(row.id), which this " +
+                "batch is leased to (\(Int(row.bounds.minX)),\(Int(row.bounds.minY)) " +
+                "\(Int(row.bounds.width))x\(Int(row.bounds.height))). No input was sent. Lease the " +
+                "window you meant, or take a screenshot of it and use coordinates from that image."
+        )
+    }
+}
+
 private func assertInputTarget(_ id: CGWindowID) throws -> WindowRow {
     guard let row = windowRow(id), row.onScreen else {
         throw fail("INPUT_TARGET_LOST", "target window \(id) no longer exists on screen; no input was sent")
@@ -614,7 +640,24 @@ private func matchingAXWindow(_ row: WindowRow, deadline suppliedDeadline: TimeI
         guard ProcessInfo.processInfo.systemUptime < deadline else {
             throw fail("UIA_TIMEOUT", "exact accessibility window matching exceeded its bounded native deadline")
         }
-        if axWindowNumber(window) == row.id { return window }
+        guard axWindowNumber(window) == row.id else { continue }
+        // An id match is normally conclusive, but it is not proof on its own: Chrome reports the
+        // same AXWindowNumber for the transient container it opens over the omnibox as for the
+        // window beneath it. Asked about the container, this returned the main window's entire
+        // tree with ok: true — a caller clicking those elements clicks into a window it never
+        // named, and nothing warns it. Geometry is the second opinion, and here it disagrees:
+        // 1402x136 against 1728x1002.
+        guard let bounds = axBounds(window), !convincinglyMatchesWindow(bounds, row.bounds) else {
+            return window
+        }
+        throw fail(
+            "UIA_NO_OWN_WINDOW",
+            "window \(row.id) has no accessibility window of its own — the one carrying its id " +
+                "describes a different window (\(Int(bounds.width))x\(Int(bounds.height)) against " +
+                "\(Int(row.bounds.width))x\(Int(row.bounds.height))). Transient panels an " +
+                "application draws over its own window behave this way; ask about the window " +
+                "underneath instead."
+        )
     }
     var geometryCandidates: [(element: AXUIElement, distance: CGFloat)] = []
     for window in windows {
@@ -739,7 +782,7 @@ private func findUI(
     } else if let foreground = foregroundWindowID(), let found = windowRow(foreground) {
         row = found
     } else {
-        throw fail("WINDOW_NOT_FOUND", "no matching visible window is available")
+        throw fail("WINDOW_NOT_FOUND", "no window is in the foreground to read")
     }
     let root = try matchingAXWindow(row, deadline: deadline)
     let query = string(request["query"]).lowercased()
@@ -1329,37 +1372,82 @@ private func pressKeys(_ names: [String], targetWindow: CGWindowID? = nil) throw
     }
 }
 
+/**
+ * Types text, sending newlines as the Return key rather than as text.
+ *
+ * A newline inside a unicode string is where this used to lose whole sentences. The text was cut
+ * into chunks of at most 32 UTF-16 units and each chunk handed to `keyboardSetUnicodeString`; when
+ * a chunk happened to *begin* with U+000A, macOS delivered the newline — late, on the next event —
+ * and discarded the rest of that chunk. Up to 31 characters vanished, and the helper answered
+ * `ok: true` with `routes: ["sendinput"]`.
+ *
+ * That made it depend on the offset rather than on the text: the same words arrived or did not
+ * according to where a newline happened to land relative to a multiple of 32. It was found by
+ * prediction — cut the same sentence at index 32 and at index 20, and only the first loses its
+ * tail — which is why it survived so long: retrying the same string reproduces nothing.
+ *
+ * A newline is a keystroke, not a character, and sending it as one is also what a real keyboard
+ * does. Editors that treat Return specially — a search field that submits, a chat box that sends —
+ * now see what they expect instead of a control character in a paste.
+ */
 private func typeText(_ text: String, targetWindow: CGWindowID? = nil) throws {
     guard let source = CGEventSource(stateID: .privateState) else {
         throw fail("INPUT_FAILED", "could not create a keyboard event source")
     }
-    let units = Array(text.utf16)
-    var cursor = 0
-    while cursor < units.count {
-        var end = min(units.count, cursor + 32)
-        if end < units.count, end > cursor,
-           units[end - 1] >= 0xD800, units[end - 1] <= 0xDBFF,
-           units[end] >= 0xDC00, units[end] <= 0xDFFF {
-            end -= 1
-        }
-        let chunk = Array(units[cursor..<end])
-        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
-            throw fail("INPUT_FAILED", "could not create a text input event")
-        }
-        chunk.withUnsafeBufferPointer { pointer in
-            down.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: pointer.baseAddress!)
-            up.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: pointer.baseAddress!)
-        }
+
+    func deliver(_ event: CGEvent) throws {
         if let targetWindow {
             let target = try assertInputTarget(targetWindow)
-            down.postToPid(target.pid)
-            up.postToPid(target.pid)
+            event.postToPid(target.pid)
         } else {
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
+            event.post(tap: .cghidEventTap)
         }
-        cursor = end
+    }
+
+    func sendRun(_ units: [UInt16]) throws {
+        var cursor = 0
+        while cursor < units.count {
+            var end = min(units.count, cursor + 32)
+            // Never split a surrogate pair across two events: half of one is not a character.
+            if end < units.count, end > cursor,
+               units[end - 1] >= 0xD800, units[end - 1] <= 0xDBFF,
+               units[end] >= 0xDC00, units[end] <= 0xDFFF {
+                end -= 1
+            }
+            let chunk = Array(units[cursor..<end])
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
+                throw fail("INPUT_FAILED", "could not create a text input event")
+            }
+            chunk.withUnsafeBufferPointer { pointer in
+                down.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: pointer.baseAddress!)
+                up.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: pointer.baseAddress!)
+            }
+            try deliver(down)
+            try deliver(up)
+            cursor = end
+        }
+    }
+
+    func sendReturn() throws {
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false) else {
+            throw fail("INPUT_FAILED", "could not create a newline event")
+        }
+        try deliver(down)
+        try deliver(up)
+    }
+
+    // Every line ending becomes the same thing, so a document written on one platform types the
+    // same as one written on another.
+    let normalized = text
+        .replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
+    let runs = normalized.components(separatedBy: "\n")
+    for (index, run) in runs.enumerated() {
+        if index > 0 { try sendReturn() }
+        let units = Array(run.utf16)
+        if !units.isEmpty { try sendRun(units) }
     }
 }
 
@@ -1864,9 +1952,17 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
     case "capture":
         result.merge(try capture(request)) { _, new in new }
     case "snapshot":
-        let id = number(request["id"])?.uint32Value ?? foregroundWindowID()
+        let requested = number(request["id"])?.uint32Value
+        let id = requested ?? foregroundWindowID()
         guard let id, let row = windowRow(id) else {
-            throw fail("WINDOW_NOT_FOUND", "no matching visible window is available")
+            // Name the window that is gone. "No matching visible window" describes the desktop
+            // rather than the request, and a caller that asked for one window in particular is
+            // left to guess whether it closed, was never valid, or the whole desktop is empty.
+            throw fail(
+                "WINDOW_NOT_FOUND",
+                requested.map { "window \($0) is no longer on screen" }
+                    ?? "no window is in the foreground to snapshot"
+            )
         }
         result["window"] = row.json(foreground: foregroundWindowID())
         if bool(request["includeScreenshot"]) {
@@ -1881,6 +1977,7 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
             } catch let error as HelperFailure
                 where error.code == "ACCESSIBILITY_PERMISSION_REQUIRED" ||
                       error.code == "UIA_FAILED" ||
+                      error.code == "UIA_NO_OWN_WINDOW" ||
                       error.code == "UIA_TIMEOUT" {
                 // Screen capture is an independent capability. If only the AX tree is
                 // unavailable/malformed/slow, keep the already-valid image and report typed
@@ -1934,9 +2031,11 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     guard let target = leasedWindow else {
                         throw fail("INPUT_TARGET_REQUIRED", "click input requires targetWindow")
                     }
-                    _ = try assertInputTarget(target)
+                    let clickRow = try assertInputTarget(target)
+                    let clickAt = CGPoint(x: int(action["x"]), y: int(action["y"]))
+                    try requirePointInWindow(clickAt, clickRow, type)
                     try click(
-                        CGPoint(x: int(action["x"]), y: int(action["y"])),
+                        clickAt,
                         button: mouseButton(string(action["button"])),
                         count: type == "double_click" ? 2 : 1,
                         targetWindow: target
@@ -1947,8 +2046,10 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     guard let target = leasedWindow else {
                         throw fail("INPUT_TARGET_REQUIRED", "scroll input requires targetWindow")
                     }
-                    _ = try assertInputTarget(target)
-                    try movePointer(CGPoint(x: int(action["x"]), y: int(action["y"])))
+                    let scrollRow = try assertInputTarget(target)
+                    let scrollAt = CGPoint(x: int(action["x"]), y: int(action["y"]))
+                    try requirePointInWindow(scrollAt, scrollRow, "scroll")
+                    try movePointer(scrollAt)
                     if let frame { _ = try assertFrameTarget(frame) }
                     _ = try assertInputTarget(target)
                     guard let event = CGEvent(
