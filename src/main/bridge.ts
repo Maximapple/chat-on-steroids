@@ -937,6 +937,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         build: BUILD_VERSION,
         bridge: BRIDGE_PROTOCOL,
         compatible: protocolCompatible(req),
+        // What the caller said it speaks, so `compatible: false` can be told apart from a real
+        // mismatch. A plain `curl` sends no protocol header and is therefore reported
+        // incompatible — which is true and reads like a fault: a QA run flagged exactly that on a
+        // healthy packaged build, paired and connected. null means "you did not say".
+        spoken: extensionProtocol(req),
         paired: stored !== null && stored !== BROWSER_DISCONNECTED,
         disconnected: stored === BROWSER_DISCONNECTED
       },
