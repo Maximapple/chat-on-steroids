@@ -133,14 +133,6 @@ was handed (check 37); a missing window is named (check 31); `detach` says what 
 (check 25); and `/hello` reports `spoken`, so `compatible: false` on a plain curl is expected
 rather than a mismatch.
 
-**Two things earlier wording sent a run chasing, so they are stated plainly here.** A `move` whose
-target is where the pointer already is answers `Done`, and that is correct: the postcondition is
-that the pointer is at the requested point, and it is. The refusal that exists —
-`POINTER_DID_NOT_MOVE` — is for a move that was *sent and not delivered*, and asking for the
-current position cannot exercise it. And a capture taken immediately after a Finder file operation
-can still show the file where it was: Finder repaints on its own schedule, and the shell is the
-settled answer. Neither is a defect; report them only if they behave differently from this.
-
 From the run before that, and still worth confirming: the window title carries the build again and
 `/hello` reports it; scrolling goes through a scroll gesture because the wheel event does nothing
 in Chrome 152; a window being moved is read a second time; a refused focus names the window in
