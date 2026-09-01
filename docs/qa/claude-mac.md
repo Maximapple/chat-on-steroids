@@ -184,11 +184,24 @@ it fire here, that is the finding.
 window. That silence cost you a whole round; check it on `find_ui`, `focus`, `capture` and
 `snapshot`.
 
-**3b. The open question, which is a judgement rather than a measurement.** `windows` lists that
-transient container as an ordinary window, and it is not one anybody would want to drive. Say
-whether you think it should be listed at all — and what distinguishes it, in the data the helper
-already has, from a window that should be. A wrong exclusion rule here hides real windows, so this
-is asked as a question and not as a change.
+**3b. The open question, now with one measurement attached.** Your answer last round — list it, do
+not exclude it, and carry the difference in a field such as `focusable: false` — is the one I
+agree with. Two things have to be true before it can be built, and only this machine can say
+whether they are.
+
+The cheap signal does not work: the helper already filters the window list to `layer == 0`
+(`main.swift:216`), so the container is a normal-layer window and its layer cannot tell it apart
+from any other. That leaves whether it can be made main at all. So, using the Accessibility API
+directly rather than the helper:
+
+- For the omnibox container **and** for Chrome's main window, report whether `kAXMainAttribute` is
+  settable — `AXUIElementIsAttributeSettable(window, kAXMainAttribute, &settable)`. If it comes
+  back `false` for the container and `true` for the main window, that is the field's definition and
+  I will build it on that.
+- Then time it: how long does one such call take, and how long would it take for every window in
+  a 25-window list? `windows` is called constantly, and a field that turns a fast list into a slow
+  one is not worth having. Say what you measure; if it is expensive, say so and I will make the
+  field something a caller asks for rather than something every list pays for.
 
 ## 4. Input, at the level under the app
 
