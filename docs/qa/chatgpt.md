@@ -91,7 +91,10 @@ need a document in it.
    document back — through the shell tool if that is easier — and confirm the text arrived exactly.
 8. Set a value directly into a text field rather than typing it, and confirm the contents.
 9. Find a **disabled** control and try to click it. It must be refused with a named error.
-10. Try to click at a coordinate outside every window (5,5). A refusal is expected.
+10. Try to click at a coordinate outside every window (5,5) — first with no target window, then
+    on the retry with one supplied. **Both must be refused.** The second was not: the click was
+    sent, at 5,5, outside the very window it was leased to. It must now answer
+    `OUTSIDE_TARGET_WINDOW`, naming that window and its bounds.
 
 ## C. Which window is in front
 
@@ -131,7 +134,11 @@ need a document in it.
 24. **The refusals.** `navigate` to `https://chatgpt.com/`, then `chrome://settings`, then
     `file:///etc/hosts`. All three must be refused and the driven tab must survive — check with
     `status`. Quote each error. **Passing means being refused.**
-25. `detach`, then `status`. Confirm no tab is held and the overlay is gone.
+25. `detach`, then `status`. `detach` now names what it let go of — `let go of tab N — title
+    (url); no tab is under control` — so quote it and confirm `status` agrees. Do not try to
+    prove the overlay is gone: no action reads a tab the tool has released, the last run was
+    right to report that as a gap, and the overlay's absence is proven in the driver suite
+    against the page itself.
 
 ## F. Fixes with no older check
 
@@ -142,9 +149,11 @@ need a document in it.
 34. **set_value replaces, and clears.** In a field that already contains text, `set_value` a new
     string; it must contain **only** that. Then `set_value` an empty string and confirm it is
     genuinely empty.
-37. **A pointer outside the captured window.** Move the pointer well outside a window, capture it,
-    and read the reported pointer line. It must say the pointer is outside the frame rather than
-    print coordinates outside the image.
+37. **A pointer outside the captured window.** Move the pointer well outside a window and capture
+    that window **in the same call**, then read the reported pointer line. It must say the
+    pointer is outside the frame rather than print coordinates outside the image — and the frame
+    it names must be the picture you were just handed. The last run saw an older frame named
+    there, which was true of that frame and about a different image.
 39. **A click cannot walk into a refused page.** With a page under control, `navigate` to a page
     you control that links somewhere refused — `data:text/html,<a href="about:blank">go</a>` will
     not do, since data: is refused itself, so use any real page with an `about:blank` link, or
