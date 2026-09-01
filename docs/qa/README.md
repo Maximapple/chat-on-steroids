@@ -2,12 +2,10 @@
 
 | Wer | Was | Datei |
 |---|---|---|
-| **ChatGPT** | zwölf Prüfungen: Browsersteuerung (18–25, 33–34) und die beiden, die zuletzt fehlschlugen (11, 38) | [chatgpt.md](chatgpt.md) |
+| **ChatGPT** | der vollständige Durchlauf: 40 Prüfungen über Bildschirmfotos, Mauszeiger, Klicken, Fenster, Scrollen, Erweiterung, Onboarding, Robustheit | [chatgpt.md](chatgpt.md) |
 | **Claude Code auf dem Mac** | eine Messung: warum ein sichtbares Chrome-Fenster nicht fokussiert wird | [claude-mac.md](claude-mac.md) |
 
-Vorher waren es sechs Dokumente, von denen vier überholt waren. Sie stehen in der Git-Historie,
-darunter das vollständige 38-Punkte-Skript, falls je wieder ein kompletter Durchlauf gebraucht
-wird.
+Vorher waren es sechs Dokumente, von denen vier überholt waren. Sie stehen in der Git-Historie.
 
 ## Vorbereitung, nur für ChatGPT
 
