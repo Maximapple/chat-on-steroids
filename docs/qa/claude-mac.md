@@ -207,15 +207,38 @@ You answered both questions, and both answers were acted on.
   `focusableUnknown` beside it, reading `"ambiguous"` or `"unavailable"`. Your three identical DMG
   windows should read `ambiguous`; a window with no accessibility representation at all reads
   `unavailable`. One of those a caller can act on, the other not, and `null` alone said neither.
-- **Two identical windows can now be told apart by title.** The drag that cost you a run is the
-  case: geometry could not separate two Finder windows of the same size at the same place, and the
-  title was sitting unused in the row. Make that situation again — two Finder windows, same size,
-  same position, different titles — and confirm the drag works. Then make it with the *same* title
-  as well, and confirm the refusal now names the candidates it could not separate, rather than only
-  saying it could not.
+- **With the *same* title as well**, confirm the refusal names the candidates it could not
+  separate, rather than only saying it could not.
 - **The `UIA_NO_OWN_WINDOW` comment says what you measured**: the attribute is unsupported here,
   -25205, none of 26 windows matched by id. Nothing to test; it is recorded so the next reader is
   not told an anecdote.
+
+**3c. This round, both items come from findings — yours and ChatGPT's.**
+
+- **Your `snapshot` finding is fixed at the root you named.** The enumeration is gone. The test now
+  asks what the failure *is*: only a target-identity failure — `WINDOW_NOT_FOUND`, `WINDOW_MOVING`,
+  `BAD_REQUEST` — discards the capture, and every other failure keeps the already-valid image and
+  reports `uiUnavailable`. So the next code split cannot take a code off a list again.
+
+  Your own measurement has already been repeated on your machine, so do not spend the round on it:
+  two Chrome windows at 200,200 800x600 both titled `Example Domain` — identical geometry and
+  identical title, which is the condition — and `snapshot` with `includeUi` answered `ok: true`,
+  `image: {1280x960}`, `uiUnavailable: {"code": "UIA_AMBIGUOUS_WINDOW", …}` for both of them.
+  Before the fix that was `ok: false, image: null`. Confirm it in passing if it is free; the
+  picture is what makes the refusal’s advice — move or close one of them — followable at all,
+  which was the worse half of that defect.
+- **A scroll now reports what happened to it.** ChatGPT met a native scroll answering `Done` with
+  the document unmoved, and nothing in the reply separated "the app ignored the wheel" from "the
+  wheel went somewhere else" — the window server delivers a scroll to whatever is under the
+  pointer, which need not be the window holding the lease. `act` now returns a `scroll` object:
+  `hitPid`, `hitRole`, `reachedTarget`, and `positionBefore`/`positionAfter`/`moved` read from the
+  scroller itself. Measured here already: 0.076 → 0.097 on one call and 0.097 → 0.119 on the next,
+  so the readings are real and they compose. A scroll aimed at a leased window while another
+  application is in front never reaches the wheel at all — the input-target fence answers
+  `INPUT_TARGET_LOST` with `no input was sent`. So `reachedTarget` is nearly always `true` in
+  practice, and `moved` is the half that carries the answer. What is still unmeasured is the cost:
+  the reading adds a 120 ms settle to every scroll. Time ten scrolls in a row and say whether that
+  is felt — if it is, I would rather shorten it against a number than against a guess.
 
 **And the older open question, for reference.** Your answer last round — list it, do
 not exclude it, and carry the difference in a field such as `focusable: false` — is the one I

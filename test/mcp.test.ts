@@ -816,7 +816,13 @@ describe('surface boundaries', () => {
     // UI-changing action goes per call. The rule was enforced and unstated, so a QA run met it as
     // a rejected call and reported the schema and the runtime as disagreeing — which they did.
     // Same trade as the paragraph above: bytes at discovery against a round trip in every run.
-    expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(12_900);
+    //
+    // Raised from 12,900 on 2026-09-01 for `move_ref`, which hovers a control by ref and presses
+    // nothing. Two independent QA runs named it as the one action genuinely missing: the only
+    // route to a named element was a click, which commits to the very thing a hover was meant to
+    // inspect first, so menus and tooltips that open under the pointer were unreachable. A whole
+    // capability for one schema line is the cheapest entry in this budget.
+    expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(13_200);
 
     // Per tool as well as per surface, so one schema cannot quietly eat the whole budget
     // while the total stays under it. `computer` is the largest by design: fourteen
@@ -847,7 +853,14 @@ describe('surface boundaries', () => {
                   // no way to give it back, so a QA run resorted to clicking the extension popup
                   // with desktop automation — the ceiling was buying a smaller schema at the
                   // price of an unreleasable session. Their descriptions are three words each.
-                  ? 5_200
+                  //
+                  // Raised again from 5,200 for `move_ref`: hovering a control by ref, which two
+                  // QA runs named as the one action genuinely missing. Without it the only route
+                  // to a named element was a click, and a click commits to the thing a hover was
+                  // meant to inspect first — menus and tooltips that open under the pointer were
+                  // simply out of reach. Coordinates are no substitute: what a hover reveals is
+                  // laid out relative to the element, so the point must be resolved at the move.
+                  ? 5_500
                   : 3_000;
       expect(bytes, `${tool.name} schema is ${bytes} bytes`).toBeLessThan(budget);
     }

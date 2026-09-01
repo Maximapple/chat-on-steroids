@@ -19,7 +19,7 @@ passed on the last run; they are the ones to do by hand when there is time, and 
    script in every page already open, and that script is the first link in the chain that tells the
    app which conversation is calling. Skipping this cost an entire run: with a multi-agent run
    parked in the past, every Desktop call was refused with `CALLER_IDENTITY_REQUIRED` before it
-   reached macOS, and all 33 checks came back unperformable.
+   reached macOS, and all 34 checks came back unperformable.
 4. Delete and recreate the Desktop connector in ChatGPT, then open a new chat. A connector keeps
    the tool list it fetched when it was made; three runs were lost to skipping this.
 
@@ -44,11 +44,35 @@ are testing somebody's working tree rather than a package, which is worth saying
 stopping for. If the command fails, the bridge is not running — say so, and note that every
 browser check below will therefore fail for that reason and not their own.
 
+Then establish which *extension* you are testing, which is a different question. Call the browser
+`status` tool — it needs no attached tab. The reply now carries `build`, a short digest of the
+driver actually running in Chrome. **Report it.** Installing a package rewrites the extension
+folder on disk, but Chrome keeps running the copy it already loaded until step 2 above is really
+done, and a run that measures the old driver while reading the new release notes reports working
+fixes as broken. That happened last round. If your `build` equals the one the previous run quoted,
+step 2 did not take: redo it, redo step 3, and start again rather than reporting the results.
+
 ## What changed since the last run
 
-**Nothing on the surface you can reach.** This build's changes are in the macOS helper — window
-matching and a new opt-in field — and none of them is exposed to you. So this run is a regression
-pass, and its whole value is in whether the last two rounds' fixes still hold under a full sweep.
+**Your last run reported `hit` and `covered` missing from `click_ref`.** They were in the source it
+was testing against, and there is no path through that code that omits them — which leaves one
+explanation: Chrome was still running the previous driver. That is why `status` now carries `build`
+and why the section above asks you to quote it before anything else. Treat last round's check 23
+verdict as unproven rather than failed.
+
+**Check 14 now answers back.** You reported a native scroll returning `Done` while the document
+stayed put, and nothing in the reply could tell that apart from a wheel the application ignored.
+The `computer` reply now carries a `scroll` object, and its load-bearing half is
+`positionBefore`/`positionAfter`/`moved`, read from the scroller itself — measured on the Mac as
+0.076 → 0.097 on one call and 0.097 → 0.119 on the next, so the readings are real and they
+compose. Quote the whole object, pass or fail. `moved: null` with `movedUnknown` means nothing
+scrollable was under the pointer, which is an answer too.
+
+It also carries `hitPid`, `hitRole` and `reachedTarget`, for the case where the wheel reaches a
+window other than the leased one — but do not go looking for that case. Measuring it showed the
+input-target fence refuses first: bringing another application in front and scrolling the leased
+window answers `INPUT_TARGET_LOST` with `no input was sent`, before any wheel exists. That is the
+correct behaviour and it is what you should see if you try it.
 
 Two things you should *not* find, because the last run reported them and both were wording rather
 than behaviour:
@@ -61,11 +85,14 @@ than behaviour:
 
 Report either only if it behaves differently from that.
 
-**Check 23 now answers the question your last run could not.** You clicked a freshly observed Bing
-result, got `ok`, and the page did not move — and nothing in the reply could tell that apart from a
-link that simply does not navigate. `click_ref` now reports `hit`, the element actually under the
-click point, and `covered` when something else is lying over the one you named. If it fails again,
-quote both: they say whether the click missed or the page ignored it.
+**`move_ref` exists now — check 41.** You named it twice as the one action genuinely missing, and
+both times you were right: the only route to a named element was a click, which commits to the very
+thing a hover was meant to inspect first.
+
+**Check 23, for the second time.** `click_ref` reports `hit`, the element actually under the click
+point, and `covered` when something else is lying over the one you named. If they are absent again
+after you have confirmed a fresh `build`, that is a real finding and a serious one. If they are
+present, quote both: they say whether the click missed or the page ignored it.
 
 **One from the last run that is still open, and needs a careful answer rather than a quick one.**
 Check 17's Tab returned `Done` twice and inserted nothing, on a run where two earlier rounds had it
@@ -176,7 +203,9 @@ need a document in it.
 
 ## D. Scrolling, dragging, keyboard
 
-14. Scroll a long document down and back up. Confirm from screenshots that it moved both times.
+14. Scroll a long document down and back up. Confirm from screenshots that it moved both times,
+    and quote the `scroll` object from each reply — it says which window received the wheel and
+    whether the scroller actually travelled.
 15. Drag a **file** in Finder from one place to another and confirm with the shell tool that the
     file actually moved. Use a path with several waypoints, not two — two points is a teleport and
     starts no drag. If you drag selected text instead, press **inside the selection**; pressing
@@ -198,7 +227,8 @@ need a document in it.
 21. `navigate` to a search engine, click the field, `type` a query, `keypress` Enter, `observe`,
     confirm results loaded.
 22. `back`, `forward`, `reload`. After each, `observe` and report the page **title**.
-23. `click_ref` an element from your latest `observe` rather than a coordinate. Confirm the effect.
+23. `click_ref` an element from your latest `observe` rather than a coordinate. Confirm the effect,
+    and quote `hit` and `covered` from the reply whether it worked or not.
 24. **The refusals.** `navigate` to `https://chatgpt.com/`, then `chrome://settings`, then
     `file:///etc/hosts`. All three must be refused and the driven tab must survive — check with
     `status`. Quote each error. **Passing means being refused.**
@@ -231,6 +261,13 @@ need a document in it.
 40. **The driven-tab band.** While a tab is under control, `status` must say
     `in driven group <N>`. After `detach` it must say no tab is under control. You do not need to
     look at the tab strip — the group is in the answer.
+41. **`move_ref` — the action you asked for twice.** It hovers a control named by ref and presses
+    nothing. Find a page with something that only appears under the pointer — a navigation menu
+    that opens on hover does nicely — `observe`, `move_ref` its ref, then `observe` again and
+    confirm the revealed controls are now in the list. Quote `hit` and `covered` from the reply.
+    Then confirm it did **not** click: whatever the control does on click must not have happened.
+    Coordinates were never a substitute here, because what a hover reveals is positioned relative
+    to the element and the point has to be resolved at the moment of the move.
 
 ## G. Robustness
 
@@ -251,7 +288,7 @@ need a document in it.
 
 **Environment** — macOS version, Mac model, Chrome version, and the `build` string from `/hello`.
 
-**Summary** — how many of the 33 checks passed, failed, or could not be run, and the three most
+**Summary** — how many of the 34 checks passed, failed, or could not be run, and the three most
 serious problems in one line each.
 
 **Check by check** — number, PASS / FAIL / NOT PERFORMABLE, whether it differs from the previous

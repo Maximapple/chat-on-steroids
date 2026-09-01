@@ -100,6 +100,7 @@ const browserActionArg = z.discriminatedUnion('type', [
   z.object({ type: z.literal('click'), x: z.number().int(), y: z.number().int(), button: mouseButtonArg.optional() }).strict().describe('Click at pixels.'),
   z.object({ type: z.literal('double_click'), x: z.number().int(), y: z.number().int() }).strict().describe('Double-click at pixels.'),
   z.object({ type: z.literal('move'), x: z.number().int(), y: z.number().int() }).strict().describe('Move the pointer.'),
+  z.object({ type: z.literal('move_ref'), ref: z.string().min(1).max(16) }).strict().describe('Hover a ref, pressing nothing.'),
   z.object({ type: z.literal('drag'), path: z.array(pointArg).min(2).max(64), button: mouseButtonArg.optional() }).strict().describe('Drag along a path.'),
   z.object({ type: z.literal('scroll'), x: z.number().int(), y: z.number().int(), scroll_x: z.number().int().optional(), scroll_y: z.number().int().optional() }).strict().describe('Scroll at a point.'),
   z.object({ type: z.literal('type'), text: z.string().max(4_000) }).strict().describe('Type into focus.'),
@@ -635,7 +636,24 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
             ? `\nVerified ${result.verification.until} in ${result.verification.elapsedMs} ms: ${result.verification.detail}.`
             : '';
           const captureFallback = result.captureFallback ? `\nCapture note: ${result.captureFallback}.` : '';
-          const done = `Done ${result.completedCount}/${parsed.length} via ${routeSummary}: ${parsed.map((a) => a.type).join(', ')}. ${pointer}${clipboard ? `\n${clipboard}` : ''}${verified}${captureFallback}`;
+          // A scroll that reports only "sent" cannot be told apart from an application ignoring
+          // the wheel — and the window server delivers a wheel to whatever is under the pointer,
+          // which need not be the leased window. So say where it landed and whether it travelled.
+          const scroll = result.scroll
+            ? `
+Scroll: ${
+                result.scroll['reachedTarget'] === false
+                  ? `the wheel went to another window (${String(result.scroll['hitRole'] ?? 'unknown role')}, pid ${String(result.scroll['hitPid'] ?? '?')}), not the one leased`
+                  : `reached the leased window (${String(result.scroll['hitRole'] ?? 'unknown role')})`
+              }; ${
+                result.scroll['moved'] === true
+                  ? `it moved, ${String(result.scroll['positionBefore'])} → ${String(result.scroll['positionAfter'])}`
+                  : result.scroll['moved'] === false
+                    ? `nothing moved, still at ${String(result.scroll['positionAfter'])}`
+                    : `whether it moved is unreadable (${String(result.scroll['movedUnknown'] ?? 'no scroller')})`
+              }.`
+            : '';
+          const done = `Done ${result.completedCount}/${parsed.length} via ${routeSummary}: ${parsed.map((a) => a.type).join(', ')}. ${pointer}${clipboard ? `\n${clipboard}` : ''}${verified}${captureFallback}${scroll}`;
           const shot = result.screenshot;
           if (shot) {
             return desktopImageResult(
