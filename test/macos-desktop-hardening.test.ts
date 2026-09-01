@@ -8,6 +8,27 @@ const computer = readFileSync(path.join(process.cwd(), 'src/main/computer/index.
 
 describe('macOS desktop safety hardening', () => {
   /**
+   * A window in motion is told it is moving, not that it has no accessibility representation.
+   *
+   * Accessibility windows are matched to screen windows by geometry when the exact id is not
+   * offered. The row is scanned at one instant and the AX bounds are read at another, so a window
+   * being dragged between the two matches nothing — the rectangles describe it at different
+   * moments. QA reached this by capturing a window while moving it and was told "no accessibility
+   * window convincingly matches", which reads as a window that has no accessibility tree at all
+   * and sends someone to check a permission that was never involved.
+   *
+   * The second read is the fix, not the message: a window that has come to rest matches on it and
+   * the caller never learns there was a race at all.
+   */
+  it('looks again with the bounds a moved window has now', () => {
+    expect(swift).toMatch(/if let fresh = windowRow\(row\.id\), fresh\.bounds != row\.bounds \{/);
+    expect(swift).toContain('"WINDOW_MOVING"');
+    expect(swift).toMatch(/WINDOW_MOVING[\s\S]{0,200}moved while its accessibility tree was being read/);
+    // And the old answer survives for the case it was actually about: no match, no movement.
+    expect(swift).toContain('no accessibility window convincingly matches window');
+  });
+
+  /**
    * A refusal to focus says which of the three facts disagreed.
    *
    * "the requested window could not be activated" is a sentence with no next step in it. QA hit

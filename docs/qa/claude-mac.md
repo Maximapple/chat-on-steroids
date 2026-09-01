@@ -31,6 +31,13 @@ That leaves the helper at `resources/packaging/desktop/darwin/arm64/macos-deskto
 speaks newline-delimited JSON on stdin and stdout; `{"op":"warm"}` is the cheapest call and its
 reply carries `screenPermission` and `accessibilityPermission`.
 
+**Two shapes for focus, and they answer different questions.** `{"op":"focus","id":N}` takes the
+window id under `id` — pass it as `window` and the helper reads 0 — and it answers only
+`focused: true|false`, never a reason. The reason comes from
+`{"op":"act","actions":[{"type":"focus","window":N}]}`, which is the path that throws
+`FOCUS_FAILED` with the clause that refused. Part 3 needs the second one; run both, since the
+first tells you whether focus succeeded at all.
+
 **Screen Recording and Accessibility must be granted to whichever application owns the terminal.**
 macOS attaches the grant to the GUI ancestor — usually `Terminal.app` or your IDE — never to
 `node`. Ask the helper for `{"op":"warm"}` and report both flags before anything else. If either
@@ -57,14 +64,23 @@ checks skip these and say why. This machine can answer them.
 npm run verify:browser -- --headed
 ```
 
-Thirty-three checks against real Chrome. The interesting one is scroll direction: a wheel event is
-only delivered to a page by a compositor that draws frames, so on a build machine the check prints
-`SKIP  scroll direction — no wheel reached the page (scrollTop=…)`. Here it should be able to
-judge it.
+Thirty-four checks against real Chrome. Scroll is the one to watch, and it has just been rebuilt
+on the strength of the last run from this machine, which found two separate things: the wheel
+event did not work at all, and the check that should have caught that printed a green SKIP over a
+swallowed timeout.
 
-Report the tally, every FAIL verbatim, and specifically **whether the scroll direction check ran or
-skipped, and what scrollTop it measured**. If it still skips on a machine with a screen, that is a
-finding in itself and worth more than the tally.
+`Input.dispatchMouseEvent` with `mouseWheel` is now only a fallback; `Input.synthesizeScrollGesture`
+is tried first, because it drives the compositor rather than posting an event into it. On a build
+machine, which had never seen a wheel event reach the page at all, the page now reports
+`wheel deltaY=294 trusted=true` — but nothing composites it, so the check says so with the numbers
+instead of pretending.
+
+Report the tally and every FAIL verbatim, and then specifically:
+
+- Did **a positive scroll_y moves the page down** pass, or print the SKIP line? On a machine with a
+  screen it should pass — that would be the first time this has ever been judged anywhere.
+- What `scrollTop` did it report before and after?
+- Did **the page sees a trusted wheel event going down** pass, and with what deltaY?
 
 **2b. The helper, running for real.**
 
@@ -91,55 +107,36 @@ plainly if they disagree.
 Repeat with the pointer moved well outside that window. The field must say `outside_region` and the
 picture must contain no pointer.
 
-## 3. Why a visible Chrome window will not take focus
+## 3. Focus — confirming an answer, not looking for one
 
-QA asked the desktop tool to focus a Chrome window that was plainly on screen and got back, after
-2083 ms — the whole of the two-second deadline, so the condition it polls never became true:
+This part was a hypothesis until the last run from this machine settled it, and settled it against
+me. `FOCUS_FAILED` was not about Chromium's accessibility tree. Chrome's main window focuses in
+every state tried — page loaded, cursor in a page text field, focus in the address bar — and
+TextEdit never refuses at all. The one thing that refuses is the **transient omnibox container**:
+a second Chrome window that appears on Cmd+L, `1402x136`, titled "Google Chrome window", which
+`{"op":"windows"}` lists like any other and which a caller can address by mistake. Press Escape and
+it disappears, and the main window focuses again.
 
-```
-FOCUS_FAILED: the requested window could not be activated
-```
+The reason given was `another window of the same application is in front` — the second reason in
+the list, not the accessibility one. Two things changed because of that:
 
-That condition wants three facts to name the same window: WindowServer z-order, the application's
-`AXFocusedWindow`, and the window owning `AXFocusedUIElement` — the focused *control*. The
-hypothesis is that the third cannot be satisfied for a Chrome window whose focus is inside web
-content, because Chromium keeps its renderer accessibility tree off until a real assistive client
-asks. That is also the stated reason the `browser` tool exists at all.
+- The reason **now names the window that is in front**, because "another window is in front" left
+  nothing to do about it, while an id can be targeted or dismissed.
+- Nothing was relaxed in the fence. It refused correctly; the caller was aimed at the wrong window.
 
-The third clause was added deliberately: accepting missing focus evidence would turn an unprovable
-keyboard destination into global physical input. So if it is wrong, it is wrong in detail, not in
-intent.
+So this part is now confirmation, and one open question.
 
-**3a. Is it Chrome, or every application?** The cheapest discriminator, so it comes first. Open
-Chrome on an ordinary page (not ChatGPT) and TextEdit with a document. For each: bring it to the
-front by hand, ask `{"op":"windows"}` and note the window id, then ask
-`{"op":"focus","window":<that id>}`. Report both answers verbatim.
+**3a. Confirm.** Open Chrome on an ordinary page. Focus its main window via
+`{"op":"act","actions":[{"type":"focus","window":<id>}]}` — it should succeed. Then press Cmd+L by
+hand, list windows again, and focus the transient container. Quote the refusal: it must now read
+`another window of the same application is in front (window N)`, with N the main window, and N must
+appear in `{"op":"windows"}`.
 
-- TextEdit focuses and Chrome does not → Chrome-specific; 3b explains it.
-- Both fail → the fault is in the fence itself; 3b still applies, the conclusion is broader.
-- Both succeed → say so. Then the failure needs a condition this does not reproduce, and the next
-  things to vary are whether the target was already frontmost and whether more than one Chrome
-  window was open.
-
-Then repeat the Chrome case twice more, because these change what `AXFocusedUIElement` is: with the
-text cursor in the page's own text field, and with focus in Chrome's address bar.
-
-**3b. Which clause refuses?** The helper says this itself — no instrumentation. The refusal reads
-`FOCUS_FAILED: the requested window could not be activated: <reason>`, where the reason is one of:
-another application is frontmost; another window of the same application is in front; the
-application's focused window is `<window N | no window this scan can attribute>`; the focused
-control belongs to `<window N | …>`; or focus moved while the window was being checked.
-
-Quote the full refusal from each case above and report: which reason appears for Chrome, whether it
-is the same in all three states, whether TextEdit refuses at all, and whether the reason names a
-window id that `{"op":"windows"}` also lists.
-
-If the reason is "the focused control belongs to no window this scan can attribute", the hypothesis
-holds. If it is one of the first two, the hypothesis is wrong and the cause is about which window
-was targeted, not about accessibility.
-
-**Do not repair anything yet.** The obvious repair relaxes a security fence, and relaxing the wrong
-one would turn an unprovable keyboard destination into global physical input.
+**3b. The open question, which is a judgement rather than a measurement.** `windows` lists that
+transient container as an ordinary window, and it is not one anybody would want to drive. Say
+whether you think it should be listed at all — and what distinguishes it, in the data the helper
+already has, from a window that should be. A wrong exclusion rule here hides real windows, so this
+is asked as a question and not as a change.
 
 ## 4. Input, at the level under the app
 
