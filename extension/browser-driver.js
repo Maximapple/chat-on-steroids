@@ -93,6 +93,13 @@ const NAVIGATE_TIMEOUT_MS = 30_000;
  * keep the ordinary deadline.
  */
 const COMPOSITOR_TIMEOUT_MS = 30_000;
+/**
+ * How long a scroll may wait before the position is read instead.
+ *
+ * Scrolling is judged by whether the page moved, so waiting the full compositor budget buys
+ * nothing: two failed attempts cost a minute of a run in which nothing happened, measured.
+ */
+const SCROLL_TIMEOUT_MS = 5_000;
 /** Upper bound on elements one observation returns, so a huge page cannot flood the model. */
 const MAX_ELEMENTS = 200;
 
@@ -1140,27 +1147,66 @@ export const browserDriver = {
          * protocol said. A page that did not move and did not answer is reported as a timeout,
          * because then nothing is known.
          */
+        const dx = Number(action.scroll_x ?? 0);
+        const dy = Number(action.scroll_y ?? 0);
         const before = await readScrollPosition(send);
+        const moveFrom = (position) =>
+          position !== null && before !== null && (position.x !== before.x || position.y !== before.y);
+
+        /*
+         * The gesture first, because the event does not work.
+         *
+         * `Input.dispatchMouseEvent` with `type: 'mouseWheel'` is accepted by Chrome 152 and then
+         * does nothing at all — measured on a Mac with a visible browser, at the viewport corner
+         * and at its centre: never acknowledged, never any movement, while `scrollBy` in the same
+         * page moved it 300 pixels. A run through the app saw the same thing, so this was broken
+         * for anyone using it and not merely unverifiable on a build machine.
+         *
+         * `Input.synthesizeScrollGesture` is the protocol's own scrolling primitive: it drives the
+         * compositor rather than posting an event into it, and with `gestureSourceType: 'mouse'`
+         * the page still sees real wheel events.
+         *
+         * Its sign convention is the opposite of the DOM's — `yDistance` is positive to scroll
+         * *up*, while a positive `deltaY` scrolls down — so it is negated here to keep the
+         * caller's convention the DOM one. Getting a scroll sign wrong by reasoning about the
+         * wrong API is exactly how every page once scrolled backwards, so the direction is
+         * asserted against a real browser in `verify:browser` rather than argued about here.
+         */
         let acknowledged = true;
         try {
-          await send('Input.dispatchMouseEvent', {
-            type: 'mouseWheel', x, y, modifiers,
-            // CDP's mouseWheel carries the DOM wheel convention, where a positive deltaY scrolls
-            // down. That is the caller's convention too, so the numbers pass through unchanged.
-            // They used to be negated, on the reasoning that applies to CoreGraphics' wheel API —
-            // where the sign really is inverted, and where the macOS helper still negates — but
-            // that reasoning was carried to the wrong protocol and scrolled every page backwards.
-            deltaX: Number(action.scroll_x ?? 0),
-            deltaY: Number(action.scroll_y ?? 0)
-          }, COMPOSITOR_TIMEOUT_MS);
+          await send('Input.synthesizeScrollGesture', {
+            x, y, xDistance: -dx, yDistance: -dy, gestureSourceType: 'mouse'
+          }, SCROLL_TIMEOUT_MS);
         } catch (error) {
           if (error?.code !== 'BROWSER_TIMEOUT') throw error;
           acknowledged = false;
         }
-        const after = await readScrollPosition(send);
-        const moved = after !== null && before !== null && (after.x !== before.x || after.y !== before.y);
+        let after = await readScrollPosition(send);
+        if (!moveFrom(after)) {
+          // The wheel event as a fallback: it is what worked before Chrome stopped acting on it,
+          // and a browser that ignores the gesture instead is not one this code has met.
+          try {
+            await send('Input.dispatchMouseEvent', {
+              type: 'mouseWheel', x, y, modifiers, deltaX: dx, deltaY: dy
+            }, SCROLL_TIMEOUT_MS);
+            acknowledged = true;
+          } catch (error) {
+            if (error?.code !== 'BROWSER_TIMEOUT') throw error;
+            acknowledged = false;
+          }
+          after = await readScrollPosition(send);
+        }
+        const moved = moveFrom(after);
+        // Not moving is not the same as not working. A page already at its end does not move, and
+        // refusing that would be wrong. What is worth refusing is knowing nothing at all: nothing
+        // acknowledged and nothing moved means the scroll may as well not have been sent.
         if (!acknowledged && !moved) {
-          throw fail('BROWSER_TIMEOUT', 'the wheel event was neither acknowledged nor did the page move');
+          throw fail(
+            'BROWSER_SCROLL_FAILED',
+            `neither a scroll gesture nor a wheel event was taken at ${x},${y}, and the page did ` +
+              'not move. Scroll over the element that actually scrolls, or observe first to see ' +
+              'where the page is.'
+          );
         }
         return { scrolled: { x, y }, moved, acknowledged };
       }
