@@ -64,5 +64,14 @@
     "typescript": "^7.0.2",
     "vite": "^7.3.6",
     "vitest": "^4.1.10"
+  },
+  "allowScripts": {
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true,
+    "node-pty@1.2.0-beta.15": true,
+    "tree-sitter@0.25.1": true,
+    "tree-sitter-bash@0.25.1": true,
+    "electron@43.4.1": true
   }
 }
