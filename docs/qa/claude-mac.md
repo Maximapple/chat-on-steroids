@@ -195,6 +195,17 @@ You answered both questions, and both answers were acted on.
   forms of the call. A window whose reading fails is reported `true` — refusing to drive something
   on a failed reading is worse than the reading's absence — and one with no element at all is
   `null`.
+- **The title tie-break is now on the focus path too**, which is what your last run showed was
+  missing. It went into `matchingAXWindow` and not into `unambiguousWindowID` — the function every
+  focus and every input target goes through — so `find_ui` could separate two identical windows
+  while any batch starting with `focus` still failed, and a focus that had *worked* was reported as
+  `FOCUS_FAILED` because the window in front could not be attributed. The ChatGPT run met the same
+  message from the other direction. Rebuild your 3b/2 case exactly — two Finder windows, same size,
+  same position, different titles — and confirm the drag now goes through on the first attempt.
+- **`focusable` says why it does not know.** When the answer is `null` there is now a
+  `focusableUnknown` beside it, reading `"ambiguous"` or `"unavailable"`. Your three identical DMG
+  windows should read `ambiguous`; a window with no accessibility representation at all reads
+  `unavailable`. One of those a caller can act on, the other not, and `null` alone said neither.
 - **Two identical windows can now be told apart by title.** The drag that cost you a run is the
   case: geometry could not separate two Finder windows of the same size at the same place, and the
   title was sitting unused in the row. Make that situation again — two Finder windows, same size,

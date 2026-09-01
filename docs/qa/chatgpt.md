@@ -61,6 +61,14 @@ than behaviour:
 
 Report either only if it behaves differently from that.
 
+**One from the last run that is still open, and needs a careful answer rather than a quick one.**
+Check 17's Tab returned `Done` twice and inserted nothing, on a run where two earlier rounds had it
+inserting a tab character correctly. I could not reproduce it from a machine without macOS, and
+nothing changed on that path between those runs. So when you reach check 17: read the document back
+through the shell **before** sending Tab as well as after, say which window was foreground at the
+moment you sent it, and say whether the caret was in the text area or somewhere else. If it fails
+again, those three facts are what tell a fix from a guess.
+
 **The two that matter most, from the round before.** Your last run failed check 33 on two
 independent pages and was right both times; my previous attempt at it treated a symptom.
 
