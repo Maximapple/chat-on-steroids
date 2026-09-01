@@ -176,8 +176,14 @@ const extensionId = [...digest.subarray(0, 16)]
   .map((nibble) => String.fromCharCode(97 + nibble))
   .join('');
 
+// Headless by default, because that is what a build machine can run. A wheel event is only
+// delivered to a page by a compositor that draws frames, and headless draws none — so the one
+// property scroll has that matters, its direction, is unjudgeable there and the check below says
+// so rather than passing. Run with --headed on a machine with a screen to actually judge it.
+const headed = process.argv.includes('--headed');
 const browser = spawn(browserPath, [
-  '--headless=new', '--disable-gpu', `--user-data-dir=${profile}`,
+  ...(headed ? [] : ['--headless=new', '--disable-gpu']),
+  `--user-data-dir=${profile}`,
   `--load-extension=${copy}`, `--remote-debugging-port=${port}`,
   '--run-all-compositor-stages-before-draw', '--disable-new-content-rendering-timeout',
   '--no-first-run', '--no-default-browser-check', `http://127.0.0.1:${pagePort}/`
@@ -472,12 +478,22 @@ try {
   })()`);
   await sleep(800);
   const wheelLog = await readPage(`document.getElementById('wheellog').textContent`);
-  if (wheelLog === 'no wheel') {
-    // Headless delivers no wheel event to the page at all, so there is nothing to read. Said
-    // out loud rather than failed: the direction is a real property and this run cannot judge
-    // it, which is different from judging it and finding it wrong.
-    console.log('SKIP  scroll direction — headless delivers no wheel event to the page');
+  // Where the page ended up is the question direction is actually about, and it can be answered
+  // even when the page's own wheel listener never fires. The two are separate facts: the listener
+  // says the event was delivered, the position says which way it took the page.
+  const scrolledTo = Number(await readPage(`document.scrollingElement.scrollTop`));
+  if (Number.isFinite(scrolledTo) && scrolledTo > 0) {
+    check('a positive scroll_y moves the page down', scrolledTo > 0, `scrollTop=${scrolledTo}`);
+  } else if (wheelLog === 'no wheel') {
+    // No listener call and no movement: nothing was delivered, so there is nothing to judge.
+    // Said out loud rather than failed — unjudgeable is not the same as judged and wrong. A
+    // compositor is what delivers a wheel event, and a build machine drives none; --headed on a
+    // machine with a screen is where this becomes answerable.
+    console.log(`SKIP  scroll direction — no wheel reached the page (scrollTop=${scrolledTo})`);
   } else {
+    check('a positive scroll_y moves the page down', false, `${wheelLog} scrollTop=${scrolledTo}`);
+  }
+  if (wheelLog !== 'no wheel') {
     check('a positive scroll_y reaches the page as a positive deltaY',
       wheelLog === 'wheel deltaY=300 trusted=true', wheelLog);
   }
