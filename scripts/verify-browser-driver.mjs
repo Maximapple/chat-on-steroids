@@ -227,6 +227,20 @@ async function attachTarget(wsUrl) {
   });
   return {
     close: () => socket.close(),
+    /** Any CDP method, so a check can report what the browser actually answered. */
+    send: (method, params = {}) =>
+      new Promise((resolve) => {
+        const message = { id: ++id, method, params };
+        const timer = setTimeout(() => {
+          waiting.delete(message.id);
+          resolve({ error: `${method} timed out` });
+        }, 30_000);
+        waiting.set(message.id, (frame) => {
+          clearTimeout(timer);
+          resolve(frame.error ? { error: JSON.stringify(frame.error) } : (frame.result ?? {}));
+        });
+        socket.send(JSON.stringify(message));
+      }),
     evaluate: (expression) =>
       new Promise((resolve) => {
         const message = {
@@ -500,7 +514,8 @@ try {
   // compositing, and a build machine drives no frames, so it cannot. Splitting them is what stops
   // this check from either failing forever on a build machine or, as it did before, printing a
   // green SKIP over a swallowed BROWSER_TIMEOUT.
-  const wheelArrived = /trusted=true/.test(wheelLog) && /deltaY=[1-9]/.test(wheelLog);
+  const wheelDelta = Number(/deltaY=(-?[\d.]+)/.exec(wheelLog)?.[1] ?? NaN);
+  const wheelArrived = /trusted=true/.test(wheelLog) && wheelDelta > 0;
   if (after > before) {
     check('a positive scroll_y moves the page down', true, `before=${before} after=${after}`);
   } else if (wheelArrived) {
@@ -515,8 +530,7 @@ try {
   // Separately: the page is told about it as a real wheel, which is what a site's own handlers
   // need. Reported rather than asserted exactly — a gesture arrives as several events, so no one
   // number is the total.
-  check('the page sees a trusted wheel event going down',
-    /trusted=true/.test(wheelLog) && /deltaY=[1-9]/.test(wheelLog), wheelLog);
+  check('the page sees a trusted wheel event going down', wheelArrived, wheelLog);
 
   /*
    * Where the *picture* says the page is, which is a different fact from where the counter says.
@@ -561,7 +575,30 @@ try {
     } else {
       // The band where the arithmetic puts it, and not where it would be if the capture had
       // ignored the scroll: that second row is what the old clip returned, whitish and wrong.
-      check('a screenshot of a scrolled page shows where the page is', isBand(at(row)),
+      const found = isBand(at(row));
+      if (!found) {
+        const metrics = await pageCdp.send('Page.getLayoutMetrics');
+        let bandRow = -1;
+        let painted = 0;
+        for (let y = 0; y < image.height; y += 1) {
+          const px = at(y);
+          if (bandRow < 0 && isBand(px)) bandRow = y;
+          if (px[0] < 240 || px[1] < 240 || px[2] < 240) painted += 1;
+        }
+        console.log(
+          `      layout metrics: ${JSON.stringify({
+            cssVisual: metrics.cssVisualViewport,
+            cssLayout: metrics.cssLayoutViewport,
+            visual: metrics.visualViewport
+          })}`
+        );
+        console.log(
+          `      the band is at image row ${bandRow} (so the capture began at document ` +
+            `${bandRow < 0 ? 'somewhere with no band in it' : 1550 - bandRow}), and ${painted} of ` +
+            `${image.height} sampled rows have anything painted in them at all`
+        );
+      }
+      check('a screenshot of a scrolled page shows where the page is', found,
         `scrollTop=${deepTop}, band expected at row ${row}, found rgb(${at(row).join(',')})`);
     }
   }
