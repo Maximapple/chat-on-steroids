@@ -641,12 +641,19 @@ private func matchingAXWindow(_ row: WindowRow, deadline suppliedDeadline: TimeI
             throw fail("UIA_TIMEOUT", "exact accessibility window matching exceeded its bounded native deadline")
         }
         guard axWindowNumber(window) == row.id else { continue }
-        // An id match is normally conclusive, but it is not proof on its own: Chrome reports the
-        // same AXWindowNumber for the transient container it opens over the omnibox as for the
-        // window beneath it. Asked about the container, this returned the main window's entire
-        // tree with ok: true — a caller clicking those elements clicks into a window it never
-        // named, and nothing warns it. Geometry is the second opinion, and here it disagrees:
-        // 1402x136 against 1728x1002.
+        // An id match is normally conclusive, and geometry is the second opinion when it is not.
+        //
+        // This was written on a wrong diagnosis and is kept on a right one. The report it came
+        // from said Chrome hands the transient panel over its omnibox the same AXWindowNumber as
+        // the window beneath, so asking about the panel returned the main window's tree. The
+        // author of that report then measured again and corrected themselves: the panel has its
+        // own accessibility window, and the wrong answer came from the request naming the window
+        // under a key the helper ignores — refused now, at the top of `handle`.
+        //
+        // What remains true without that story: an accessibility window carrying this row's id
+        // while describing a rectangle nothing like it is not this row's window, and returning
+        // its tree would be answering about something else. No application is known to do this
+        // here. The guard costs one bounds read and is kept for the case rather than the anecdote.
         guard let bounds = axBounds(window), !convincinglyMatchesWindow(bounds, row.bounds) else {
             return window
         }
@@ -1946,6 +1953,31 @@ private func capture(_ request: JSONObject, forcedWindow: CGWindowID? = nil) thr
 
 private func handle(_ request: JSONObject) throws -> JSONObject {
     let operation = string(request["op"])
+    /*
+     * A window named under the wrong key is refused, not ignored.
+     *
+     * Every operation here reads `id`. A request carrying `window` instead had that key silently
+     * dropped, and the operation then fell back to the foreground window and answered about it
+     * with ok: true. A QA run spent a whole round on that: it asked `find_ui` about a small
+     * transient panel, got the main window's entire tree back, and reasonably concluded that
+     * window matching was broken. It was not — the question had never been asked.
+     *
+     * The silence costs more than a wrong answer would, because the answer looks right. A caller
+     * that clicks the elements it gets back clicks in a window it never named. And there are
+     * three ways to name a window across this protocol — `id` here, `window` inside an `act`
+     * action, `targetWindow` on an `act` request — so getting it wrong is ordinary rather than
+     * careless.
+     *
+     * `act` is exempt: it legitimately carries `targetWindow`, and its actions carry `window`.
+     */
+    if operation != "act", request["window"] != nil {
+        throw fail(
+            "BAD_REQUEST",
+            "this request names a window under `window`, but every operation reads it under `id`. " +
+                "Nothing was done. Send `id` — `window` belongs on an action inside `act`, and " +
+                "`targetWindow` on an `act` request."
+        )
+    }
     var result: JSONObject = ["ok": true]
     switch operation {
     case "warm":
