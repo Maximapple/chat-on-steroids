@@ -97,15 +97,8 @@ export function readPNG(file) {
  * The threshold is per channel and deliberately generous: window contents can shift a shade
  * between two captures without anything meaningful having changed, and counting that as a
  * difference would put the box around the whole image and prove nothing.
- *
- * `skipTop` ignores that many rows from the top. A window's title bar repaints on its own — the
- * close and minimise buttons light up as the pointer passes anywhere near, and macOS animates
- * them — so two captures of an otherwise still window differ up there almost every time. That
- * widened the box until the caller could no longer say a difference was localised, and a run lost
- * the pointer verdict it exists to give: "the window redrew between captures". Nothing had
- * redrawn but the chrome.
  */
-export function differenceRegion(a, b, threshold = 24, skipTop = 0) {
+export function differenceRegion(a, b, threshold = 24) {
   if (a.width !== b.width || a.height !== b.height) {
     throw new Error(`sizes differ: ${a.width}x${a.height} vs ${b.width}x${b.height}`);
   }
@@ -115,7 +108,7 @@ export function differenceRegion(a, b, threshold = 24, skipTop = 0) {
   let maxY = -Infinity;
   let count = 0;
 
-  for (let y = Math.max(0, Math.floor(skipTop)); y < a.height; y += 1) {
+  for (let y = 0; y < a.height; y += 1) {
     for (let x = 0; x < a.width; x += 1) {
       const ai = (y * a.width + x) * a.channels;
       const bi = (y * b.width + x) * b.channels;
@@ -134,4 +127,51 @@ export function differenceRegion(a, b, threshold = 24, skipTop = 0) {
 
   if (count === 0) return { count: 0, box: null };
   return { count, box: { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 } };
+}
+
+/**
+ * How much changed close to a point, against how much changed everywhere else.
+ *
+ * A single bounding box around every changed pixel is the wrong measure for "did something small
+ * appear here": one flickering pixel anywhere else stretches the box across the image and the
+ * question goes unanswered. That is not hypothetical — a probe lost its pointer verdict twice, to
+ * a title bar's buttons and then to a blinking text caret, each a few dozen pixels against the
+ * pointer's hundred.
+ *
+ * Densities answer it directly and are indifferent to how many other things moved. A pointer that
+ * drew where it was put makes the neighbourhood far busier than the rest of the frame; a window
+ * that genuinely redrew makes both equally busy, and the caller can then say so honestly instead
+ * of guessing.
+ */
+export function differenceAround(a, b, cx, cy, radius = 32, threshold = 24) {
+  if (a.width !== b.width || a.height !== b.height) {
+    throw new Error(`sizes differ: ${a.width}x${a.height} vs ${b.width}x${b.height}`);
+  }
+  let near = 0;
+  let far = 0;
+  let nearArea = 0;
+
+  for (let y = 0; y < a.height; y += 1) {
+    for (let x = 0; x < a.width; x += 1) {
+      const inside = Math.abs(x - cx) <= radius && Math.abs(y - cy) <= radius;
+      if (inside) nearArea += 1;
+      const ai = (y * a.width + x) * a.channels;
+      const bi = (y * b.width + x) * b.channels;
+      const changed =
+        Math.abs(a.data[ai] - b.data[bi]) > threshold ||
+        Math.abs(a.data[ai + 1] - b.data[bi + 1]) > threshold ||
+        Math.abs(a.data[ai + 2] - b.data[bi + 2]) > threshold;
+      if (!changed) continue;
+      if (inside) near += 1;
+      else far += 1;
+    }
+  }
+
+  const farArea = Math.max(1, a.width * a.height - nearArea);
+  return {
+    near,
+    far,
+    nearDensity: near / Math.max(1, nearArea),
+    farDensity: far / farArea
+  };
 }

@@ -1,7 +1,8 @@
 # The full run — everything ChatGPT tests, without asking you anything
 
-Thirty-four checks, all of them driven by the model itself. Nothing here asks a person to look at
-a screen, click a permission, or read a window title.
+Thirty-three checks — numbered 1–25, 30–34, 37, 39 and 40 — all of them driven by the model
+itself. Nothing here asks a person to look at a screen, click a permission, or read a window title.
+(The last run counted them and found the header claiming thirty-four; it was right.)
 
 Six checks from the old script are deliberately not here: 26–29 look at the onboarding screen, and
 35, 36 and 38 need a permission switched off and back on. Chat On Steroids hides its own windows
@@ -40,22 +41,36 @@ browser check below will therefore fail for that reason and not their own.
 
 ## What changed since the last run
 
-Seven more defects were fixed on the strength of the last two runs, four of them answers that said
-`ok` while doing something else. Say for each check whether it differs from last time.
+**One defect, and it was the one you found.** Your last run failed check 33 on two independent
+pages and was right both times; my previous attempt at it treated a symptom.
 
-- **Typing lost whole sentences.** Text was sent in chunks of 32 characters, and a chunk beginning
-  with a newline had its newline delivered late and everything after it in that chunk discarded —
-  with `ok: true`. Newlines are now sent as the Return key. This is the one to watch in check 7:
-  type something multi-line and long enough to cross 32 characters.
-- **A click escaped the window it was leased to.** See check 10.
-- **`find_ui` answered about a different window** when asked about a transient panel an application
-  draws over its own window, because both carry the same accessibility id.
-- **A move that did not move said `Done`.** It now waits for the pointer and refuses by name.
-- **The pointer line named an older frame** than the picture returned with it. See check 37.
-- **A missing window is named** rather than described as an empty desktop. See check 31.
-- **`detach` says what it let go of.** See check 25.
-- `/hello` also reports `spoken`, so `compatible: false` on a plain curl can be told apart from a
-  real mismatch — a plain curl sends no protocol header and is incompatible by definition.
+- **Every screenshot of a scrolled page was wrong, not just one taken after scrolling.** A capture
+  clip is given in *document* coordinates, and the driver always asked for `y: 0` — the top of the
+  document. On a scrolled page that region has mostly never been rasterised, so it came back blank,
+  with the sliver that did overlap the viewport stranded far down the image. That is exactly what
+  you described: blank above, `MARKER 008` left at its old position. The clip now starts where the
+  viewport starts.
+
+  This had gone unseen because no check anywhere looked at a pixel of a scrolled page — the one
+  that decodes an image only compared its dimensions. There is now a check that fails on the old
+  behaviour and passes on the new one, and it was watched doing both.
+
+  **Check 33 is the one to watch, and check 20 with it**: any observation of a page that is not at
+  its top went through the same path.
+
+- Two things you reported as contract problems are fixed in the contract rather than argued with:
+  the header's check count (above), and the `computer` tool's action list, which now says in the
+  schema that only one UI-changing action goes per call. You should no longer discover that rule by
+  being rejected.
+
+- **`find_ui` is not on the surface you can see**, and you were right to say so. It is the
+  helper's own operation, tested from the Mac. Nothing in this document asks you to test it.
+
+Still worth confirming from earlier rounds: typing no longer loses text past a newline (check 7);
+a click cannot escape the window it is leased to (check 10); a move that does not move refuses by
+name; the pointer line names the frame it was handed (check 37); a missing window is named
+(check 31); `detach` says what it let go of (check 25); and `/hello` reports `spoken`, so
+`compatible: false` on a plain curl is expected rather than a mismatch.
 
 From the run before that, and still worth confirming: the window title carries the build again and
 `/hello` reports it; scrolling goes through a scroll gesture because the wheel event does nothing
@@ -75,6 +90,9 @@ survives a navigation; and letting go of a tab takes it out of the driven group.
   is the finding: report FAIL and name the action you looked for and did not find.
 - The `browser` tool has no attach action. `navigate` starts a run, taking the newest ordinary tab
   or opening one if the browser has none.
+- The `computer` tool takes **one UI-changing action per call** — click, type, key, drag and the
+  like. `focus`, `move`, `wait` and the clipboard actions are setup and may go with it. The schema
+  says so now; batching two decisions is refused before anything runs.
 - If an action would touch this conversation's own tab, stop and report it. That must be refused,
   and a refusal there is a pass.
 

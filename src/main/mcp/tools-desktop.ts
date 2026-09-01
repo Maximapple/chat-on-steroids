@@ -402,7 +402,13 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
           'One desktop decision. Prefer refs; pixels need frameId. Pointer/text needs a target; system keys stay global.',
         inputSchema: z
           .object({
-            actions: z.array(computerActionArg).min(1).max(20),
+            actions: z
+              .array(computerActionArg)
+              .min(1)
+              .max(20)
+              // Stated here rather than only in the rejection below: a run was spent discovering
+              // this rule by being refused. Kept terse — this surface has a discovery budget.
+              .describe('One UI-changing action per call; focus/move/wait/clipboard may accompany it.'),
             frameId: z
               .number()
               .int()
