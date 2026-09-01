@@ -5,7 +5,14 @@ Accessibility, a screen with a real compositor, and the packaged app as installe
 has none of those, and the repository's own suites say so out loud rather than passing — part 2
 below turns three of those skips into answers.
 
-Nothing here needs ChatGPT. Parts 1–4 do not even need the installed app; part 5 does.
+Nothing here needs ChatGPT, and nothing here needs a person: every step is a command you can run.
+Parts 1–4 do not even need the installed app; part 5 does.
+
+Since the last run from this machine, five things changed because of what it found: the window
+title carries the build again and `/hello` reports it too, scrolling goes through
+`Input.synthesizeScrollGesture` because the wheel event does nothing in Chrome 152, a window being
+moved is read a second time instead of being called inaccessible, a refused focus names the window
+in front, and the browser check that hid a hard failure behind a green SKIP no longer does.
 
 Paste everything below the line into Claude Code on the Mac.
 
@@ -126,11 +133,16 @@ the list, not the accessibility one. Two things changed because of that:
 
 So this part is now confirmation, and one open question.
 
-**3a. Confirm.** Open Chrome on an ordinary page. Focus its main window via
-`{"op":"act","actions":[{"type":"focus","window":<id>}]}` — it should succeed. Then press Cmd+L by
-hand, list windows again, and focus the transient container. Quote the refusal: it must now read
-`another window of the same application is in front (window N)`, with N the main window, and N must
-appear in `{"op":"windows"}`.
+**3a. Confirm.** Do all of this yourself; nothing here needs a person.
+
+Open Chrome on an ordinary page (`open -a "Google Chrome" https://example.com`). Focus its main
+window via `{"op":"act","actions":[{"type":"focus","window":<id>}]}` — it should succeed. Then open
+the omnibox with the helper rather than by hand:
+`{"op":"act","actions":[{"type":"focus","window":<id>},{"type":"keypress","keys":["command","l"]}]}`.
+List windows again: a second Chrome window around `1402x136` should have appeared. Focus that one
+and quote the refusal — it must read `another window of the same application is in front (window
+N)`, with N the main window, and N must appear in `{"op":"windows"}`. Send `escape` the same way to
+dismiss it, and confirm the main window focuses again.
 
 **3b. The open question, which is a judgement rather than a measurement.** `windows` lists that
 transient container as an ordinary window, and it is not one anybody would want to drive. Say
@@ -159,9 +171,28 @@ this part: a fence that fails open here types into the wrong window.
 
 Skip if no DMG is installed, and say so.
 
-**5a. Build identity.** Report the window title of Chat On Steroids. It must read
-`Chat On Steroids 2.0.2+<commit>`. Compare that commit with `git rev-parse --short HEAD` in the
-checkout. Say whether they match — much of what follows only means something if they do.
+**5a. Build identity, which was broken and is the reason this part exists.**
+
+The last run from this machine found the window title carrying no build at all: Electron replaced
+it with the document title as soon as the page loaded, so the one place a build could be read said
+nothing, and the run could not determine which app it was measuring. Two things changed.
+
+Ask the app over the loopback bridge — this is new, and it is the answer to "which build is
+running" that a command can get:
+
+```sh
+curl -s http://127.0.0.1:8765/hello
+```
+
+Report `build` verbatim. It must read `2.0.2+<commit>`; `2.0.2-dev` means a working tree rather
+than a package.
+
+Then read the window title from the helper's window list for the Chat On Steroids process. It must
+now carry the same string. **If the title is still bare `Chat On Steroids`, the fix did not take
+and that is the most important line in your report.**
+
+Compare the commit against `git rev-parse --short HEAD`. Say whether they match — much of what
+follows only means something if they do.
 
 **5b. The extension Chrome actually loaded.** The app offers an extension folder under Application
 Support. Find it, and find what Chrome has loaded (Chrome records unpacked extensions in its

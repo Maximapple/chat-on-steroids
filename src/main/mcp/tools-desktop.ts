@@ -715,7 +715,14 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
               const attached = data['attached'] === true;
               blocks.push({ observed: false, lines: [
                 attached
-                  ? `${action.type}: holding tab ${String(data['tabId'])} — ${String(data['title'] ?? '')} (${String(data['url'] ?? '')})`
+                  ? `${action.type}: holding tab ${String(data['tabId'])} — ${String(data['title'] ?? '')} ` +
+                    `(${String(data['url'] ?? '')})` +
+                    // The group is the visible claim that this tab is being driven. Saying it here
+                    // is what lets the caller check that claim instead of a person having to look
+                    // at the tab strip.
+                    (data['groupId'] === null || data['groupId'] === undefined
+                      ? ', not in a driven group'
+                      : `, in driven group ${String(data['groupId'])}`)
                   : `${action.type}: no tab is under control`
               ] });
             } else {

@@ -586,9 +586,10 @@ try {
     await driver.act({ type: 'navigate', url: 'http://127.0.0.1:${pagePort}/' });
     const held = await driver.status();
     const during = (await chrome.tabs.get(held.tabId)).groupId;
+    const reported = held.groupId;
     await driver.detach();
     const after = (await chrome.tabs.get(held.tabId)).groupId;
-    return JSON.stringify({ during, after });
+    return JSON.stringify({ during, reported, after });
   })()`);
   const bands = (() => {
     try { return JSON.parse(String(grouping.value ?? '{}')); } catch { return {}; }
@@ -596,6 +597,10 @@ try {
   check('letting go of a tab takes it back out of the driven group',
     Number.isInteger(bands.during) && bands.during !== -1 && bands.after === -1,
     grouping.value ?? grouping.error);
+  // And status says which group, so the claim the band makes can be checked by whoever is driving
+  // rather than only by a person looking at the tab strip.
+  check('status reports the group the driven tab is in',
+    bands.reported === bands.during, grouping.value ?? grouping.error);
 
   // The refusal list guards attach and navigate. A click is the third way a driven tab can
   // change page, and it went through neither: click a link and the tab lands wherever the link

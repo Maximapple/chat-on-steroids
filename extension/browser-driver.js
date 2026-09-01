@@ -771,7 +771,16 @@ export const browserDriver = {
     } catch {
       // Keep what we knew.
     }
-    return { attached: true, tabId: session.tabId, url: session.url, title: session.title };
+    // The group rides along because it is the visible claim: a blue band above the tab saying
+    // something is driving it. Reporting it makes that claim checkable by whoever is driving,
+    // instead of only by a person looking at the tab strip.
+    return {
+      attached: true,
+      tabId: session.tabId,
+      url: session.url,
+      title: session.title,
+      groupId: session.groupId ?? null
+    };
   },
 
   async attach(tabId) {
