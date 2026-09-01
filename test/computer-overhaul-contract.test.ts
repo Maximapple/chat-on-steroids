@@ -221,6 +221,34 @@ describe('the pointer never reports a position outside the image', () => {
  * A permission the user revoked in System Settings must not be able to take the app's own
  * connection down with it.
  */
+/**
+ * The window title keeps the build identity.
+ *
+ * Electron hands the renderer's document title to the window as soon as the page loads, which
+ * replaces whatever the BrowserWindow options set. So the version and commit were gone before
+ * anyone could read them: a run on macOS found the window titled plainly "Chat On Steroids", and
+ * could not determine which build it was measuring at all.
+ *
+ * That is the single thing this title exists for. Two builds with the same name and version is how
+ * a QA run once came to measure the wrong app, and the guard against it had been inert since it
+ * was written — silently, because a title that is merely wrong looks like a title.
+ *
+ * preventDefault is the load-bearing part. Setting the title again after load would hold only
+ * until the next document-title change; refusing the event keeps it for good.
+ */
+describe('the window says which build it is', () => {
+  const main = readFileSync(path.join(process.cwd(), 'src/main/index.ts'), 'utf8');
+  const html = readFileSync(path.join(process.cwd(), 'src/renderer/index.html'), 'utf8');
+
+  it('refuses the document title rather than letting it overwrite the build id', () => {
+    expect(main).toContain('title: `Chat On Steroids ${BUILD_VERSION}`');
+    expect(main).toMatch(/window\.on\('page-title-updated', \(event\) => \{\s*event\.preventDefault\(\);/);
+    // And the reason it is needed: the document carries a title of its own, which is what used to
+    // win. Leaving it there is fine — the refusal above is what decides.
+    expect(html).toMatch(/<title>/);
+  });
+});
+
 describe('startup survives a step that throws', () => {
   const main = readFileSync(path.join(process.cwd(), 'src/main/index.ts'), 'utf8');
 

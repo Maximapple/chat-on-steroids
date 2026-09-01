@@ -461,42 +461,55 @@ try {
     dragLog === 'down:true move:true up:true', dragLog);
 
   /*
-   * Scroll direction, judged by what the page is told rather than by whether it moved.
+   * Scroll direction, judged by where the page ended up.
    *
-   * A wheel event is acknowledged only once the compositor has taken it, and headless drives no
-   * frames on its own — so asserting that the page actually scrolled would be a flaky check.
-   * The sign is not flaky: CDP carries the DOM wheel convention, where a positive deltaY means
-   * scroll down, and that is what the caller means too. The driver used to negate both deltas,
-   * which scrolled every page the wrong way, and nothing here noticed.
+   * This check used to swallow the error and, when the page's wheel listener had not fired, print
+   * a SKIP blaming headless — leaving the tally green. A run on a Mac with a visible browser
+   * proved that wrong twice over: it still skipped, and underneath it a BROWSER_TIMEOUT was being
+   * caught and discarded. A check that turns a hard failure into "not judgeable" and keeps the
+   * total green is worse than no check, because it manufactures confidence.
+   *
+   * So the error is not swallowed, and the judgement is the scroll position: a positive scroll_y
+   * must leave the page further down than it started. The sign is the part worth guarding — the
+   * driver once negated both deltas and scrolled every page backwards, and nothing noticed.
    */
-  // Deliberately not through act(): the wheel command is acknowledged only once the compositor
-  // has taken it, and headless drives no frames, so it times out. The page is told about the
-  // event either way, and the page is what this asks.
-  await run(`(async () => {
-    try { await globalThis.__driver.browserDriver.act(${JSON.stringify({ type: 'scroll', x: 0, y: 0, scroll_y: 300 })}); }
-    catch { /* the acknowledgement is a compositor property, not a direction one */ }
+  const before = Number(await readPage(`document.scrollingElement.scrollTop`));
+  const scrolled = await run(`(async () => {
+    try {
+      await globalThis.__driver.browserDriver.act({ type: 'scroll', x: 400, y: 300, scroll_y: 300 });
+      return 'ok';
+    } catch (error) { return (error.code || '') + ': ' + error.message; }
   })()`);
-  await sleep(800);
-  const wheelLog = await readPage(`document.getElementById('wheellog').textContent`);
-  // Where the page ended up is the question direction is actually about, and it can be answered
-  // even when the page's own wheel listener never fires. The two are separate facts: the listener
-  // says the event was delivered, the position says which way it took the page.
-  const scrolledTo = Number(await readPage(`document.scrollingElement.scrollTop`));
-  if (Number.isFinite(scrolledTo) && scrolledTo > 0) {
-    check('a positive scroll_y moves the page down', scrolledTo > 0, `scrollTop=${scrolledTo}`);
-  } else if (wheelLog === 'no wheel') {
-    // No listener call and no movement: nothing was delivered, so there is nothing to judge.
-    // Said out loud rather than failed — unjudgeable is not the same as judged and wrong. A
-    // compositor is what delivers a wheel event, and a build machine drives none; --headed on a
-    // machine with a screen is where this becomes answerable.
-    console.log(`SKIP  scroll direction — no wheel reached the page (scrollTop=${scrolledTo})`);
+  await sleep(700);
+  const after = Number(await readPage(`document.scrollingElement.scrollTop`));
+  const wheelLog = String(await readPage(`document.getElementById('wheellog').textContent`));
+  // Two different facts, and only one of them is judgeable everywhere. That the page was told, in
+  // the right direction, is delivery — this machine can decide it. That the page then moved is
+  // compositing, and a build machine drives no frames, so it cannot. Splitting them is what stops
+  // this check from either failing forever on a build machine or, as it did before, printing a
+  // green SKIP over a swallowed BROWSER_TIMEOUT.
+  const wheelArrived = /trusted=true/.test(wheelLog) && /deltaY=[1-9]/.test(wheelLog);
+  if (after > before) {
+    check('a positive scroll_y moves the page down', true, `before=${before} after=${after}`);
+  } else if (wheelArrived) {
+    console.log(
+      `SKIP  the page moving — a trusted wheel arrived going down (${wheelLog}) but nothing ` +
+        `composited it (scrollTop ${before}→${after}). Only a machine with a screen can judge this.`
+    );
   } else {
-    check('a positive scroll_y moves the page down', false, `${wheelLog} scrollTop=${scrolledTo}`);
+    check('a positive scroll_y moves the page down', false,
+      `before=${before} after=${after} wheel=${wheelLog} act=${scrolled.value ?? scrolled.error}`);
   }
-  if (wheelLog !== 'no wheel') {
-    check('a positive scroll_y reaches the page as a positive deltaY',
-      wheelLog === 'wheel deltaY=300 trusted=true', wheelLog);
-  }
+  // Separately: the page is told about it as a real wheel, which is what a site's own handlers
+  // need. Reported rather than asserted exactly — a gesture arrives as several events, so no one
+  // number is the total.
+  check('the page sees a trusted wheel event going down',
+    /trusted=true/.test(wheelLog) && /deltaY=[1-9]/.test(wheelLog), wheelLog);
+
+  // Back to the top, so the checks after this one see the page where they expect it.
+  await run(`(async () => {
+    try { await globalThis.__driver.browserDriver.act({ type: 'scroll', x: 400, y: 300, scroll_y: -600 }); } catch {}
+  })()`);
 
   // Navigation, and the history either side of it. back must return the document that was
   // there before, not merely change the url.

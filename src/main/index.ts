@@ -105,6 +105,26 @@ function createWindow(): void {
     }
   });
 
+  /*
+   * Keep the title the app chose, not the document's.
+   *
+   * Electron hands the renderer's <title> to the window as soon as the page loads, which
+   * replaces the option set above — so the build identity was gone before anyone could read it.
+   * Measured on macOS against a package built from a known commit: the window read
+   * "Chat On Steroids", no version, no commit, and every attempt to check which build was running
+   * came back with nothing.
+   *
+   * That is the one thing this title exists to say. Two builds with the same name and version is
+   * how a QA run came to measure the wrong app, and the protection against it had been inert the
+   * whole time — silently, which is why it took a run that went looking to find it.
+   *
+   * Refusing the event is what keeps it: without preventDefault Electron overwrites the title on
+   * every document-title change, so setting it once after load would only last until the next one.
+   */
+  window.on('page-title-updated', (event) => {
+    event.preventDefault();
+  });
+
   window.once('ready-to-show', () => {
     // A renderer can finish loading after Cmd+Q has already entered bounded teardown. Never let
     // that late native event make the app visible again while `will-quit` is draining.
