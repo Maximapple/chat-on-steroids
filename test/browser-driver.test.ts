@@ -191,7 +191,12 @@ describe('permissions are opt-in', () => {
     // A capture answers when a frame is produced; a wheel event when the compositor has taken
     // it. Both were measured stalling past ten seconds on an idle tab in a real browser.
     expect(driver).toMatch(/Page\.captureScreenshot[\s\S]{0,220}COMPOSITOR_TIMEOUT_MS/);
-    expect(driver).toMatch(/type: 'mouseWheel'[\s\S]{0,700}COMPOSITOR_TIMEOUT_MS/);
+    // Scrolling has its own, shorter budget. It is judged by where the page ended up rather than
+    // by an acknowledgement, so waiting the full compositor deadline buys nothing — two failed
+    // attempts cost a minute of a run in which nothing happened, measured on a Mac.
+    expect(driver).toContain('const SCROLL_TIMEOUT_MS = 5_000;');
+    expect(driver).toMatch(/Input\.synthesizeScrollGesture[\s\S]{0,200}SCROLL_TIMEOUT_MS/);
+    expect(driver).toMatch(/type: 'mouseWheel'[\s\S]{0,200}SCROLL_TIMEOUT_MS/);
     // Clicks and keystrokes are acknowledged directly and keep the ordinary deadline, which
     // still exists: an unbounded wait is how a stuck tab becomes a stuck tool call.
     expect(driver).toContain('const COMMAND_TIMEOUT_MS = 15_000;');
@@ -491,10 +496,24 @@ describe('the browser driver scrolls the way the caller asked', () => {
   const driver = readFileSync(path.join(process.cwd(), 'extension/browser-driver.js'), 'utf8');
   const swift = readFileSync(path.join(process.cwd(), 'native/macos-desktop-helper/main.swift'), 'utf8');
 
-  it('passes wheel deltas through to CDP without negating them', () => {
-    expect(driver).toContain('deltaX: Number(action.scroll_x ?? 0)');
-    expect(driver).toContain('deltaY: Number(action.scroll_y ?? 0)');
-    expect(driver).not.toContain('deltaY: -Number(action.scroll_y ?? 0)');
+  /**
+   * Two protocols, two conventions, and the caller only ever means the DOM one.
+   *
+   * `Input.dispatchMouseEvent` carries the DOM convention: a positive deltaY scrolls down, so the
+   * caller's numbers pass through untouched. `Input.synthesizeScrollGesture` is the opposite —
+   * `yDistance` is positive to scroll *up* — so those are negated. Both appear in the same
+   * function, which is exactly the shape that produced the original bug: the macOS helper's
+   * inversion was carried to CDP by reasoning rather than measurement, and every page scrolled
+   * backwards.
+   *
+   * These assertions pin the pairing. The direction itself is proven in `verify:browser` against
+   * a real browser, because that is the only thing that can actually settle it.
+   */
+  it('negates for the gesture and not for the wheel, which disagree about the sign', () => {
+    expect(driver).toMatch(/synthesizeScrollGesture[\s\S]{0,120}xDistance: -dx, yDistance: -dy/);
+    expect(driver).toMatch(/type: 'mouseWheel'[\s\S]{0,80}deltaX: dx, deltaY: dy/);
+    expect(driver).not.toMatch(/deltaY: -dy/);
+    expect(driver).not.toMatch(/yDistance: dy/);
   });
 
   it('still negates for CoreGraphics, which really is inverted', () => {
