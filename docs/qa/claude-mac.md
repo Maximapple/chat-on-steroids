@@ -141,8 +141,15 @@ the omnibox with the helper rather than by hand:
 `{"op":"act","actions":[{"type":"focus","window":<id>},{"type":"keypress","keys":["command","l"]}]}`.
 List windows again: a second Chrome window around `1402x136` should have appeared. Focus that one
 and quote the refusal — it must read `another window of the same application is in front (window
-N)`, with N the main window, and N must appear in `{"op":"windows"}`. Send `escape` the same way to
-dismiss it, and confirm the main window focuses again.
+N)`, with N the main window, and N must appear in `{"op":"windows"}`. Then dismiss it with a batch
+that focuses the main window first, since a keystroke on its own is refused:
+`{"op":"act","actions":[{"type":"focus","window":<main>},{"type":"keypress","keys":["escape"]}]}`.
+
+**Then ask `find_ui` about the container.** It used to answer with the *main* window's tree and
+`ok: true`, because Chrome gives both windows the same accessibility id — so a caller clicking
+those elements clicked into a window it never named. It must now refuse with `UIA_NO_OWN_WINDOW`,
+naming both sizes. A snapshot of that same window should still return its picture, with the
+controls reported unavailable rather than the whole call failing. Check both.
 
 **3b. The open question, which is a judgement rather than a measurement.** `windows` lists that
 transient container as an ordinary window, and it is not one anybody would want to drive. Say
@@ -153,6 +160,11 @@ is asked as a question and not as a change.
 ## 4. Input, at the level under the app
 
 Still driving the helper directly, so a failure here is the helper's and not the app's.
+
+**Three call shapes the last run had to discover by hitting them.** `drag` takes `xs` and `ys`,
+not `path`. `targetWindow` belongs on the request, beside `actions` — putting `window` on the
+action leases nothing and you get `INPUT_TARGET_REQUIRED`. And a keystroke needs a window, so put
+`{"type":"focus","window":N}` first in the same batch.
 
 **4a. A drag that moves something.** Put a file and a target folder in one Finder window. Ask the
 helper to drag the file onto the folder — a `{"op":"act","actions":[…]}` batch with a `drag` whose

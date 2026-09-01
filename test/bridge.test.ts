@@ -329,8 +329,12 @@ describe('who is allowed to talk to it', () => {
     expect(reply.body.paired).toBe(false);
     // Identification must not double as a status leak: the list is exact, so nothing about what
     // the app is currently doing can be added here without this failing first.
+    // `spoken` is what the caller claimed, so a false `compatible` can be told apart from a real
+    // mismatch: a request with no protocol header is incompatible by definition, and a QA run read
+    // that as a fault on a healthy build. null here means the caller said nothing.
+    expect(reply.body.spoken).toBe(BRIDGE_PROTOCOL);
     expect(Object.keys(reply.body)).toEqual(
-      ['app', 'version', 'build', 'bridge', 'compatible', 'paired', 'disconnected']
+      ['app', 'version', 'build', 'bridge', 'compatible', 'spoken', 'paired', 'disconnected']
     );
     expect(reply.body.disconnected).toBe(false);
     expect(reply.body.compatible).toBe(true);
