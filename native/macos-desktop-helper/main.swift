@@ -437,14 +437,35 @@ private func axPID(_ element: AXUIElement) -> pid_t? {
     return AXUIElementGetPid(element, &pid) == .success ? pid : nil
 }
 
-private func unambiguousWindowID(bounds: CGRect, pid: pid_t, rows: [WindowRow]) -> CGWindowID? {
+/**
+ * Which listed window an accessibility window is, when the id it should carry does not exist.
+ *
+ * `title` is not optional decoration; leaving it out is what made the previous round's fix useless
+ * in practice. The title tie-break went into `matchingAXWindow`, which turns a row into an element,
+ * and not into this, which turns an element back into a row — and every focus and every input
+ * target goes through here. So `find_ui` could tell two identical windows apart while any batch
+ * beginning with `focus` still failed, and a focus that had actually worked was reported as
+ * FOCUS_FAILED because the window that came to the front could not be attributed. Two independent
+ * QA runs met that same message from opposite directions.
+ */
+private func unambiguousWindowID(
+    bounds: CGRect,
+    pid: pid_t,
+    rows: [WindowRow],
+    title: String? = nil
+) -> CGWindowID? {
     let candidates = rows
         .filter { $0.pid == pid && convincinglyMatchesWindow(bounds, $0.bounds) }
-        .map { (id: $0.id, distance: windowGeometryDistance(bounds, $0.bounds)) }
+        .map { (id: $0.id, title: $0.title, distance: windowGeometryDistance(bounds, $0.bounds)) }
         .sorted { $0.distance < $1.distance }
     guard let winner = candidates.first else { return nil }
-    if candidates.count > 1, candidates[1].distance - winner.distance < 32 { return nil }
-    return winner.id
+    guard candidates.count > 1, candidates[1].distance - winner.distance < 32 else { return winner.id }
+    // Geometry cannot separate them. The title often can, and it is already here.
+    if let title, !title.isEmpty {
+        let titled = candidates.filter { $0.title == title }
+        if titled.count == 1 { return titled[0].id }
+    }
+    return nil
 }
 
 private func owningAXWindowID(
@@ -465,7 +486,8 @@ private func owningAXWindowID(
                 return unambiguousWindowID(
                     bounds: bounds,
                     pid: pid,
-                    rows: suppliedRows ?? allWindowRows(includeMinimized: false)
+                    rows: suppliedRows ?? allWindowRows(includeMinimized: false),
+                    title: axString(window, kAXTitleAttribute as CFString)
                 )
             }
         }
@@ -481,7 +503,12 @@ private func focusedAXWindowID(for pid: pid_t, rows suppliedRows: [WindowRow]? =
     if let exact = axWindowNumber(focused) { return exact }
     guard let bounds = axBounds(focused) else { return nil }
     let rows = suppliedRows ?? allWindowRows(includeMinimized: false)
-    return unambiguousWindowID(bounds: bounds, pid: pid, rows: rows)
+    return unambiguousWindowID(
+        bounds: bounds,
+        pid: pid,
+        rows: rows,
+        title: axString(focused, kAXTitleAttribute as CFString)
+    )
 }
 
 private func focusedAXElementWindowID(for pid: pid_t, rows suppliedRows: [WindowRow]? = nil) -> CGWindowID? {
@@ -742,8 +769,9 @@ private func matchingAXWindow(_ row: WindowRow, deadline suppliedDeadline: TimeI
         throw fail(
             "UIA_FAILED",
             "window \(row.id) cannot be told apart from another window of the same application: " +
-                "\(described). Nothing was done. Move or close one of them, or name a window whose " +
-                "position or title differs."
+                "\(described). Nothing was done. Nothing here can address them apart either — a focus " +
+                "would meet the same ambiguity — so move or close one of them from the application " +
+                "itself, then ask again."
         )
     }
     return winner.element
@@ -2049,15 +2077,25 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
         if request["focusable"] as? Bool == true {
             result["windows"] = rows.map { row -> JSONObject in
                 var entry = row.json(foreground: foreground)
-                if let window = try? matchingAXWindow(row) {
+                do {
+                    let window = try matchingAXWindow(row)
                     var settable = DarwinBoolean(false)
                     let status = AXUIElementIsAttributeSettable(window, kAXMainAttribute as CFString, &settable)
                     // A window whose answer cannot be read is reported focusable: refusing to
                     // drive something on a failed reading would be worse than the reading's absence.
                     entry["focusable"] = status == .success ? settable.boolValue : true
-                } else {
-                    // No accessibility grant, or no element to ask. Say nothing rather than guess.
+                } catch {
+                    /*
+                     * `null` alone was two different answers wearing one hat. It was documented as
+                     * "no element to ask", but a `try?` was also swallowing the named refusal for
+                     * windows this scan cannot tell apart — and those two call for opposite things
+                     * from the caller. Nothing can be done about an application that exposes no
+                     * accessibility window; moving or closing one of three identical windows takes
+                     * a moment. So the reason rides alongside, and only when there is one.
+                     */
                     entry["focusable"] = NSNull()
+                    entry["focusableUnknown"] =
+                        (error as? HelperFailure)?.code == "UIA_FAILED" ? "ambiguous" : "unavailable"
                 }
                 return entry
             }
