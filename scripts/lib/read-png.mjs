@@ -97,8 +97,15 @@ export function readPNG(file) {
  * The threshold is per channel and deliberately generous: window contents can shift a shade
  * between two captures without anything meaningful having changed, and counting that as a
  * difference would put the box around the whole image and prove nothing.
+ *
+ * `skipTop` ignores that many rows from the top. A window's title bar repaints on its own — the
+ * close and minimise buttons light up as the pointer passes anywhere near, and macOS animates
+ * them — so two captures of an otherwise still window differ up there almost every time. That
+ * widened the box until the caller could no longer say a difference was localised, and a run lost
+ * the pointer verdict it exists to give: "the window redrew between captures". Nothing had
+ * redrawn but the chrome.
  */
-export function differenceRegion(a, b, threshold = 24) {
+export function differenceRegion(a, b, threshold = 24, skipTop = 0) {
   if (a.width !== b.width || a.height !== b.height) {
     throw new Error(`sizes differ: ${a.width}x${a.height} vs ${b.width}x${b.height}`);
   }
@@ -108,7 +115,7 @@ export function differenceRegion(a, b, threshold = 24) {
   let maxY = -Infinity;
   let count = 0;
 
-  for (let y = 0; y < a.height; y += 1) {
+  for (let y = Math.max(0, Math.floor(skipTop)); y < a.height; y += 1) {
     for (let x = 0; x < a.width; x += 1) {
       const ai = (y * a.width + x) * a.channels;
       const bi = (y * b.width + x) * b.channels;
