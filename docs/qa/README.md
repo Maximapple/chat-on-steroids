@@ -1,37 +1,50 @@
-# QA — alles an einem Ort
+# QA — zwei Dokumente, mehr nicht
 
-## Anleitung
-
-**[ANLEITUNG.md](ANLEITUNG.md)** — sieben Schritte, von oben nach unten. Hier anfangen.
-
-## Die beiden QA-Dokumente
-
-| Datei | wofür | wohin damit |
+| Wer | Was | Datei |
 |---|---|---|
-| [chatgpt-desktop-qa-prompt.md](chatgpt-desktop-qa-prompt.md) | 32 Prüfungen für Desktop-Steuerung und Chrome-Erweiterung | in ChatGPT einfügen, mit verbundenen Desktop- und Core-Apps |
-| [claude-on-mac-start-here.md](claude-on-mac-start-here.md) | die automatischen Prüfungen | in `claude` auf dem Mac einfügen |
+| **ChatGPT** | zwölf Prüfungen: Browsersteuerung (18–25, 33–34) und die beiden, die zuletzt fehlschlugen (11, 38) | [chatgpt.md](chatgpt.md) |
+| **Claude Code auf dem Mac** | eine Messung: warum ein sichtbares Chrome-Fenster nicht fokussiert wird | [claude-mac.md](claude-mac.md) |
 
-Berichte danach nach **[reports/](reports/)** — dort steht, was mit ihnen passiert.
+Vorher waren es sechs Dokumente, von denen vier überholt waren. Sie stehen in der Git-Historie,
+darunter das vollständige 38-Punkte-Skript, falls je wieder ein kompletter Durchlauf gebraucht
+wird.
 
-## Das DMG
+## Vorbereitung, nur für ChatGPT
 
-Nicht in diesem Ordner: die Datei ist 141 MB, und GitHub weist jeden Push über 100 MB ab.
-Sie liegt unter **[Releases](../../releases)**, zusammen mit der Prüfsumme.
+Claude Code braucht nichts davon — das Dokument baut den Helfer selbst.
 
-Falls dort nichts zu sehen ist, ist das Release noch ein **Entwurf** — Entwürfe sieht nur, wer
-Schreibrechte am Repository hat. Auf der Releases-Seite steht dann `Draft` daneben, und ein Klick
-auf **Publish release** macht es öffentlich.
+1. **DMG installieren.** Der Fenstertitel muss `Chat On Steroids 2.0.2+<commit>` lauten, mit dem
+   Commit aus den Release-Notizen. Fehlt der Teil hinter dem `+`, läuft eine ältere App und
+   Testen ist sinnlos.
+2. **Berechtigungen erteilen** — Systemeinstellungen → Datenschutz & Sicherheit →
+   Bildschirmaufnahme und Bedienungshilfen, beide für Chat On Steroids. Danach die App komplett
+   beenden (Cmd+Q) und neu starten: macOS merkt sich die Antwort pro Prozess.
+3. **Erweiterung laden und neu laden.** In der App auf *Open extension folder*, in Chrome unter
+   `chrome://extensions` den Entwicklermodus einschalten und den Ordner laden. War sie schon da,
+   **Reload drücken** — der Treiber steckt in der Erweiterung, nicht in der App, ein neues Paket
+   allein ändert in Chrome also nichts.
+4. **Prüfen, dass drei Werkzeuge da sind.** Home → Health → Run checks muss
+   `Local server … offers 3 tools: browser, computer, observe` zeigen. Stehen dort zwei, ist die
+   Erweiterung nicht verbunden.
+5. **Desktop-Connector in ChatGPT löschen und neu anlegen, dann neuen Chat öffnen.** Ein Connector
+   behält die Werkzeugliste, die er beim Anlegen geholt hat, ein Chat die, die er beim Öffnen
+   geladen hat. Dieser Schritt fehlte in drei verlorenen Durchläufen.
 
-Der zweite Weg, immer verfügbar: der Actions-Tab. Jeder grüne **Release candidate**-Lauf hängt
-`package-macos-arm64` als Artefakt an, gültig 30 Tage. Oder im Terminal:
+## Berichte
+
+Beide Ausgaben vollständig kopieren, nichts kürzen, Fehlermeldungen wortgetreu lassen, und als
+Datei unter `reports/` ablegen:
 
 ```sh
-gh run download --repo Maximapple/chat-on-steroids -n package-macos-arm64
+git add docs/qa/reports && git commit -m "QA reports" && git push
 ```
 
-## Kontext, falls jemand fragt warum
+## Zwei Fallen
 
-- [../macos-qa-runbook.md](../macos-qa-runbook.md) — was nur ein Mac beantworten kann, und die
-  Tabelle, die jeden `pointer=`-Wert in ein Urteil übersetzt
-- [../extension-parity.md](../extension-parity.md) — wie unsere Browsersteuerung gegen ChatGPTs
-  eigene Erweiterung abschneidet
+**Prüfung 24 ist bestanden, wenn sie abgelehnt wird.** Das Steuern der eigenen ChatGPT-Registerkarte,
+`chrome://` und `file://` müssen verweigert werden. Steht das als Fehlschlag im Bericht, nicht
+reparieren lassen.
+
+**Wenn alle Mauszeiger-Prüfungen bestanden sind, einmal selbst nachsehen.** Genau das wurde schon
+einmal behauptet und war falsch. Fenster-Bildschirmfoto mit der Maus mitten im Fenster, ist der
+Pfeil im Bild — ja oder nein.
