@@ -263,7 +263,14 @@ describe('Codex unified exec runtime parity', () => {
       shellType: process.platform === 'win32' ? 'powershell' : 'bash',
       hookCommand: 'pipe exit-code parity child',
       processId,
-      yieldTimeMs: 250,
+      // Long enough for the child to finish, because finishing is the premise rather than the
+      // claim: this asserts that a *completed* command yields a null process id, its exit code and
+      // both streams. At 250 ms it was betting that PowerShell and node start that fast, and on a
+      // loaded Windows-on-ARM machine they do not — the run then handed back a process id, which
+      // is the correct answer to a command that has not finished, and the test read it as a
+      // regression. The neighbouring cases keep their short windows: they are the ones proving
+      // that an unfinished command *does* come back with an id.
+      yieldTimeMs: 10_000,
       maxOutputTokens: undefined,
       truncationPolicy,
       cwd: process.cwd(),
