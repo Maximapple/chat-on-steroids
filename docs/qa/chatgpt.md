@@ -40,21 +40,29 @@ browser check below will therefore fail for that reason and not their own.
 
 ## What changed since the last run
 
-Nine defects were fixed between runs. Say for each check whether it differs from last time.
+Seven more defects were fixed on the strength of the last two runs, four of them answers that said
+`ok` while doing something else. Say for each check whether it differs from last time.
 
-- **The window title carried no build identity at all.** Electron replaced it with the document
-  title as soon as the page loaded, so the one place a build could be identified said nothing. It
-  is fixed, and `/hello` now carries the build too — which is why the step above is a command and
-  not a question.
-- **Scrolling did not work.** `Input.dispatchMouseEvent` with `mouseWheel` is accepted by Chrome
-  152 and acted on by nothing. `Input.synthesizeScrollGesture` replaces it.
-- **A window being moved reported that it had no accessibility representation.** It is read a
-  second time now, and told it is moving if it still is.
-- **A refused focus now names the window that is in front**, rather than only that one is.
-- navigate opens a page when none is open; status says where the driver is now; an unreadable
-  address is refused; a driven tab that lands on a refused page is let go of; the pointer overlay
-  survives a navigation; letting go of a tab takes it out of the driven group, and status reports
-  that group.
+- **Typing lost whole sentences.** Text was sent in chunks of 32 characters, and a chunk beginning
+  with a newline had its newline delivered late and everything after it in that chunk discarded —
+  with `ok: true`. Newlines are now sent as the Return key. This is the one to watch in check 7:
+  type something multi-line and long enough to cross 32 characters.
+- **A click escaped the window it was leased to.** See check 10.
+- **`find_ui` answered about a different window** when asked about a transient panel an application
+  draws over its own window, because both carry the same accessibility id.
+- **A move that did not move said `Done`.** It now waits for the pointer and refuses by name.
+- **The pointer line named an older frame** than the picture returned with it. See check 37.
+- **A missing window is named** rather than described as an empty desktop. See check 31.
+- **`detach` says what it let go of.** See check 25.
+- `/hello` also reports `spoken`, so `compatible: false` on a plain curl can be told apart from a
+  real mismatch — a plain curl sends no protocol header and is incompatible by definition.
+
+From the run before that, and still worth confirming: the window title carries the build again and
+`/hello` reports it; scrolling goes through a scroll gesture because the wheel event does nothing
+in Chrome 152; a window being moved is read a second time; a refused focus names the window in
+front; navigate opens a page when none is open; status says where the driver is now; an unreadable
+address is refused; a driven tab that lands on a refused page is let go of; the pointer overlay
+survives a navigation; and letting go of a tab takes it out of the driven group.
 
 ## Rules
 
