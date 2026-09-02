@@ -29,6 +29,19 @@ describe('a browser answer carries what the driver answered', () => {
     expect(lines[0]).toContain('covered=false');
   });
 
+  it('says when a click opened a new ordinary tab', () => {
+    // QA check 45: a target="_blank" click succeeded, but status kept naming only the original
+    // tab and nothing in the click's own answer said a second tab now existed. createdTab is
+    // driver-supplied, generic-field passthrough; this proves the renderer actually surfaces it.
+    const { lines } = renderBrowserAction('click_ref', {
+      clicked: { x: 12, y: 34 },
+      hit: 'a#newTab',
+      covered: false,
+      createdTab: { tabId: 99, url: 'https://example.com/new', title: 'New tab' }
+    });
+    expect(lines[0]).toContain('createdTab={"tabId":99,"url":"https://example.com/new","title":"New tab"}');
+  });
+
   it('carries a field nobody has thought of yet', () => {
     // The point of reading the answer rather than listing its fields: this test passes without
     // anyone editing the renderer, which is exactly what did not happen for hit and covered.
