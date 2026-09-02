@@ -35,14 +35,22 @@ real findings of its own, both now addressed.**
   now searches a few common install locations before giving up, and says plainly if it still can't
   find one, instead of the bare `exec: node: not found` that read as a git problem.
 
-**Two things from that run this document is not asking you to chase.** `maxResults` clamps hard at
-100 with no way past it except an already-known `query` — you hit this exploring the app's own
-Setup tree, which has more than 100 elements and no way to page through them blind. And
-`docs/qa/reports/2026-09-02-chatgpt-735c269.md`, the other half of that same round, found checks
-33/45/46 either still failing or newly regressed on its own ad-hoc fixture, against a browser-driver
-fix that is independently verified correct here (`verify:browser`, 43/43, both headless elsewhere
-and headed on this machine) — neither is Swift, and neither has a clear enough repro yet to act on
-blind. Read that file if you want the detail; nothing below asks about either.
+**One thing from that run this document is still not asking you to chase.** `maxResults` clamps
+hard at 100 with no way past it except an already-known `query` — you hit this exploring the
+app's own Setup tree, which has more than 100 elements and no way to page through them blind.
+
+**Checks 33/45/46, from `docs/qa/reports/2026-09-02-chatgpt-735c269.md`, are settled — not by
+another blind run, but by your own instrumented A/B.** You added `_debug` to the scroll hit test
+and drove the same fixture, same point, same element, foregrounded against backgrounded: 388 ms
+and correct versus 7275 ms and `moved: false`, with the strip's `scrollLeft` landing on *double*
+the requested distance the instant the tab was reactivated — Chrome deferring the compositor
+work rather than dropping it. `createdTab` shared the cause: a link opened from a backgrounded
+tab gets a new tab whose `openerTabId` names whichever tab is active, not the one that clicked —
+5/5 foregrounded, 0/5 backgrounded, ten runs, no exceptions. Both are now fixed at that source:
+the driver activates the driven tab, and waits for `visibilityState: "visible"`, before a scroll
+or a click. Nothing here to re-test — this was extension/MCP work, not Swift — but
+`scripts/diag-scroll46.mjs` and the temporary `_debug` fields are still in the tree on purpose,
+for whoever runs the next full round to confirm against before they come out.
 
 **Two UX opinions from your own "wie ich den Kasten beurteile" section, worth keeping in view but
 not asked as checks below.** The Permissions box scrolls without showing it — six rows exist,
