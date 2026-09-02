@@ -8,40 +8,38 @@ below turns three of those skips into answers.
 Nothing here needs ChatGPT, and nothing here needs a person: every step is a command you can run.
 Parts 1–4 do not even need the installed app; part 5 does.
 
-**This round is a Swift-only round, and that makes this machine the only place any of it can be
-proven.** Your last full run (the 47-check English report plus the six-part German one, both dated
-2026-09-02 against `b441aa4`) found six real defects and two things worth a UX opinion. All eight
-are addressed in `native/macos-desktop-helper/main.swift`, `extension/browser-driver.js`,
-`src/main/connection.ts`, `src/main/mcp/kernel.ts` and the Setup renderer — but the Swift half was
-written and reasoned about on a machine with no `swiftc` at all. `npm run desktop:mac` is therefore
-the single most important command in this document this round: it is the first time any of that
-diff has been asked to compile. If it does not, everything after it is moot — say so immediately
-and quote the compiler's own message rather than working around it.
+**This round mixes a renderer fix with a Swift one, and only the Swift half needs this machine to
+prove it.** Your last full run (the six-part German report, dated 2026-09-02 against `ff8c161`)
+is the one this addresses. Two real defects from it are fixed; the rest stands exactly as you left
+it, because neither can be investigated without this machine.
 
-**Teil 5c, "verification wird stillschweigend verworfen".** You found that the helper's `act`
-silently dropped any top-level key it did not recognize — `verification`, `quatschSchluessel`,
-anything — and still answered `ok: true`. That was fixed once before for the specific case of
-`window`; your run showed the rule needed to be general, not per-key. It now rejects any key `act`
-does not have with `BAD_REQUEST`, naming the key. Section 5c below asks for exactly the case you
-found: send `verification` (a real field, but one this helper has never implemented — it is turned
-into ordinary `find_ui`/`get_window_state` polling one layer up, in the app) straight to the
-helper's `act` and confirm it is now refused rather than quietly ignored.
+**"Der Tooltip verdeckt die Zeile, die er erklärt" — reported three rounds running.** It was never
+a tooltip: the Permissions card is a CSS grid built for the two-row shape every other Home card
+has, header plus one scroll box. The static read-only explanation added between them inherited the
+only flexible row, got squeezed toward 0 height by the permission list's own real size below it,
+and — since the text itself was never clipped — spilled out of its collapsed box over the row it
+sits above, "Look at files". It now gets its own row. Section 5b's "What it looks like" asks you to
+confirm it at the default window size.
 
-**Teil 5c, "`act_ui` meldet Erfolg ohne Wirkung".** You measured `AXUIElementPerformAction`
-returning success against a System Settings toggle that did not move, while a coordinate click on
-the same spot did. `act_ui`'s click branch now reads the control's own value before and after the
-press and reports `changed` (top-level `act_ui`) / `ui_changed` (inside an `act` batch) — `true`,
-`false`, or absent when the control has nothing comparable to check. Reproduce your exact case if
-you can find a similarly stubborn toggle; otherwise pick any AX switch or checkbox and confirm the
-field is present and correct on both a real change and a no-op press.
+**"Die Schlüsselprüfung ist auf `act` beschränkt... das Muster selbst ist der Befund."** Also
+yours, and the third time this exact shape has needed fixing — `window` first, then `act`'s own
+stray-key check, and now this. `windows`, `warm` and `cursor` took any key at all and silently did
+nothing with it, answering `ok: true` for a field that was never read. All three now refuse an
+unrecognized key the same way `act` already did. `find_ui`, `act_ui`, `capture` and `snapshot` are
+deliberately left out — they forward fields between each other, and enumerating those safely is
+its own round. Section 5d has the new case.
 
-**Teil 5b, Fund 1 (the Accessibility row missing) and Fund 2 (a revoked permission not
-updating).** Neither turned out to be a code defect on inspection — Fund 1's row is gated on the
-`control` capability being on, which your run's window suggests it may not have been at that exact
-moment; Fund 2's live-repoll already exists and keeps polling even once everything reads granted
-(there is a test proving it), and the residual staleness you measured is very likely the documented
-macOS behaviour where a running process keeps its cached TCC answer until relaunch. Section 5b
-below carries a note on each; read them before concluding either is still broken.
+**Neither fix has been proven at runtime yet, only compiled.** The six-platform release build
+(`95984b9`) compiled and ran the helper on both macOS architectures and launched the packaged app,
+but sent it no malformed request — `npm run desktop:mac` below is a second, independent compile,
+and the `warm`/`cursor`/`windows` refusal in section 5d is the first time any of this actually
+runs.
+
+**Not touched, and both still open.** The drag regression — five waypoints, `ok: true`,
+`routes: ["sendinput"]`, the file not moving, against a `drag` path unchanged since a run before it
+where the same call worked nine times running — has no diagnosis. Fund 1 and Fund 2 stand exactly
+as your report left them two rounds ago; section 5b below still carries those notes, unchanged —
+read them before concluding either is still broken.
 
 Paste everything below the line into Claude Code on the Mac.
 
@@ -393,6 +391,13 @@ the installed app on a machine whose permissions can actually be revoked.
   without cause. Say what you would change. Nobody has ever reported an opinion on this surface,
   which is not evidence that it is fine.
 
+  **From last round: the read-only hint sat printed on top of "Look at files" instead of above
+  it.** A CSS grid row-count bug, not a tooltip — the Permissions card had three children sharing
+  a template built for two, so the hint inherited the list's own flexible row and overflowed its
+  squeezed box onto the row underneath. It now has its own row. Confirm the hint reads cleanly
+  above a fully visible first permission row at the app's default window size, with Read-only both
+  on and off.
+
 ## 5c. Two contracts the helper offers, and two that had never actually held
 
 - **The verification specs — reachable, but not where you sent them.** Your last run sent
@@ -424,6 +429,27 @@ the installed app on a machine whose permissions can actually be revoked.
   reach, and on one it would not — a menu item that only exists while a menu is open — and say
   which route each needed, and whether the refusal for the impossible case names what was wrong.
 
+## 5d. The stray-key rule, one door down from `act`
+
+**"Die Schlüsselprüfung ist auf `act` beschränkt... beim dritten Mal, dass eine Regel als
+Einzelfall repariert wird, ist das Muster selbst der Befund."** You measured that `windows`,
+`warm` and `cursor` took any key at all — a typo, a field that belongs to a different operation,
+anything — and silently did nothing with it, answering `ok: true` for a field never read. Confirm
+each of the three now refuses by name instead:
+
+- `{"op":"warm","verification":{}}` and `{"op":"cursor","window":1}` must both answer `BAD_REQUEST`
+  naming the stray key, not `ok: true`. Neither operation reads anything besides `op`.
+- `{"op":"windows","quatschSchluessel":true}` must answer `BAD_REQUEST` the same way.
+  `{"op":"windows","focusable":true}` must still work — `focusable` is the one field this
+  operation legitimately reads.
+- A well-formed call to all three — no stray key — must be unaffected. This is a regression check
+  as much as a new-behaviour one.
+
+`find_ui`, `act_ui`, `capture` and `snapshot` deliberately do not have this check yet: they read
+enough fields, some forwarded from `snapshot` into the other two, that enumerating them safely is
+its own round rather than being guessed at here. Do not report their continued silence on a stray
+key as a regression; it is the documented scope of this round, not an oversight.
+
 ## 6. What to report
 
 Part by part: what you ran, what came back verbatim, and whether it agrees with what this document
@@ -441,7 +467,12 @@ says to expect. Then, plainly:
 - **`act` with a top-level `verification` key: `BAD_REQUEST` naming it, or still silently `ok`?**
 - **`act_ui` on a real toggle: does `changed` (or `ui_changed` inside a batch) match what the
   screen actually showed?**
-- **Fund 1 and Fund 2 from last round: still findings, or explained by the capability/OS-caching
+- **`warm`, `cursor` and `windows` with a stray key: `BAD_REQUEST` naming it on all three, or
+  still silently `ok` on any of them?**
+- **The Permissions card: does the read-only hint read cleanly above a fully visible first
+  permission row, at the default window size?**
+- **The drag regression: still unreproducible, or back? Not touched this round either way.**
+- **Fund 1 and Fund 2 from two rounds back: still findings, or explained by the capability/OS-caching
   notes above? Say which.**
 
 Then anything that struck you as wrong, slow or dangerous that no part above covers. On the last
