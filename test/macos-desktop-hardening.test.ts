@@ -261,6 +261,24 @@ describe('macOS desktop safety hardening', () => {
   });
 
   /**
+   * The scroll-settle ceiling is read from the clock, not counted in requested microseconds.
+   *
+   * `settledScrollState`'s loop used to add the *requested* 10_000 µs to `elapsed` on every turn,
+   * never the time `usleep` had actually spent. A QA round measured `usleep(10_000)` costing a
+   * median 12.06 ms on real hardware — before a single AX read even ran — so the loop's own
+   * 120 ms ceiling was reached at 145–348 ms by the wall clock. `systemUptime` is the deadline
+   * idiom every other wait in this file already uses; this one now matches them.
+   */
+  it('settles a scroll against the clock, not a count of requested microseconds', () => {
+    expect(swift).toMatch(
+      /let deadline = ProcessInfo\.processInfo\.systemUptime \+ 0\.120\s*\n\s*while ProcessInfo\.processInfo\.systemUptime < deadline \{/
+    );
+    // The old accounting is gone outright, not left dead beside the fix.
+    expect(swift).not.toMatch(/elapsed:\s*useconds_t/);
+    expect(swift).not.toContain('elapsed += 10_000');
+  });
+
+  /**
    * An unrecognized field is refused everywhere it is cheap to check, not just on `act`.
    *
    * `window` was fixed as its own case first, then `act` got a general stray-key check — and a
