@@ -91,6 +91,13 @@ const COMPOSITOR_TIMEOUT_MS = 30_000;
  * nothing: two failed attempts cost a minute of a run in which nothing happened, measured.
  */
 const SCROLL_TIMEOUT_MS = 5_000;
+/**
+ * How long a scroll's move-detection waits for the position to start changing, once a dispatch
+ * call has returned — acknowledged or timed out. Separate from SCROLL_TIMEOUT_MS: that budget
+ * belongs to the protocol round trip, this one to a page that is merely slow to apply what it
+ * already accepted.
+ */
+const SCROLL_ONSET_TIMEOUT_MS = 1_000;
 /** Upper bound on elements one observation returns, so a huge page cannot flood the model. */
 const MAX_ELEMENTS = 200;
 /**
@@ -613,7 +620,7 @@ async function frameOffset(frameId) {
  * that owns it, and carries coordinates already translated into the top-level page's space so
  * that clicking one needs no further arithmetic.
  */
-async function collectElements() {
+async function collectElements(generation) {
   const root = await mainFrameId();
   const { frameTree } = await send('Page.getFrameTree');
 
@@ -634,7 +641,14 @@ async function collectElements() {
       if (elements.length >= MAX_ELEMENTS) return;
       elements.push({
         ...element,
-        ref: 'e' + index++,
+        // Stamped with the observation that minted it, not just a recycled per-call index. Every
+        // observe() starts index back at 0, so a bare "e4" from one observation and "e4" from the
+        // next name two unrelated elements — and a caller holding the first one after the second
+        // has run gets a silent, successful click on whatever the label now happens to match. QA
+        // caught exactly that: a stale first-observation ref was reused by a later observation and
+        // activated a different control instead of failing. The generation makes that collision
+        // impossible instead of merely unlikely.
+        ref: 'g' + generation + '_e' + index++,
         frameId,
         x: Math.round(element.x + offset.x),
         y: Math.round(element.y + offset.y)
@@ -874,6 +888,61 @@ async function settleAfterScroll(send) {
   }
 }
 
+/**
+ * Whether a click just opened a new ordinary tab — `target="_blank"`, `window.open`, a form
+ * posting to a new tab.
+ *
+ * Before this, nothing in a click's answer said so: the driver stayed attached to the tab it
+ * was already on, status kept naming that same tab, and a caller had no way to learn a second
+ * tab now existed short of separately listing tabs and guessing which one was new. QA reached
+ * for exactly that guess and found nothing to guess from.
+ *
+ * Chrome creates the new tab a beat after the input event that triggered it completes, so this
+ * polls briefly rather than checking once and calling it settled.
+ */
+async function findCreatedTab(openerTabId, before) {
+  const deadline = Date.now() + 200;
+  for (;;) {
+    let tabs = [];
+    try {
+      tabs = await chrome.tabs.query({ openerTabId });
+    } catch {
+      return null;
+    }
+    const created = tabs.find((tab) => Number.isSafeInteger(tab?.id) && !before.has(tab.id));
+    if (created) {
+      return { tabId: created.id, url: created.url || created.pendingUrl || null, title: created.title || null };
+    }
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+}
+
+/**
+ * Whether the page has moved from `before` — worth a short wait, not one look.
+ *
+ * A dispatch call timing out at SCROLL_TIMEOUT_MS says nothing about the scroll itself: QA saw
+ * horizontal scrolling reported as `BROWSER_SCROLL_FAILED` — neither the gesture nor the wheel
+ * fallback acknowledged in time — while a screenshot taken moments later showed the page had
+ * moved anyway. Reading the position exactly once, at the instant a timed-out dispatch call
+ * returns, catches the scroll mid-flight and calls it failed. This polls for the onset of
+ * movement the same way settleAfterScroll below polls for its end, so a scroll that lands a
+ * little after its dispatch call is still seen landing.
+ */
+async function waitForScrollOnset(send, before, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let last = before;
+  for (;;) {
+    const now = await readScrollPosition(send);
+    if (now !== null) {
+      last = now;
+      if (before === null || now.x !== before.x || now.y !== before.y) return now;
+    }
+    if (Date.now() >= deadline) return last;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+}
+
 async function readScrollPosition(send) {
   try {
     const reply = await send('Runtime.evaluate', {
@@ -966,7 +1035,7 @@ export const browserDriver = {
       });
     });
 
-    session = { tabId, url: tab.url ?? '', title: tab.title ?? '', groupId: null };
+    session = { tabId, url: tab.url ?? '', title: tab.title ?? '', groupId: null, refGeneration: 0 };
     try {
       await send('Page.enable');
       await send('Runtime.enable');
@@ -1035,7 +1104,19 @@ export const browserDriver = {
     const { path, frameId } = entry;
     // Resolved in the frame that owns it. A path from inside an iframe means nothing in the
     // document above it, and could match something entirely different there.
-    const contextId = await isolatedContext(frameId);
+    //
+    // A ref whose frame was an iframe survives navigation of the *page* in the map (it is only
+    // replaced by the next observe()), but the frame itself can be gone by then — the top
+    // document navigated, or the iframe was removed. Asking CDP for that frame's isolated world
+    // then fails at the protocol level ("No frame for given id found"), which used to escape as
+    // a raw BROWSER_PROTOCOL_FAILED. That is exactly the case this method exists to turn into a
+    // clean refusal: the ref is stale, not the protocol.
+    let contextId;
+    try {
+      contextId = await isolatedContext(frameId);
+    } catch {
+      throw fail('BROWSER_BAD_REF', `${ref} belonged to a frame that no longer exists on this page`);
+    }
     const offset = (await frameOffset(frameId)) ?? { x: 0, y: 0 };
     const { result, exceptionDetails } = await send('Runtime.evaluate', {
       expression: `(() => {
@@ -1293,6 +1374,10 @@ export const browserDriver = {
       case 'click':
       case 'double_click': {
         const clickCount = type === 'double_click' ? 2 : 1;
+        const openerTabId = session.tabId;
+        const beforeTabs = new Set(
+          (await chrome.tabs.query({ openerTabId }).catch(() => [])).map((tab) => tab.id)
+        );
         await movePointer(action.x, action.y);
         await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: action.x, y: action.y, modifiers });
         for (let press = 1; press <= clickCount; press++) {
@@ -1307,7 +1392,11 @@ export const browserDriver = {
           });
           await movePointer(action.x, action.y);
         }
-        return { clicked: { x: action.x, y: action.y, button, clickCount } };
+        const createdTab = await findCreatedTab(openerTabId, beforeTabs);
+        return {
+          clicked: { x: action.x, y: action.y, button, clickCount },
+          ...(createdTab ? { createdTab } : {})
+        };
       }
 
       case 'drag': {
@@ -1390,7 +1479,7 @@ export const browserDriver = {
           if (error?.code !== 'BROWSER_TIMEOUT') throw error;
           acknowledged = false;
         }
-        let after = await readScrollPosition(send);
+        let after = await waitForScrollOnset(send, before, SCROLL_ONSET_TIMEOUT_MS);
         if (!moveFrom(after)) {
           // The wheel event as a fallback: it is what worked before Chrome stopped acting on it,
           // and a browser that ignores the gesture instead is not one this code has met.
@@ -1403,7 +1492,7 @@ export const browserDriver = {
             if (error?.code !== 'BROWSER_TIMEOUT') throw error;
             acknowledged = false;
           }
-          after = await readScrollPosition(send);
+          after = await waitForScrollOnset(send, before, SCROLL_ONSET_TIMEOUT_MS);
         }
         if (moveFrom(after)) {
           await settleAfterScroll(send);
@@ -1485,7 +1574,10 @@ export const browserDriver = {
     const tab = await currentTab(session.tabId);
     session.url = tab.url ?? session.url;
     session.title = tab.title ?? session.title;
-    const page = await collectElements();
+    // Bumped before collecting, so every ref this observation mints is stamped with a number no
+    // earlier observation ever used and no later one ever will.
+    session.refGeneration = (session.refGeneration ?? 0) + 1;
+    const page = await collectElements(session.refGeneration);
     // Only the newest observation's refs are addressable. Keeping older ones alive would let
     // a ref from three pages ago resolve against whatever happens to match now.
     session.refs = new Map(
