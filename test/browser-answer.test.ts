@@ -71,6 +71,26 @@ describe('a browser answer carries what the driver answered', () => {
     expect(renderBrowserAction('reload', {}).lines[0]).toBe('reload: ok');
   });
 
+  it('says a control is unticked, and stays silent where there is nothing to tick', () => {
+    // Printing `checked=false` beside every text field was a regression the moment the field was
+    // first rendered: `el.checked` is a boolean on every input, and the string 'false' is truthy.
+    // On a settings page that is noise on nearly every line, and it buries the one case the field
+    // exists for. An unticked checkbox must still say so — that is the useful half.
+    const { lines } = renderBrowserAction('observe', {
+      url: 'https://example.com', title: 'Settings',
+      elements: [
+        { ref: 'e1', role: 'textbox', name: 'Search', value: '', checked: '', x: 1, y: 2 },
+        { ref: 'e2', role: 'checkbox', name: 'Remember me', value: '', checked: 'false', x: 3, y: 4 },
+        { ref: 'e3', role: 'checkbox', name: 'Notify', value: '', checked: 'true', x: 5, y: 6 },
+        { ref: 'e4', role: 'checkbox', name: 'Partly', value: '', checked: 'mixed', x: 7, y: 8 }
+      ]
+    });
+    expect(lines.find((l) => l.startsWith('e1'))).not.toContain('checked');
+    expect(lines.find((l) => l.startsWith('e2'))).toContain('checked=false');
+    expect(lines.find((l) => l.startsWith('e3'))).toContain('checked=true');
+    expect(lines.find((l) => l.startsWith('e4'))).toContain('checked=mixed');
+  });
+
   it('hands back the observation screenshot, and only a real one', () => {
     const withShot = renderBrowserAction('observe', {
       url: 'https://example.com', title: 'Example', elements: [],

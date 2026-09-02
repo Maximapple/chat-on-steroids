@@ -107,6 +107,11 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Driver fixture</title>
 <!-- Reveals itself only under the pointer, and only for a real mouseover: a hover that is not
      delivered leaves this reading "no hover", which a click could never distinguish. -->
 <button id="hovertarget" aria-label="Hover me">Hover me</button>
+<!-- A real checkbox and a text field side by side: the collector must report a checked state for
+     the first and none for the second. The checked property is a boolean on every input, so the
+     naive reading gave the text field one too. (No backticks in here: this page is a template
+     literal, and a backtick ends it.) -->
+<input id="agree" type="checkbox" aria-label="Agree to terms">
 <div id="hoverlog">no hover</div>
 <iframe id="frame" src="/frame" style="width:320px;height:80px;border:1px solid #ccc"></iframe>
 <!-- Last, so the page can scroll without pushing anything above it out of the viewport. -->
@@ -386,7 +391,7 @@ try {
           title: o.title, viewport: o.viewport,
           shot: o.screenshot ? { w: o.screenshot.width, h: o.screenshot.height } : null,
           data: o.screenshot?.data ?? null,
-          elements: o.elements.map((e) => ({ ref: e.ref, name: e.name }))
+          elements: o.elements.map((e) => ({ ref: e.ref, name: e.name, checked: e.checked, value: e.value }))
         });
       } catch (e) { return JSON.stringify({ retry: (e.code || '') + ' ' + e.message }); }
     })()`);
@@ -401,6 +406,12 @@ try {
   check('finds the main-frame controls',
     names.includes('Run the thing') && names.includes('Your name'), names.join(' | '));
   check('finds the control inside the iframe', names.includes('Inside the frame'), names.join(' | '));
+  const checkable = (view.elements ?? []).find((e) => e.name === 'Agree to terms');
+  const textField = (view.elements ?? []).find((e) => e.name === 'Your name');
+  check('a checkbox reports whether it is ticked',
+    checkable?.checked === 'false', JSON.stringify(checkable ?? null));
+  check('a text field reports no checked state at all',
+    textField !== undefined && !textField.checked, JSON.stringify(textField ?? null));
   check('omits what a pointer cannot reach', !names.includes('Never'), names.join(' | '));
   /*
    * Decoded, not taken on trust. This compared the driver's reported width against the viewport
