@@ -233,6 +233,51 @@ async function ungroupDrivenTab(tabId, groupId) {
 }
 
 /**
+ * Makes the driven tab the one actually compositing, before an action whose correctness
+ * depends on it.
+ *
+ * A scroll gesture and a wheel event are both compositor work, and Chrome defers compositor
+ * work for a background tab rather than doing it immediately — a QA round measured this
+ * directly, with instrumentation: `visibilityState: hidden` turned a 388 ms, correctly-judged
+ * scroll into a 7275 ms timeout with the target's own `scrollLeft` still unmoved, and the
+ * instant the tab was activated afterward it jumped straight to *double* the requested
+ * distance — the gesture and its own wheel fallback, both delivered together the moment the
+ * tab could actually paint. The refusal that produces is honest about the instant it was
+ * measured and wrong a moment later, which is worse than either being right or explaining why.
+ *
+ * The same round measured a second, independent effect of the same cause: a link opened while
+ * its tab is backgrounded gets a new tab whose `openerTabId` names whichever tab actually *is*
+ * active — Chrome's own tab-creation attribution, not anything this driver controls — so
+ * `findCreatedTab`'s comparison against the driven tab's own id can never match. Widening its
+ * poll window would not have helped; the condition itself does not hold while backgrounded.
+ *
+ * Best-effort and bounded: a tab that cannot be activated (closed mid-call, or a withdrawn
+ * permission) still gets to attempt the action rather than fail before it starts.
+ */
+async function ensureTabActive(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) return;
+  try {
+    if (!tab.active) await chrome.tabs.update(tabId, { active: true });
+    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+  } catch {
+    return;
+  }
+  // tabs.update resolving is not the same as the page actually compositing again — wait for
+  // visibilityState itself, the exact fact the compositor work above is gated on.
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline) {
+    try {
+      const reply = await send('Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true });
+      if (reply?.result?.value === 'visible') return;
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/**
  * A pointer the person can actually see.
  *
  * CDP input moves no real cursor, so without this the page reacts and nothing visibly causes
@@ -1441,6 +1486,11 @@ export const browserDriver = {
       case 'double_click': {
         const clickCount = type === 'double_click' ? 2 : 1;
         const openerTabId = session.tabId;
+        // A click that opens a tab is attributed by Chrome to whichever tab is active, not to
+        // this one — see ensureTabActive's own comment. Without this, createdTab correlation
+        // silently fails whenever the driven tab sits behind the conversation tab, which is the
+        // ordinary case rather than the exception.
+        await ensureTabActive(session.tabId);
         const beforeTabs = new Set(
           (await chrome.tabs.query({}).catch(() => [])).map((tab) => tab.id)
         );
@@ -1497,6 +1547,11 @@ export const browserDriver = {
       case 'scroll': {
         const x = Number(action.x ?? 0);
         const y = Number(action.y ?? 0);
+        // A background tab defers the compositor work a scroll gesture and a wheel event both
+        // need — see ensureTabActive's own comment for the measurement. Without this, a scroll
+        // over a backgrounded tab times out and reports moved: false for a scroll that lands a
+        // few seconds later, doubled, the instant something brings the tab back.
+        await ensureTabActive(session.tabId);
         await movePointer(x, y);
         /*
          * Sent, then judged by whether the page moved — not by whether the protocol answered.

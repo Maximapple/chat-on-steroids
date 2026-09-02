@@ -99,6 +99,7 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Driver fixture</title>
 <div id="pad" style="width:220px;height:70px;border:1px dashed #999">Drag pad</div>
 <a id="onward" href="/second">Go onward</a>
 <a id="leave" href="about:blank">Leave for a refused page</a>
+<a id="popsNewTab" href="/second" target="_blank">Open in a new tab</a>
 <div id="log">nothing yet</div>
 <div id="klog">no keys</div>
 <div id="dlog">no dblclick</div>
@@ -838,6 +839,112 @@ try {
   ]))()`);
   check('an address that cannot be read is refused',
     unreadable.value === '[true,true,false]', unreadable.value ?? unreadable.error);
+
+  /*
+   * Background-tab regression: ensureTabActive.
+   *
+   * Both scroll and click depend on the driven tab actually compositing, not merely being
+   * attached — a QA round measured this directly: a backgrounded tab (visibilityState:
+   * hidden) defers scroll compositor work entirely, and Chrome attributes a new tab's
+   * openerTabId to whatever tab is actually active rather than the one that dispatched the
+   * click. Both defects disappeared once the driven tab was foregrounded first, which is
+   * exactly what ensureTabActive now does automatically before a scroll or a click. This
+   * proves it holds without the app or a ChatGPT-driven page at all: attach fresh, put
+   * another tab in front the same way anything else in Chrome would, then drive the fixture
+   * anyway.
+   */
+  {
+    // The original fixture tab, reused rather than a new one: readPage below is a CDP
+    // connection already attached to this exact target, and that connection does not follow
+    // the driver to a different tab. Navigating it back is enough — the target survives.
+    const bgSetup = await run(`(async () => {
+      const driver = globalThis.__driver.browserDriver;
+      await driver.detach().catch(() => {});
+      // Not through the driver's own navigate/attach: this tab is deliberately sitting on
+      // about:blank, a refused destination attach() itself will not take, so getting it off
+      // that address has to happen before the driver is asked to take it.
+      await chrome.tabs.update(${tab.id}, { url: 'http://127.0.0.1:${pagePort}/' });
+      await new Promise((resolve) => {
+        const listener = (tabId, info) => {
+          if (tabId === ${tab.id} && info.status === 'complete') {
+            chrome.tabs.onUpdated.removeListener(listener);
+            resolve();
+          }
+        };
+        chrome.tabs.onUpdated.addListener(listener);
+        setTimeout(resolve, 3000);
+      });
+      await driver.attach(${tab.id});
+      return JSON.stringify({ tabId: ${tab.id} });
+    })()`);
+    const bg = (() => { try { return JSON.parse(String(bgSetup.value ?? '{}')); } catch { return {}; } })();
+    // Page.navigate resolves on commit, not on layout — give the fixture time to actually
+    // render #wide before anything below asks for its geometry.
+    await sleep(500);
+    // The window has been resized by everything that ran before this block, and #wide sits
+    // 460px down the document — comfortably inside the 488px-tall viewport this suite starts
+    // with, not necessarily inside whatever it has become by now. Scrolling the page (not
+    // through the driver, so it does not touch session/scroll-target state) puts the element
+    // near the top regardless, without depending on window size holding steady all run.
+    await readPage(`window.scrollTo(0, 400)`);
+
+    await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' });
+    await sleep(300);
+    const hiddenBeforeScroll = await readPage(`document.visibilityState`);
+    const wideBefore = Number(await readPage(`document.getElementById('wide').scrollLeft`));
+    const wideCenterBg = await readPage(
+      `(() => { const el = document.getElementById('wide'); if (!el) return null; ` +
+        'const r = el.getBoundingClientRect(); ' +
+        'return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()'
+    ) ?? { x: -1, y: -1 };
+    const bgScroll = await run(`(async () => {
+      try {
+        const result = await globalThis.__driver.browserDriver.act({
+          type: 'scroll', x: ${wideCenterBg.x}, y: ${wideCenterBg.y}, scroll_x: 50, scroll_y: 0
+        });
+        return JSON.stringify({ ok: true, result });
+      } catch (error) { return JSON.stringify({ ok: false, error: (error.code || '') + ': ' + error.message }); }
+    })()`);
+    await sleep(300);
+    const wideAfterBg = Number(await readPage(`document.getElementById('wide').scrollLeft`));
+    const visAfterScroll = await readPage(`document.visibilityState`);
+    const bgResult = (() => { try { return JSON.parse(String(bgScroll.value ?? '{}')); } catch { return {}; } })();
+    check('a scroll over a backgrounded driven tab still moves it (ensureTabActive)',
+      hiddenBeforeScroll === 'hidden' && visAfterScroll === 'visible' && bgResult.ok === true &&
+        bgResult.result?.moved === true && wideAfterBg > wideBefore,
+      `bg=${bg.tabId ?? bg.error} hiddenBefore=${hiddenBeforeScroll} visAfter=${visAfterScroll} ` +
+        `before=${wideBefore} after=${wideAfterBg} result=${bgScroll.value ?? bgScroll.error}`);
+
+    // Push it to the background again — the scroll above already reactivated it. #popsNewTab
+    // lives near the top of the document, unlike #wide, so undo the earlier scroll-down first.
+    await readPage(`window.scrollTo(0, 0)`);
+    await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' });
+    await sleep(300);
+    const hiddenBeforeClick = await readPage(`document.visibilityState`);
+    const linkCenter = await readPage(
+      `(() => { const el = document.getElementById('popsNewTab'); if (!el) return null; ` +
+        'const r = el.getBoundingClientRect(); ' +
+        'return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()'
+    ) ?? { x: -1, y: -1 };
+    const bgClick = await run(`(async () => {
+      try {
+        const result = await globalThis.__driver.browserDriver.act({
+          type: 'click', x: ${linkCenter.x}, y: ${linkCenter.y}
+        });
+        return JSON.stringify({ ok: true, result });
+      } catch (error) { return JSON.stringify({ ok: false, error: (error.code || '') + ': ' + error.message }); }
+    })()`);
+    const clickResult = (() => { try { return JSON.parse(String(bgClick.value ?? '{}')); } catch { return {}; } })();
+    check('a click over a backgrounded driven tab still reports createdTab (ensureTabActive)',
+      hiddenBeforeClick === 'hidden' && clickResult.ok === true && Boolean(clickResult.result?.createdTab),
+      `hiddenBefore=${hiddenBeforeClick} result=${bgClick.value ?? bgClick.error}`);
+
+    // Leave the driver detached: the "navigate opens a page from nothing" check below starts
+    // from that assumption, and a session left pointing at a tab this block is about to close
+    // makes its own navigate fail on a now-nonexistent id rather than proving what it exists
+    // to prove.
+    await run(`globalThis.__driver.browserDriver.detach().catch(() => {})`);
+  }
 
   // The dead end QA walked into twice. With no ordinary page open the driver said "open the
   // page first" and offered no action that opens one, so ten checks were reported as not
