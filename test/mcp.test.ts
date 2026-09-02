@@ -41,6 +41,18 @@ import { unifiedExecManager } from '../src/main/codex/manager.js';
 import { locateRipgrep } from '../src/main/ripgrep.js';
 import { IS_WINDOWS, makeTempDir, removeTempDir, writeTree } from './helpers.js';
 
+/**
+ * How long an exec call waits for a command to finish before handing back a session instead.
+ *
+ * Was five seconds, twenty times over, and under the full suite one of those failed at 6749 ms
+ * on a Windows-on-ARM machine — starting PowerShell alone can outlast five seconds when every
+ * worker is busy. The tests that use this are about Codex response semantics: a command that
+ * finishes returns its output, one that does not returns a session. The window is how long to
+ * wait before choosing between them, not a correctness boundary, so a value that turns those
+ * tests into assertions about the machine's load is simply the wrong value.
+ */
+const QUICK_YIELD_MS = 15_000;
+
 // ---------------------------------------------------------------- transport
 
 interface RawResponse {
@@ -2674,7 +2686,7 @@ describe('exec_command and write_stdin', () => {
       arguments: {
         cmd: IS_WINDOWS ? 'Write-Output native-workdir-ok' : "printf '%s\\n' native-workdir-ok",
         workdir: approved,
-        yield_time_ms: 5_000
+        yield_time_ms: QUICK_YIELD_MS
       }
     });
     expect(reply.body.result?.isError).not.toBe(true);
@@ -2696,7 +2708,7 @@ describe('exec_command and write_stdin', () => {
             ? "if ($env:OPENAI_API_KEY) { Write-Output 'LEAKED' } else { Write-Output 'SCRUBBED' }"
             : "if [ -n \"${OPENAI_API_KEY:-}\" ]; then printf '%s\\n' LEAKED; else printf '%s\\n' SCRUBBED; fi",
           workdir: '/workspace',
-          yield_time_ms: 5_000
+          yield_time_ms: QUICK_YIELD_MS
         }
       });
       expect(failed(secret), textOf(secret)).toBe(false);
@@ -2716,7 +2728,7 @@ describe('exec_command and write_stdin', () => {
           ? "Get-Command rg -CommandType Application | Select-Object -First 1 -ExpandProperty Source"
           : 'command -v rg',
         workdir: '/workspace',
-        yield_time_ms: 5_000
+        yield_time_ms: QUICK_YIELD_MS
       }
     });
     expect(failed(rg), textOf(rg)).toBe(false);
@@ -2736,7 +2748,7 @@ describe('exec_command and write_stdin', () => {
         // contract is the bundled runtime, so this function must never receive the invocation.
         cmd: "function rg { Write-Output 'SHADOWED-RG'; exit 17 }; rg -n needle-from-real-ripgrep rg-shadow-target.txt",
         workdir: '/workspace',
-        yield_time_ms: 5_000
+        yield_time_ms: QUICK_YIELD_MS
       }
     });
 
@@ -2762,7 +2774,7 @@ describe('exec_command and write_stdin', () => {
       arguments: {
         cmd: 'rg -n needle-through-the-glob *.rgtxt',
         workdir: '/workspace',
-        yield_time_ms: 5_000
+        yield_time_ms: QUICK_YIELD_MS
       }
     });
 
@@ -2787,7 +2799,7 @@ describe('exec_command and write_stdin', () => {
       arguments: {
         cmd: 'rg -n fsops test/computer*.test.ts',
         workdir: '/workspace',
-        yield_time_ms: 5_000
+        yield_time_ms: QUICK_YIELD_MS
       }
     });
     expect(failed(glob), textOf(glob)).toBe(false);
@@ -2799,7 +2811,7 @@ describe('exec_command and write_stdin', () => {
       arguments: {
         cmd: String.raw`rg -n "from ['\"][^'\"]*fsops\.js['\"]" test/computer-one.test.ts`,
         workdir: '/workspace',
-        yield_time_ms: 5_000
+        yield_time_ms: QUICK_YIELD_MS
       }
     });
     expect(failed(quote), textOf(quote)).toBe(false);
@@ -2907,7 +2919,7 @@ describe('exec_command and write_stdin', () => {
       arguments: {
         cmds: commands,
         workdir: '/workspace',
-        yield_time_ms: 5_000
+        yield_time_ms: QUICK_YIELD_MS
       }
     });
     const text = textOf(reply);
@@ -2969,7 +2981,7 @@ describe('exec_command and write_stdin', () => {
       arguments: {
         cmd: IS_WINDOWS ? "Write-Output 'quick-ok'" : "printf '%s\\n' quick-ok",
         workdir: '/workspace',
-        yield_time_ms: 5_000
+        yield_time_ms: QUICK_YIELD_MS
       }
     });
     expect(quick.body.result?.isError).not.toBe(true);
@@ -3018,7 +3030,7 @@ describe('exec_command and write_stdin', () => {
 
     const first = await core('tools/call', {
       name: 'write_stdin',
-      arguments: { session_id: sessionId, chars: '\r', yield_time_ms: 5_000 }
+      arguments: { session_id: sessionId, chars: '\r', yield_time_ms: QUICK_YIELD_MS }
     });
     expect(first.body.result?.isError).not.toBe(true);
     expect(textOf(first)).toContain('first=raw-no-newline');
@@ -3026,7 +3038,7 @@ describe('exec_command and write_stdin', () => {
 
     const second = await core('tools/call', {
       name: 'write_stdin',
-      arguments: { session_id: sessionId, chars: 'done\r', yield_time_ms: 5_000 }
+      arguments: { session_id: sessionId, chars: 'done\r', yield_time_ms: QUICK_YIELD_MS }
     });
     expect(second.body.result?.isError).not.toBe(true);
     expect(textOf(second)).toContain('second=done');
@@ -3039,7 +3051,7 @@ describe('exec_command and write_stdin', () => {
     const readApp = IS_WINDOWS ? "Get-Content 'src/app.ts'" : "cat 'src/app.ts'";
     const named = await core('tools/call', {
       name: 'exec_command',
-      arguments: { cmd: readApp, workdir: '/workspace', yield_time_ms: 5_000 }
+      arguments: { cmd: readApp, workdir: '/workspace', yield_time_ms: QUICK_YIELD_MS }
     });
     expect(named.body.result?.isError).not.toBe(true);
     expect(textOf(named)).toContain('export const name = "app";');
@@ -3047,7 +3059,7 @@ describe('exec_command and write_stdin', () => {
 
     const defaulted = await core('tools/call', {
       name: 'exec_command',
-      arguments: { cmd: readApp, yield_time_ms: 5_000 }
+      arguments: { cmd: readApp, yield_time_ms: QUICK_YIELD_MS }
     });
     expect(defaulted.body.result?.isError).not.toBe(true);
     expect(textOf(defaulted)).toContain('export const name = "app";');
@@ -3158,7 +3170,7 @@ describe('exec sessions belong to the chat that opened them', () => {
     const owner = await asChat('wfr_execown_opener', 'write_stdin', {
       session_id: sessionId,
       chars: 'bye\r',
-      yield_time_ms: 5_000
+      yield_time_ms: QUICK_YIELD_MS
     });
     expect(owner.body.result?.isError).not.toBe(true);
     expect(textOf(owner)).toContain('echo=bye');
@@ -3226,7 +3238,7 @@ describe('exec sessions belong to the chat that opened them', () => {
       const owner = await asChat('wfr_execown_new_recycled', 'write_stdin', {
         session_id: recycledId,
         chars: 'owner\r',
-        yield_time_ms: 5_000
+        yield_time_ms: QUICK_YIELD_MS
       });
       expect(owner.body.result?.isError, textOf(owner)).not.toBe(true);
       expect(textOf(owner)).toContain('got=owner');
@@ -3362,7 +3374,7 @@ describe('issue #36 completed exec result drain guard', () => {
     const blocked = await callAs(owner, 'wfr_issue36_blocked', 'exec_command', {
       cmd: 'node issue36-quick.cjs',
       workdir: '/workspace',
-      yield_time_ms: 5_000
+      yield_time_ms: QUICK_YIELD_MS
     });
     expect(blocked.body.result?.isError).toBe(true);
     expect(textOf(blocked)).toContain('EXEC_RESULTS_PENDING');
@@ -3375,7 +3387,7 @@ describe('issue #36 completed exec result drain guard', () => {
     const delayedBlockedPromise = asChat(delayedRequestId, 'exec_command', {
       cmd: 'node issue36-quick.cjs',
       workdir: '/workspace',
-      yield_time_ms: 5_000
+      yield_time_ms: QUICK_YIELD_MS
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(prove(delayedRequestId, owner)).toBe('stored');
@@ -3389,7 +3401,7 @@ describe('issue #36 completed exec result drain guard', () => {
     const unproven = await asChat('wfr_issue36_unproven_blocked', 'exec_command', {
       cmd: 'node issue36-quick.cjs',
       workdir: '/workspace',
-      yield_time_ms: 5_000
+      yield_time_ms: QUICK_YIELD_MS
     });
     expect(unproven.body.result?.isError).toBe(true);
     expect(textOf(unproven)).toContain('CALLER_IDENTITY_REQUIRED');
@@ -3400,7 +3412,7 @@ describe('issue #36 completed exec result drain guard', () => {
     const other = await callAs(stranger, 'wfr_issue36_stranger', 'exec_command', {
       cmd: 'node issue36-quick.cjs',
       workdir: '/workspace',
-      yield_time_ms: 5_000
+      yield_time_ms: QUICK_YIELD_MS
     });
     expect(other.body.result?.isError, textOf(other)).not.toBe(true);
     expect(textOf(other)).toContain('quick-ok');
@@ -3420,7 +3432,7 @@ describe('issue #36 completed exec result drain guard', () => {
     const allowed = await callAs(owner, 'wfr_issue36_allowed', 'exec_command', {
       cmd: 'node issue36-quick.cjs',
       workdir: '/workspace',
-      yield_time_ms: 5_000
+      yield_time_ms: QUICK_YIELD_MS
     });
     expect(allowed.body.result?.isError, textOf(allowed)).not.toBe(true);
     expect(textOf(allowed)).toContain('quick-ok');

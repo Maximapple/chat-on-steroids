@@ -249,6 +249,20 @@ You answered both questions, and both answers were acted on.
   full 120 ms only where it does not — the end-of-document case. If an animating scroller is within
   reach, that is the one measurement neither of us has.
 
+  One subtlety worth knowing before you read the numbers: the poll compares each reading against
+  the one taken *before* the wheel, not against its predecessor. Comparing a reading to itself
+  would have answered `moved: false` at 10 ms — a third of the way to the movement even starting,
+  by your own figures — so the loop waits for a change first and only then for stillness. That is
+  why an unmoved scroll still costs the full ceiling: nothing distinguishes "will not move" from
+  "has not moved yet" except time.
+
+**Nothing else in the helper changed this round.** Three cloud reviews went over the code and
+their six findings were all in the browser driver and the tool layer — the address refusal, a
+navigation that did not check where it landed, a missing build stamp, two display fields, a drag
+without a hold, and two schemas disagreeing about a coordinate. None of them touches anything you
+measure here, so treat Parts 0 through 4 as a regression pass and spend the time you save on the
+scroll cost above.
+
 **And the older open question, for reference.** Your answer last round — list it, do
 not exclude it, and carry the difference in a field such as `focusable: false` — is the one I
 agree with. Two things have to be true before it can be built, and only this machine can say
@@ -327,6 +341,41 @@ Chrome is running an older extension, and nothing measured through it is about t
 **5c. The manifest.** In the loaded copy, report `permissions` and `optional_permissions` verbatim.
 `debugger` must be in `permissions`, not in `optional_permissions` — Chrome silently drops it from
 the optional list, which is what once made browser control impossible to switch on.
+
+## 5b. The surface nobody has tested: settings and the permission step
+
+You noted last round that the onboarding step for permissions was not exercised, and you were
+right — no run of any kind has touched it. You are the only one of us who can, because it needs
+the installed app on a machine whose permissions can actually be revoked.
+
+- **The permission rows tell the truth, live.** With both permissions granted, capture the
+  settings pane and describe each row. Then revoke Screen Recording in System Settings, return to
+  the app **without restarting it**, and capture again. The row must change on its own. The app
+  re-reads permissions rather than caching them at launch; a row that still says "granted" after
+  a revocation is worse than no row, because a person acts on it. Then grant it again and confirm
+  the row recovers, again without a restart. Say how long the change took to appear.
+- **The restart note earns its place or it does not.** There is a case where the app tells you a
+  restart is needed. Find out which one, and whether the note appears only there. A restart note
+  shown when no restart is needed trains people to ignore it.
+- **The button goes where it says.** Each row can offer a button that opens the right System
+  Settings pane. Confirm the pane that opens is the one named, for both permissions.
+- **What it looks like.** Judge the pane as a person: is it obvious what each switch does, does
+  anything clip or overlap at the default window size, is any wording ambiguous or alarming
+  without cause. Say what you would change. Nobody has ever reported an opinion on this surface,
+  which is not evidence that it is fine.
+
+## 5c. Two contracts the helper offers that nothing has ever exercised
+
+- **The verification specs.** `act` accepts a `verification` — `until: foreground`,
+  `window_exists`, `window_closed`, `ui_appears` — and no run has used one. Try each: give one a
+  condition that becomes true, and one a condition that never will. The first must report how
+  long it waited and what it saw; the second must time out with a message naming the condition
+  rather than a generic failure. If any of the four is broken, that is a finding on a feature the
+  contract advertises.
+- **`act_ui` beside `click_ui`.** `find_ui` names controls and `act_ui` acts on them
+  semantically. Exercise it on a control that a coordinate click would also reach, and on one
+  that a coordinate click would not — a menu item that only exists while a menu is open. Say
+  which route each needed, and whether the refusal for the impossible case names what was wrong.
 
 ## 6. What to report
 
