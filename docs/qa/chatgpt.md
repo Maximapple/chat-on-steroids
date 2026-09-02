@@ -20,8 +20,14 @@ passed on the last run; they are the ones to do by hand when there is time, and 
    app which conversation is calling. Skipping this cost an entire run: with a multi-agent run
    parked in the past, every Desktop call was refused with `CALLER_IDENTITY_REQUIRED` before it
    reached macOS, and all 47 checks came back unperformable.
-4. Delete and recreate the Desktop connector in ChatGPT, then open a new chat. A connector keeps
-   the tool list it fetched when it was made; three runs were lost to skipping this.
+4. **This round you do not need to recreate the Desktop connector.** A connector caches the tool
+   list it fetched when it was made, so it only has to be rebuilt when that list changes — a new
+   action, a removed one, a changed description. Since the build your last run tested, none of
+   those changed: the only schema edit was numeric bounds on coordinates that already existed.
+   `move_ref` was already there and your last run called it. Three earlier runs were lost to
+   skipping this step, which is why it has been stated every time; stating it when it is not
+   needed is its own kind of wrong, so it is stated accurately instead. Open a new chat anyway,
+   so the run starts with a clean conversation.
 
 That is all. Paste everything below the line.
 
