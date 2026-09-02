@@ -151,6 +151,45 @@ independent pages and was right both times; my previous attempt at it treated a 
 - **`find_ui` is not on the surface you can see**, and you were right to say so. It is the
   helper's own operation, tested from the Mac. Nothing in this document asks you to test it.
 
+**This round: your 47-check run found six real defects, the most dangerous one this project has
+had, and two UI opinions worth acting on. All eight are addressed; here is what changed and what
+each check should now show.**
+
+- **Check 44 was the dangerous one.** Refs were numbered fresh from zero on every `observe` —
+  `e0`, `e1`, … — so a ref you were still holding from an earlier observation could coincidentally
+  match a *different* element in a later one and click it silently, rather than being refused.
+  You demonstrated exactly that: an old `e4` survived a superseded observation and activated
+  `button#hoverTwo`. Refs now carry the observation that minted them — `g12_e4`, not `e4` — so an
+  old label can never collide with a new one again. Re-run 44 and confirm the stale ref is now
+  refused as `BROWSER_BAD_REF`, not silently resolved.
+- **Check 43** — a ref whose iframe had since navigated away used to leak the raw protocol
+  failure, `Page.createIsolatedWorld: {"code":-32602,"message":"No frame for given id found"}`,
+  instead of the refusal every other stale ref gets. It is now `BROWSER_BAD_REF` naming the ref,
+  same as the rest.
+- **Check 45 is a closed gap now, not an open one** — see its entry below; do not report "no way
+  to tell" again without first checking for `createdTab`.
+- **Check 46** — the false negative was real. Your run saw `BROWSER_SCROLL_FAILED` twice on a
+  horizontal scroll while a screenshot taken moments later showed the page had actually moved.
+  Move-detection used to read the scroll position exactly once, at the instant a dispatch call
+  returned (acknowledged or timed out) — a scroll landing a beat later was reported as failed. It
+  now polls briefly for the position to actually start changing before giving up. Re-run the same
+  horizontal case and confirm the reply's `moved` now agrees with the screenshot.
+- **Check 50** — disabling Desktop used to tear the whole connector's tunnel down, so the *next*
+  call died at the tunnel relay with a raw `tunnel_client_not_connected` and never reached this
+  app's own refusal at all. The tunnel now stays published once it has been; only the tools
+  behind it refuse. This round the refusal should arrive immediately, not after a reconnect delay.
+- **Check 51** — the refusal used to blame the individual permission ("enable 'Control mouse and
+  keyboard' in the app") even when Read-only was what actually withdrew it, on `computer`,
+  `browser`, and Core's `exec_command`/`write_stdin` alike. It now says plainly `TOOL_DISABLED: …
+  is disabled because Read-only mode is on … turn Read-only off in the app`. Confirm the new
+  wording on at least two of those four tools, not just one.
+- **Two UI opinions from the same run, both acted on.** The Read-only button carried no warning
+  before activation — it now states, before you toggle it, what turning it on withdraws (file
+  changes, commands, browser control, mouse/keyboard, clipboard writes) and what stays available
+  (screenshots, reads). And the extension step's red "Required for sub-agents" paragraph used to
+  stay red even once the extension was actually connected, next to its own green checkmark — it
+  now reads as neutral explanation once connected. Checks 55 and 56 below ask for both.
+
 Still worth confirming from earlier rounds: typing no longer loses text past a newline (check 7);
 a click cannot escape the window it is leased to (check 10); the pointer line names the frame it
 was handed (check 37); a missing window is named (check 31); `detach` says what it let go of
@@ -314,9 +353,11 @@ need a document in it.
     refused if you use it. This rule exists because refs are re-resolved against the newest
     observation, and a caller holding older ones is holding numbers that no longer point anywhere.
 45. **A click that opens a second tab.** Find a link with `target="_blank"` and `click_ref` it.
-    Report what `status` says afterwards, and whether you can tell from the tool alone that a new
-    tab exists. **This is an open gap, not a fixed thing** — a previous run pointed out there is
-    no way to inspect ordinary tabs opened as a side effect. Say what you would have needed.
+    Report what `status` says afterwards. **This used to be an open gap and now is not**: the
+    click's own reply should carry `createdTab: {tabId, url, title}` for the new tab, without you
+    needing to list tabs separately or guess. Confirm it is present and correct here, and confirm
+    it is **absent** on an ordinary click that opens nothing — the field should not appear where
+    there is nothing to report.
 46. **Horizontal scroll, and a double click in a page.** On a page with a wide table or a
     horizontally scrolling strip, `scroll` with `scroll_x` and confirm from the screenshot that
     the content moved sideways. Then `double_click` a word in a paragraph and confirm from a
@@ -381,8 +422,20 @@ running this to look at anything.
     the default window size, is any label ambiguous. This is a judgement, not a pass/fail — say
     what you would change and why. Aesthetic and clarity problems here have never been reported
     by anyone, which is not the same as their absence.
+55. **Read-only's warning, before you switch it on.** Screenshot the Read-only button and its
+    immediate surroundings **before** turning it on. The app must now say, in that screenshot —
+    not only in a refusal afterwards — what turning it on withdraws (file changes, commands,
+    browser control, mouse/keyboard input, clipboard writes) and what stays available (screenshots,
+    reads). A tooltip alone does not satisfy this; confirm there is visible text, not only a hover
+    hint a screenshot cannot show.
+56. **The extension step's colour, once actually connected.** With the Chrome extension loaded and
+    connected, screenshot the "Add the Chrome extension" step. The "Required for sub-agents"
+    paragraph must not sit in warning red beside its own green checkmark and "Connected." — confirm
+    it now reads as neutral explanation rather than an outstanding warning. Then, if convenient,
+    disconnect the extension and confirm the same paragraph turns red again — the colour should
+    track the real state, not disappear along with the check.
 
-**Summary** — how many of the 47 checks passed, failed, or could not be run, and the three most
+**Summary** — how many of the 49 checks passed, failed, or could not be run, and the three most
 serious problems in one line each.
 
 **Check by check** — number, PASS / FAIL / NOT PERFORMABLE, whether it differs from the previous

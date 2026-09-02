@@ -8,27 +8,40 @@ below turns three of those skips into answers.
 Nothing here needs ChatGPT, and nothing here needs a person: every step is a command you can run.
 Parts 1–4 do not even need the installed app; part 5 does.
 
-Your last run was the cleanest of the series, and three things changed because of it.
+**This round is a Swift-only round, and that makes this machine the only place any of it can be
+proven.** Your last full run (the 47-check English report plus the six-part German one, both dated
+2026-09-02 against `b441aa4`) found six real defects and two things worth a UX opinion. All eight
+are addressed in `native/macos-desktop-helper/main.swift`, `extension/browser-driver.js`,
+`src/main/connection.ts`, `src/main/mcp/kernel.ts` and the Setup renderer — but the Swift half was
+written and reasoned about on a machine with no `swiftc` at all. `npm run desktop:mac` is therefore
+the single most important command in this document this round: it is the first time any of that
+diff has been asked to compile. If it does not, everything after it is moot — say so immediately
+and quote the compiler's own message rather than working around it.
 
-**The probe measured whatever window happened to be first in the list**, not the one it opens for
-itself — on a used desktop that was a Chrome new-tab page, whose contents animate, and 19,097
-pixels differed between two captures of a window nobody had touched. It now looks for its own
-window by title first.
+**Teil 5c, "verification wird stillschweigend verworfen".** You found that the helper's `act`
+silently dropped any top-level key it did not recognize — `verification`, `quatschSchluessel`,
+anything — and still answered `ok: true`. That was fixed once before for the specific case of
+`window`; your run showed the rule needed to be general, not per-key. It now rejects any key `act`
+does not have with `BAD_REQUEST`, naming the key. Section 5c below asks for exactly the case you
+found: send `verification` (a real field, but one this helper has never implemented — it is turned
+into ordinary `find_ui`/`get_window_state` polling one layer up, in the app) straight to the
+helper's `act` and confirm it is now refused rather than quietly ignored.
 
-**Its pointer verdict is no longer judged by a bounding box.** You were right that a single box
-around every changed pixel is the wrong measure: the title-bar exclusion I added last round bought
-one run before a blinking text caret took the verdict away again, 39 pixels against the pointer's
-99. It now compares how busy the neighbourhood of the expected point is against the rest of the
-frame. Checked against both sets of numbers you measured: the caret case confirms by a factor of
-252, and the live Chrome window is still withheld, at 1.15.
+**Teil 5c, "`act_ui` meldet Erfolg ohne Wirkung".** You measured `AXUIElementPerformAction`
+returning success against a System Settings toggle that did not move, while a coordinate click on
+the same spot did. `act_ui`'s click branch now reads the control's own value before and after the
+press and reports `changed` (top-level `act_ui`) / `ui_changed` (inside an `act` batch) — `true`,
+`false`, or absent when the control has nothing comparable to check. Reproduce your exact case if
+you can find a similarly stubborn toggle; otherwise pick any AX switch or checkbox and confirm the
+field is present and correct on both a real change and a no-op press.
 
-**Part 3 asked for a refusal that should not happen** — `find_ui` on the omnibox container. You
-measured that it answers with the container's own tree, and the source comment agrees. That
-demand is gone from part 3 below.
-
-Separately, a defect the ChatGPT run found: every screenshot of a *scrolled* page came back showing
-the top of the document, because a capture clip is in document coordinates and the driver asked for
-`y: 0`. `verify:browser` has a new check for it — part 2a below says what to look for.
+**Teil 5b, Fund 1 (the Accessibility row missing) and Fund 2 (a revoked permission not
+updating).** Neither turned out to be a code defect on inspection — Fund 1's row is gated on the
+`control` capability being on, which your run's window suggests it may not have been at that exact
+moment; Fund 2's live-repoll already exists and keeps polling even once everything reads granted
+(there is a test proving it), and the residual staleness you measured is very likely the documented
+macOS behaviour where a running process keeps its cached TCC answer until relaunch. Section 5b
+below carries a note on each; read them before concluding either is still broken.
 
 Paste everything below the line into Claude Code on the Mac.
 
@@ -354,27 +367,61 @@ the installed app on a machine whose permissions can actually be revoked.
   re-reads permissions rather than caching them at launch; a row that still says "granted" after
   a revocation is worse than no row, because a person acts on it. Then grant it again and confirm
   the row recovers, again without a restart. Say how long the change took to appear.
+
+  **Fund 2, from last round: the row read "Granted" for over a minute after a real revocation.**
+  The code already polls continuously — even after everything shows granted, at a slower cadence,
+  specifically so a later revocation is not missed — and there is a test proving that polling never
+  stops. So if the row is still stale this round, the interesting question is not "does it poll"
+  but "does `CGPreflightScreenCaptureAccess` itself answer honestly for an already-running
+  process". Time it past two minutes this time, and separately ask whether a **freshly launched**
+  process (a second `{"op":"warm"}` against a *new* helper invocation, not the long-running one)
+  reports the revocation correctly where the long-running one does not. If the fresh process sees
+  it and the running one does not, that is macOS caching its answer per-process, not this app.
 - **The restart note earns its place or it does not.** There is a case where the app tells you a
   restart is needed. Find out which one, and whether the note appears only there. A restart note
   shown when no restart is needed trains people to ignore it.
 - **The button goes where it says.** Each row can offer a button that opens the right System
   Settings pane. Confirm the pane that opens is the one named, for both permissions.
+- **Fund 1, from last round: only one permission row shown, next to "Everything ... has been
+  granted".** The row is gated on the `control` capability actually being on (and Read-only being
+  off) — with only `screen` on, Accessibility genuinely is not being asked for yet, and the
+  headline is honest about what it currently covers. Confirm this by checking the setting itself
+  before judging the row: with `control` on, both rows must appear; with only `screen` on, only
+  Screen Recording should, and the headline should not overreach.
 - **What it looks like.** Judge the pane as a person: is it obvious what each switch does, does
   anything clip or overlap at the default window size, is any wording ambiguous or alarming
   without cause. Say what you would change. Nobody has ever reported an opinion on this surface,
   which is not evidence that it is fine.
 
-## 5c. Two contracts the helper offers that nothing has ever exercised
+## 5c. Two contracts the helper offers, and two that had never actually held
 
-- **The verification specs.** `act` accepts a `verification` — `until: foreground`,
-  `window_exists`, `window_closed`, `ui_appears` — and no run has used one. Try each: give one a
-  condition that becomes true, and one a condition that never will. The first must report how
-  long it waited and what it saw; the second must time out with a message naming the condition
-  rather than a generic failure. If any of the four is broken, that is a finding on a feature the
-  contract advertises.
-- **`act_ui` beside `click_ui`.** `find_ui` names controls and `act_ui` acts on them
-  semantically. Exercise it on a control that a coordinate click would also reach, and on one
-  that a coordinate click would not — a menu item that only exists while a menu is open. Say
+- **The verification specs — reachable, but not where you sent them.** Your last run sent
+  `verification` straight to the helper's `act` and it was silently accepted and ignored,
+  answering `ok: true` for a condition that never ran. That contract has never lived in the
+  helper: `until: foreground`, `window_exists`, `window_closed`, `ui_appears`, `ui_disappears` are
+  implemented one layer up, in `src/main/computer/index.ts`, which turns each into ordinary
+  `find_ui`/`get_window_state` polling before it ever reaches this process. So there are two
+  separate things to confirm now, not one:
+  - **At the helper**, send `{"op":"act","targetWindow":N,"verification":{...},"actions":[...]}`
+    directly, the way you did last round. It must now answer `BAD_REQUEST` naming `verification` —
+    "act does not recognize `verification`" — rather than `ok: true`. Try a nonsense key too
+    (`quatschSchluessel`) and confirm the same refusal, by name.
+  - **At the app**, the same four `until` values are reachable through the `computer` MCP tool's
+    `verify` argument — that needs a bearer token this document does not carry, so it is
+    ChatGPT's to exercise, not yours. Do not re-test it here; confirming the helper now refuses
+    what it does not implement is the whole of this round's part.
+- **`act_ui` beside `click_ui` — now with the evidence your run asked for.** You measured
+  `AXUIElementPerformAction` returning success against a System Settings toggle that stayed
+  exactly where it was, and a coordinate click on the same spot moving it — the same shape as a
+  scroll gesture that reports "sent" without reporting "moved". `act_ui`'s `click` action now
+  reads the control's own value before and after the press and adds `"changed": true|false` to
+  its reply (omitted, not `false`, when the control has nothing comparable — an ordinary button).
+  Reproduce your exact case if the same stubborn toggle is still reachable; otherwise pick any AX
+  switch or checkbox, press it once through `act_ui`, and confirm `changed` matches what actually
+  happened. Then exercise the same action inside a batch (`{"op":"act","actions":[{"type":
+  "click_ui",...}]}`) and confirm the batch's own reply carries `"ui_changed"` the same way.
+  Separately, still worth doing once: exercise `act_ui` on a control a coordinate click would also
+  reach, and on one it would not — a menu item that only exists while a menu is open — and say
   which route each needed, and whether the refusal for the impossible case names what was wrong.
 
 ## 6. What to report
@@ -382,6 +429,8 @@ the installed app on a machine whose permissions can actually be revoked.
 Part by part: what you ran, what came back verbatim, and whether it agrees with what this document
 says to expect. Then, plainly:
 
+- **Did `npm run desktop:mac` compile at all?** If not, quote the exact `swiftc` error and stop —
+  nothing else in this document can mean anything until it does.
 - Were Screen Recording and Accessibility actually granted to the terminal?
 - `verify:ci` and `verify:browser --headed`: totals, and every failure.
 - **Scroll direction: judged or skipped, and the measured scrollTop.**
@@ -389,6 +438,11 @@ says to expect. Then, plainly:
 - Which clause refuses a Chrome focus request, quoted.
 - Did the drag move the file, and did the input fence refuse a mis-aimed keystroke?
 - Does the extension Chrome loaded match this checkout?
+- **`act` with a top-level `verification` key: `BAD_REQUEST` naming it, or still silently `ok`?**
+- **`act_ui` on a real toggle: does `changed` (or `ui_changed` inside a batch) match what the
+  screen actually showed?**
+- **Fund 1 and Fund 2 from last round: still findings, or explained by the capability/OS-caching
+  notes above? Say which.**
 
 Then anything that struck you as wrong, slow or dangerous that no part above covers. On the last
 five rounds that section has been the most valuable part of the report.
