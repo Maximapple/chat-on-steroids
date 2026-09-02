@@ -963,18 +963,48 @@ async function waitForScrollOnset(send, before, timeoutMs, x, y) {
  * does this fall back to the window, which is the only thing a plain page scroll ever moves.
  */
 function scrollTargetExpression(x, y) {
+  // TEMPORARY DIAGNOSTICS — `_debug` exists to find out which element a point-based hit test
+  // actually picks when a horizontal scroll reports `moved: false` while the screenshot shows
+  // the strip moving. Two rounds measured that contradiction against ad-hoc fixtures neither of
+  // which survived to be inspected. Remove `_debug` and the `describe`/`chain` scaffolding once
+  // the cause is understood; nothing outside diagnostics reads it.
   return (
     '(() => {' +
     `const px = ${Math.round(x)}, py = ${Math.round(y)};` +
-    'let el = document.elementFromPoint(px, py);' +
+    'const describe = (node) => {' +
+    'if (!node || !node.getBoundingClientRect) return null;' +
+    'const s = getComputedStyle(node);' +
+    'const r = node.getBoundingClientRect();' +
+    'return {' +
+    'tag: node.tagName, id: node.id || null,' +
+    'class: (typeof node.className === "string" ? node.className : "") || null,' +
+    'scrollWidth: node.scrollWidth, clientWidth: node.clientWidth,' +
+    'scrollHeight: node.scrollHeight, clientHeight: node.clientHeight,' +
+    'scrollLeft: Math.round(node.scrollLeft), scrollTop: Math.round(node.scrollTop),' +
+    'overflowX: s.overflowX, overflowY: s.overflowY,' +
+    'rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },' +
+    'canX: node.scrollWidth > node.clientWidth && /(auto|scroll)/.test(s.overflowX),' +
+    'canY: node.scrollHeight > node.clientHeight && /(auto|scroll)/.test(s.overflowY)' +
+    '};' +
+    '};' +
+    'const first = document.elementFromPoint(px, py);' +
+    'const stack = (document.elementsFromPoint ? document.elementsFromPoint(px, py) : [])' +
+    '.slice(0, 6).map(describe);' +
+    'const chain = [];' +
+    'let el = first;' +
     'while (el && el !== document.documentElement && el !== document.body) {' +
     'const style = getComputedStyle(el);' +
     'const canX = el.scrollWidth > el.clientWidth && /(auto|scroll)/.test(style.overflowX);' +
     'const canY = el.scrollHeight > el.clientHeight && /(auto|scroll)/.test(style.overflowY);' +
-    'if (canX || canY) return { x: Math.round(el.scrollLeft), y: Math.round(el.scrollTop) };' +
+    'const info = describe(el);' +
+    'chain.push(info);' +
+    'if (canX || canY) return { x: Math.round(el.scrollLeft), y: Math.round(el.scrollTop),' +
+    '_debug: { point: { x: px, y: py }, fallback: false, matched: info, chain: chain, stack: stack } };' +
     'el = el.parentElement;' +
     '}' +
-    'return { x: Math.round(scrollX), y: Math.round(scrollY) };' +
+    'return { x: Math.round(scrollX), y: Math.round(scrollY),' +
+    '_debug: { point: { x: px, y: py }, fallback: true, matched: null, chain: chain, stack: stack,' +
+    'windowScroll: { x: Math.round(scrollX), y: Math.round(scrollY) } } };' +
     '})()'
   );
 }
@@ -1538,15 +1568,23 @@ export const browserDriver = {
         // Not moving is not the same as not working. A page already at its end does not move, and
         // refusing that would be wrong. What is worth refusing is knowing nothing at all: nothing
         // acknowledged and nothing moved means the scroll may as well not have been sent.
+        // TEMPORARY DIAGNOSTICS — see scrollTargetExpression. Both paths carry it: a refusal is
+        // exactly the case worth inspecting, and an earlier round lost the evidence by only
+        // reporting it on success.
+        const beforeDebug = before?._debug ?? null;
+        const afterDebug = after?._debug ?? null;
         if (!acknowledged && !moved) {
-          throw fail(
+          const error = fail(
             'BROWSER_SCROLL_FAILED',
             `neither a scroll gesture nor a wheel event was taken at ${x},${y}, and the page did ` +
               'not move. Scroll over the element that actually scrolls, or observe first to see ' +
               'where the page is.'
           );
+          error.beforeDebug = beforeDebug;
+          error.afterDebug = afterDebug;
+          throw error;
         }
-        return { scrolled: { x, y }, moved, acknowledged };
+        return { scrolled: { x, y }, moved, acknowledged, beforeDebug, afterDebug };
       }
 
       case 'type': {
