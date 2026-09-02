@@ -19,7 +19,7 @@ passed on the last run; they are the ones to do by hand when there is time, and 
    script in every page already open, and that script is the first link in the chain that tells the
    app which conversation is calling. Skipping this cost an entire run: with a multi-agent run
    parked in the past, every Desktop call was refused with `CALLER_IDENTITY_REQUIRED` before it
-   reached macOS, and all 34 checks came back unperformable.
+   reached macOS, and all 47 checks came back unperformable.
 4. Delete and recreate the Desktop connector in ChatGPT, then open a new chat. A connector keeps
    the tool list it fetched when it was made; three runs were lost to skipping this.
 
@@ -53,6 +53,16 @@ fixes as broken. That happened last round. If your `build` equals the one the pr
 step 2 did not take: redo it, redo step 3, and start again rather than reporting the results.
 
 ## What changed since the last run
+
+**Since your last run, three cloud reviews read this code and found six things.** The one that
+matters to you: the rule that keeps this driver out of a ChatGPT tab was a string prefix, so
+`http://chatgpt.com/` was never refused — Chrome then redirects it to https with the session still
+attached. Check 24 has the four addresses that got through, and one that must now be allowed.
+Two others you can see: `observe` prints what a control already holds (check 19), and a drag inside
+a page now holds and dwells the way both desktop drivers do (check 42). Also `detach` reports the
+driver build, which it did not before — every successful detach used to print `driver build
+unreported`, the exact phrase this document tells you to treat as a finding. That was my fault and
+it would have sent you chasing it.
 
 **You were right twice, and I was wrong about why.** Last round I told you `hit` and `covered` were
 missing because Chrome was probably still running the old extension. It was not. The fields were
@@ -221,7 +231,13 @@ need a document in it.
 
 18. `navigate` to `https://example.com`, then `status`. Report the tab, title and URL, and whether
     Chrome had an ordinary tab open beforehand or the tool opened one.
-19. `observe`. Report the page title and how many refs came back.
+19. `observe`. Report the page title and how many refs came back. Then find a page with a
+    checkbox and a text field — a settings or sign-in page does nicely — and `observe` it: a
+    checkbox must carry `checked=true` or `checked=false`, a field that holds text must carry
+    `value=…`, and a plain text field must carry **no** `checked` at all. Both facts were
+    collected since this driver was written and neither was ever printed, so a ticked box looked
+    exactly like an empty one; the first attempt at fixing that then printed `checked=false`
+    beside every text field, which is the noise this check also guards against.
 20. From that same `observe`, confirm you received a screenshot and that the **pointer overlay** is
     drawn — with no mouse action between the navigation and the look.
 21. `navigate` to a search engine, click the field, `type` a query, `keypress` Enter, `observe`,
@@ -232,6 +248,12 @@ need a document in it.
 24. **The refusals.** `navigate` to `https://chatgpt.com/`, then `chrome://settings`, then
     `file:///etc/hosts`. All three must be refused and the driven tab must survive — check with
     `status`. Quote each error. **Passing means being refused.**
+    Then four more, which a review found were **not** refused until yesterday, because the rule
+    was a string prefix rather than a parsed address: `http://chatgpt.com/`,
+    `https://user@chatgpt.com/`, `https://sub.chatgpt.com/`, and `data:text/html,<p>hi`. All four
+    must be refused. And one that must be **allowed**, because it is not ChatGPT and only looks
+    like it in the first few letters: `https://chatgpt.com.example.org/` — if that is refused, the
+    rule is judging spelling instead of identity, which is the defect in the other direction.
 25. `detach`, then `status`. `detach` now names what it let go of — `let go of tab N — title
     (url); no tab is under control` — so quote it and confirm `status` agrees. Do not try to
     prove the overlay is gone: no action reads a tab the tool has released, the last run was
@@ -268,6 +290,42 @@ need a document in it.
     Then confirm it did **not** click: whatever the control does on click must not have happened.
     Coordinates were never a substitute here, because what a hover reveals is positioned relative
     to the element and the point has to be resolved at the moment of the move.
+42. **A drag inside a web page.** Until yesterday the browser drag pressed and released in the
+    same instant — no hold, no dwell — so an HTML5 drag never started and a drop target that arms
+    on hover never armed. Both desktop drivers have carried those two waits for months; the
+    browser one now does too. Find a page with real drag-and-drop (a to-do list that reorders, or
+    any HTML5 demo), `observe`, and `drag` along a path of several waypoints from one item to
+    another. Confirm from a fresh `observe` that the order actually changed. Two waypoints is a
+    teleport and starts no drag — the same rule as the desktop check.
+
+43. **A ref that has gone stale.** `observe`, then `navigate` somewhere else, then `click_ref`
+    one of the refs from before. It must be refused by name — `BROWSER_BAD_REF` — rather than
+    clicking whatever now happens to sit at those coordinates. Then re-`observe` and confirm the
+    fresh refs work. A run met this organically once; it should be a check, not an accident.
+44. **Two observations in one call.** Put two `observe` actions in a single `browser` batch with
+    an action between them. Only the refs from the *last* one are live, and the answer says so.
+    Confirm the earlier block is marked superseded, and confirm a ref from the first block is
+    refused if you use it. This rule exists because refs are re-resolved against the newest
+    observation, and a caller holding older ones is holding numbers that no longer point anywhere.
+45. **A click that opens a second tab.** Find a link with `target="_blank"` and `click_ref` it.
+    Report what `status` says afterwards, and whether you can tell from the tool alone that a new
+    tab exists. **This is an open gap, not a fixed thing** — a previous run pointed out there is
+    no way to inspect ordinary tabs opened as a side effect. Say what you would have needed.
+46. **Horizontal scroll, and a double click in a page.** On a page with a wide table or a
+    horizontally scrolling strip, `scroll` with `scroll_x` and confirm from the screenshot that
+    the content moved sideways. Then `double_click` a word in a paragraph and confirm from a
+    fresh `observe` or a screenshot that it selected the word rather than clicking twice.
+47. **A control inside an iframe.** Find a page with an iframe carrying a real control — a
+    payment field, an embedded map, a comment widget — `observe`, and confirm controls from
+    inside the frame appear in the refs. Then `click_ref` one and confirm the effect. The driver
+    suite proves this against a fixture; nothing has proved it against a real page.
+48. **The clipboard in the other direction.** Put text on the clipboard with the desktop tool,
+    then paste it into a document with Cmd+V and read the document back with the shell. Every
+    earlier check only reads the clipboard; writing it has never been exercised here.
+49. **The batching rule, deliberately broken.** Send a `computer` call containing two
+    UI-changing actions — two clicks, or a click and a type on different windows. The schema says
+    one per call. Confirm the refusal, and confirm it names the rule rather than failing
+    obscurely. A run met this as a surprise once, which is what put the sentence in the schema.
 
 ## G. Robustness
 
@@ -288,7 +346,37 @@ need a document in it.
 
 **Environment** — macOS version, Mac model, Chrome version, and the `build` string from `/hello`.
 
-**Summary** — how many of the 34 checks passed, failed, or could not be run, and the three most
+## H. The settings and the permission step
+
+This surface has never been tested by any run, and it is the first thing a new person sees. All
+of it is in the app window, so use screenshots and the desktop tools — do not ask the person
+running this to look at anything.
+
+50. **The Desktop capability, off and on.** Open the app's settings. Turn the Desktop capability
+    off, then ask for any desktop action through the connector. The refusal must say the
+    capability is off and how to turn it on — not a generic failure. Turn it back on and confirm
+    the same action now works. Quote both answers.
+51. **Read only.** Switch Read Only on. Confirm a screenshot still works and a click does not,
+    and that the refusal names read-only as the reason rather than naming permissions. This
+    ordering matters: read-only withdraws control, so a refusal that blames a missing permission
+    would send someone to System Settings for no reason.
+52. **The permission rows.** With Screen Recording and Accessibility both granted, screenshot the
+    settings pane and describe each row: what it says, whether a button is offered, and whether
+    any restart note appears. Then, if you can do it without locking yourself out, revoke one in
+    System Settings, return to the app, and confirm the row changes **without** a restart — the
+    app re-reads permissions live, and a row that lies here is worse than no row, because a
+    person acts on it.
+53. **The browser-control toggle.** Turn browser control off in the extension popup and confirm a
+    `browser` action is refused with a message naming the popup. Turn it on again and confirm it
+    recovers. Report whether the wording tells you *where* to click, not only that something is
+    off.
+54. **What the settings look like.** Screenshot the whole settings surface and describe it as a
+    person would see it: is it obvious which switches matter, does anything overlap or clip at
+    the default window size, is any label ambiguous. This is a judgement, not a pass/fail — say
+    what you would change and why. Aesthetic and clarity problems here have never been reported
+    by anyone, which is not the same as their absence.
+
+**Summary** — how many of the 47 checks passed, failed, or could not be run, and the three most
 serious problems in one line each.
 
 **Check by check** — number, PASS / FAIL / NOT PERFORMABLE, whether it differs from the previous
