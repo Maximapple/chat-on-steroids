@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { desktopAutomationSupported } from '../src/main/platform.js';
 
 const mocks = vi.hoisted(() => {
   const caps = {
@@ -261,8 +262,13 @@ describe('connection surface state', () => {
    * Root cause: the local endpoint's exposed tools are deliberately monotonic (server.ts), but
    * the Desktop *tunnel* carrying requests to it was being torn down the moment every desktop
    * capability went off, so a request never reached that TOOL_DISABLED handler at all.
+   *
+   * `surfaceIsUseful` gates Desktop on `desktopAutomationSupported()`, which reads the real host
+   * platform even though `caps` here is mocked — Linux CI never has a Desktop tunnel to publish
+   * in the first place, so `mocks.starts` would stay at 1 (Core only) and every assertion below
+   * would be about a tunnel that never existed. Runs only where Desktop can actually be published.
    */
-  it('keeps a published Desktop tunnel up when every desktop permission goes off, instead of tearing down the transport', async () => {
+  it.runIf(desktopAutomationSupported())('keeps a published Desktop tunnel up when every desktop permission goes off, instead of tearing down the transport', async () => {
     mocks.config.tunnel.kind = 'openai';
     mocks.config.tunnel.desktopTunnelId = 'desktop-tunnel-id';
     mocks.caps.control = true;
