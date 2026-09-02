@@ -212,6 +212,19 @@ describe('the permissions card', () => {
     expect(list[scrollIndex]).toBe('minmax');
     expect(list.filter((track) => track === 'minmax')).toHaveLength(1);
   });
+
+  /**
+   * The hint's own row fixed the overlap, but not on its own: `.hint` carries no padding —
+   * every other place it appears sits inside a container that already supplies it — and
+   * #readOnlyHint is a direct child of the card instead. Screenshotted at the app's default
+   * size: the text ran flush to the card's left/right edges, 0px in, against the 15px the
+   * header and 16px the permission rows are indented by. Close enough to read as misaligned
+   * rather than as a design choice.
+   */
+  it("indents the hint to match the header and the rows below it, not the card's own edge", () => {
+    const hint = rule('#readOnlyHint');
+    expect(hint).toContain('padding: 0 15px 10px');
+  });
 });
 
 /**
