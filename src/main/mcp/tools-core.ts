@@ -141,6 +141,7 @@ import {
   lineNumberArg,
   resolveCwd,
   resolveIn,
+  toolDisabledMessage,
   type SurfaceRegistrar,
   type ToolResult
 } from './kernel.js';
@@ -564,9 +565,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
       async ({ patch }) =>
         guard('apply_patch', async () => {
           if (!caps.create && !caps.edit && !caps.move && !caps.deleteFile) {
-            return fail(
-              'TOOL_DISABLED: apply_patch is disabled by the current Chat On Steroids permissions. Ask the user to enable changing files in the app.'
-            );
+            return fail(toolDisabledMessage(ctx.readOnly, 'create', 'apply_patch', 'changing files'));
           }
 
           let args: { patch: string; hunks: Hunk[]; workdir: string | null; environmentId: string | null };

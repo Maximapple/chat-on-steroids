@@ -125,6 +125,24 @@ describe('the markup the step is painted into', () => {
     expect(main).toContain("if (desktopSettled) done.add('desktop');");
   });
 
+  /**
+   * QA: "The UI does not make the recovery consequence obvious before activation" — the button
+   * carried a lock icon and the word "Read-only" and nothing else, so nothing on the page said
+   * what flipping it actually withdraws before someone clicked it.
+   */
+  it('explains what Read-only withdraws before it is switched on', () => {
+    const btn = document.getElementById('readOnlyBtn')!;
+    const hint = document.getElementById('readOnlyHint')!;
+    for (const raw of [btn.getAttribute('title'), hint.textContent]) {
+      const text = (raw ?? '').replace(/\s+/g, ' ');
+      expect(text).toContain('file changes');
+      expect(text).toContain('commands');
+      expect(text).toContain('browser control');
+      expect(text).toContain('clipboard');
+      expect(text).toContain('screenshots and reads');
+    }
+  });
+
   it('offers the exact System Settings panes the main process will open', () => {
     // `link:open` refuses anything not on its allowlist, so a pane named here that is missing
     // there is a button that silently does nothing — which is how this failed once before.

@@ -1337,6 +1337,11 @@ export function chatApply(state: AppState, previous?: Config): void {
             }`
           : `Listening on 127.0.0.1:${bridge.port ?? '?'} · no browser is authorized or connected yet.`;
   $('bridgeState').classList.toggle('is-warn', browserRequired && (!bridge.present || !secureStorageAvailable));
+  // QA: this paragraph sat in warning red beside a green checkmark and "Connected. Listening
+  // on 127.0.0.1:…" beneath it, which reads as a problem where there is none. The copy is
+  // still worth keeping once connected — it says why the step exists — so only its urgency
+  // styling depends on whether the prerequisite it names is actually still unmet.
+  $('bridgeRequiredHint').classList.toggle('is-required', browserRequired && !bridge.present);
   void showExtensionPath();
 
   if (sessions.length > 0) paintSessions();

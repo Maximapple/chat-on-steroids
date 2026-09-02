@@ -23,7 +23,8 @@ import { rawPromises as fs } from '../rawfs.js';
 import { inboundRequestId } from './inbound.js';
 import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import type { Capabilities, Root } from '../../shared/types.js';
+import type { Capabilities, Capability, Root } from '../../shared/types.js';
+import { WRITE_CAPABILITIES } from '../../shared/types.js';
 import { FsOpError, formatBytes, type FileInfo } from '../fsops.js';
 import { logInfo, logWarn } from '../logger.js';
 import {
@@ -126,6 +127,34 @@ export type ToolResult = { content: ToolContent[]; structuredContent?: Record<st
 
 export const ok = (text: string): ToolResult => ({ content: [{ type: 'text', text }] });
 export const fail = (text: string): ToolResult => ({ content: [{ type: 'text', text }], isError: true });
+
+/**
+ * Why a capability is off, in words that name the actual switch to flip.
+ *
+ * `caps[cap]` being false has two different causes that read identically from inside a tool
+ * handler: the individual permission is unchecked, or Read-only zeroed every write capability
+ * regardless of what is individually checked. A refusal that always says "enable the permission"
+ * is wrong for the second case — it blames a checkbox that may already be on, sends the user
+ * looking for the wrong control, and (with browser, command and desktop control all withdrawn at
+ * once) can leave nothing left to reach the one control that actually fixes it. QA hit exactly
+ * that: Read-only disabled Core, browser and desktop input, and every refusal blamed its own
+ * individual permission instead of naming Read-only, the one setting that explains all three.
+ */
+export function toolDisabledMessage(readOnly: boolean, cap: Capability, name: string, settingLabel?: string): string {
+  if (readOnly && (WRITE_CAPABILITIES as readonly Capability[]).includes(cap)) {
+    return (
+      `TOOL_DISABLED: ${name} is disabled because Read-only mode is on. Read-only turns off every ` +
+      'write capability at once — file changes, commands, browser control, mouse/keyboard input and ' +
+      'clipboard writes — regardless of what is individually checked; screenshots and reads still work. ' +
+      'Ask the user to turn Read-only off in the app, then retry.'
+    );
+  }
+  return (
+    `TOOL_DISABLED: ${name} is disabled by the current Chat On Steroids permissions. ` +
+    `Ask the user to enable ${settingLabel ? `"${settingLabel}"` : 'the permission'} in the app, then retry. ` +
+    'If the tool list in this conversation is stale, start a new chat.'
+  );
+}
 
 /** Maps runtime errors to short model-facing text without ever exposing real paths. */
 export function friendlyError(err: unknown): string {
@@ -824,10 +853,7 @@ export function createRegistrar(server: McpServer, ctx: ToolContext, surface: Su
     guarded(cap, name, fn) {
       return guard(name, async () => {
         if (!caps[cap]) {
-          return fail(
-            `TOOL_DISABLED: ${name} is disabled by the current Chat On Steroids permissions. ` +
-              'Ask the user to enable the permission in the app, then retry. If the tool list in this conversation is stale, start a new chat.'
-          );
+          return fail(toolDisabledMessage(ctx.readOnly, cap, name));
         }
         return fn();
       });
