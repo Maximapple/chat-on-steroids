@@ -8,49 +8,54 @@ below turns three of those skips into answers.
 Nothing here needs ChatGPT, and nothing here needs a person: every step is a command you can run.
 Parts 1–4 do not even need the installed app; part 5 does.
 
-**Your last full run (dated 2026-09-02 against `416a060`) was a clean regression pass carrying two
-real findings of its own, both now addressed.**
+**Your last two rounds (the `416a060` regression pass, then your own `ensureTabActive`
+confirmation against `17d9b8f`) closed out everything this document was carrying, and one more
+round on top of your confirmation changed the fix again — worth reading before you re-test.**
 
-- **The 120 ms scroll ceiling was nominal, not by the clock — your own measurement.** You clocked
-  ten settled scrolls at a median 152.8 ms and the end-of-document no-op case at 297–348 ms, then
-  traced it to source: `settledScrollState`'s loop counted `elapsed` by adding the *requested*
-  10,000 µs each turn, never what `usleep` actually spent — and you measured `usleep(10_000)`
-  costing a median 12.06 ms on that machine, before a single AX read even ran. It now reads
-  `ProcessInfo.processInfo.systemUptime` against a real deadline, the same idiom every other wait
-  in this file already uses. Re-run your ten-scroll measurement; the real number is what a fix here
-  can be judged by, not a re-read of the source.
-- **`moved: null` for Chromium content is real, and is not fixed.** You scrolled the app's own
-  Setup step — the heading measurably moved from y=832 to y=313 — and `act` still answered
-  `movedUnknown: "nothing scrollable under the pointer"`. Chromium does not publish a reachable
-  `AXVerticalScrollBar` within eight parent steps of the hit point, in the browser or in this app's
-  own Electron surface, so `pointerScrollState`'s walk finds nothing to read. The field is honest
-  about not knowing rather than lying `false` — that distinction is what the round that built it
-  was for, and it holds — but the one case it exists for, ChatGPT scrolling a web page and getting
-  `moved: null` back, is exactly where it stays silent. The browser has a working second path
-  already (`verify:browser` judges scroll by position and pixels through the extension, not this
-  native read), which is why this is recorded rather than chased further this round: fixing it
-  would mean widening the AX parent-walk or finding a different Chromium-specific signal, and nothing
-  here has measured which, if either, actually reaches far enough.
-- **The `pre-push` hook not finding `node` is fixed too**, from your own report of it. `.githooks/`
-  now searches a few common install locations before giving up, and says plainly if it still can't
-  find one, instead of the bare `exec: node: not found` that read as a git problem.
+- **The 120 ms scroll ceiling is fixed and confirmed.** `settledScrollState` now reads
+  `ProcessInfo.processInfo.systemUptime` against a real deadline instead of counting requested
+  microseconds. Nothing further here.
+- **`moved: null` for Chromium content is closed, not deferred — your own follow-up measurement
+  settled it.** You walked the AX parent chain 60 steps deep from both a Chrome tab and this
+  app's own Electron surface; both chains end at `AXApplication` after 17–19 real steps, and the
+  `AXScrollArea` that sits directly over `AXWebArea` in both carries thirteen attributes, none of
+  which holds a scroll position under any name. **The answer is "not further out — not there at
+  all."** Widening the walk would cost 0.3–0.65 ms a call and find nothing; not worth building.
+  `movedUnknown: "nothing scrollable under the pointer"` is the correct, final answer for
+  Chromium content through this path, and the browser driver already answers the question that
+  actually matters through the DOM instead. Nothing to re-test; this is settled.
+- **The `pre-push` hook not finding `node` is fixed**, from your own report of it.
 
-**One thing from that run this document is still not asking you to chase.** `maxResults` clamps
-hard at 100 with no way past it except an already-known `query` — you hit this exploring the
-app's own Setup tree, which has more than 100 elements and no way to page through them blind.
+**Checks 33/45/46 are fixed, confirmed by you against the same repro that found them, and then
+changed once more from what you measured.** Both shared one cause: a backgrounded driven tab.
+Your confirmation run measured the first fix exactly right — 7275 ms → 528 ms, `moved: false` →
+`true`, the strip landing on exactly 150 rather than doubling to 300, `createdTab` 5/5 in the
+background where it had been 0/5 — and check 33's blank-screenshot/unreachable-refs half gone
+with it, as a downstream symptom of the same missing compositor. **You also measured the fix's
+own cost**, which the next commit acted on: `windows.update({ focused: true })` is a real macOS
+application switch, not just a Chrome tab switch — TextEdit frontmost to Chrome frontmost,
+1191 ms, measured directly — and takes real keystrokes from whoever is typing, unlike the
+debugger banner, tab group and pointer overlay, none of which take anything away. Per your own
+recommended order: `tabs.update({ active: true })` is now tried alone first, and only escalates
+to the window focus when that alone does not recover `visibilityState`. A new `broughtToFront`
+field on the scroll/click reply says which happened, so a real switch is now a fact rather than
+a surprise.
 
-**Checks 33/45/46, from `docs/qa/reports/2026-09-02-chatgpt-735c269.md`, are settled — not by
-another blind run, but by your own instrumented A/B.** You added `_debug` to the scroll hit test
-and drove the same fixture, same point, same element, foregrounded against backgrounded: 388 ms
-and correct versus 7275 ms and `moved: false`, with the strip's `scrollLeft` landing on *double*
-the requested distance the instant the tab was reactivated — Chrome deferring the compositor
-work rather than dropping it. `createdTab` shared the cause: a link opened from a backgrounded
-tab gets a new tab whose `openerTabId` names whichever tab is active, not the one that clicked —
-5/5 foregrounded, 0/5 backgrounded, ten runs, no exceptions. Both are now fixed at that source:
-the driver activates the driven tab, and waits for `visibilityState: "visible"`, before a scroll
-or a click. Nothing here to re-test — this was extension/MCP work, not Swift — but
-`scripts/diag-scroll46.mjs` and the temporary `_debug` fields are still in the tree on purpose,
-for whoever runs the next full round to confirm against before they come out.
+**This is the one thing from this whole chain your confirmation round could not test, because it
+never needed the window to switch app.** Re-run your same repro, but this time with a *different
+macOS application* frontmost when the driven tab is backgrounded (not just a same-window tab
+switch) — confirm `tabs.update` alone still recovers `visibilityState` where it can, and that
+`broughtToFront: true` appears (and the real app switch happens) only in the case that actually
+needs it, not on every call. `scripts/diag-scroll46.mjs` and the temporary `_debug` fields are
+gone from the tree now (you removed them, recoverable with `git checkout afcb694 -- <path>`), so
+this one is best done by reading `broughtToFront` off the ordinary reply rather than rebuilding
+the instrumentation — the field exists for exactly this.
+
+**Also worth a look while you're in the Permissions card: the read-only hint's own indent.** It
+sat flush with the card's edges — 0px in, against the header's 15px and the permission rows'
+16px — which was reported directly as still looking "poorly fitted." It now carries
+`padding: 0 15px 10px`. Confirm it lines up with the header and the rows below it, at the
+default window size.
 
 **Two UX opinions from your own "wie ich den Kasten beurteile" section, worth keeping in view but
 not asked as checks below.** The Permissions box scrolls without showing it — six rows exist,
@@ -484,9 +489,12 @@ says to expect. Then, plainly:
 - **`warm`, `cursor` and `windows` with a stray key: `BAD_REQUEST` naming it on all three, or
   still silently `ok` on any of them?**
 - **The Permissions card: does the read-only hint still read cleanly above a fully visible first
-  permission row, at the default window size?**
+  permission row, and now also indented to match the header and rows, at the default window
+  size?**
 - **The drag regression: still gone, or back? Two clean rounds so far.**
-- **The scroll ceiling, re-measured: median close to 120 ms now, or still well past it?**
+- **`broughtToFront` with a real application switch: does `tabs.update` alone recover
+  `visibilityState` when only the Chrome tab was backgrounded, and does the window only come
+  forward — with `broughtToFront: true` on the reply — when the app itself was not frontmost?**
 - **The two open UX opinions — the invisibly-scrolling Permissions box and the missing
   last-checked timestamp: still true? Still worth fixing, in your judgement?**
 
