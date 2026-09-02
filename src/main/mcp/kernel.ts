@@ -24,7 +24,7 @@ import { inboundRequestId } from './inbound.js';
 import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { Capabilities, Capability, Root } from '../../shared/types.js';
-import { WRITE_CAPABILITIES } from '../../shared/types.js';
+import { CAPABILITY_LABELS, WRITE_CAPABILITIES } from '../../shared/types.js';
 import { FsOpError, formatBytes, type FileInfo } from '../fsops.js';
 import { logInfo, logWarn } from '../logger.js';
 import {
@@ -139,6 +139,16 @@ export const fail = (text: string): ToolResult => ({ content: [{ type: 'text', t
  * once) can leave nothing left to reach the one control that actually fixes it. QA hit exactly
  * that: Read-only disabled Core, browser and desktop input, and every refusal blamed its own
  * individual permission instead of naming Read-only, the one setting that explains all three.
+ *
+ * The other half of that same defect survived one round longer than the Read-only case: a
+ * caller that passed no `settingLabel` at all — `guarded()` below is the one call site that
+ * never did — fell back to "the permission", naming nothing. QA measured it on `observe` with
+ * Desktop switched off: `TOOL_DISABLED: observe is disabled by the current Chat On Steroids
+ * permissions. Ask the user to enable the permission in the app`, which does not say which one.
+ * `settingLabel` now defaults to the capability's own row label from Settings — the same text
+ * `CAPABILITY_LABELS` already renders beside its checkbox — so a caller only has to override it
+ * for a tool whose name does not match its capability one-to-one (`create` behind `apply_patch`,
+ * for instance); every plain `guarded()` call gets a correct, specific label for free.
  */
 export function toolDisabledMessage(readOnly: boolean, cap: Capability, name: string, settingLabel?: string): string {
   if (readOnly && (WRITE_CAPABILITIES as readonly Capability[]).includes(cap)) {
@@ -149,9 +159,10 @@ export function toolDisabledMessage(readOnly: boolean, cap: Capability, name: st
       'Ask the user to turn Read-only off in the app, then retry.'
     );
   }
+  const label = settingLabel ?? CAPABILITY_LABELS[cap];
   return (
     `TOOL_DISABLED: ${name} is disabled by the current Chat On Steroids permissions. ` +
-    `Ask the user to enable ${settingLabel ? `"${settingLabel}"` : 'the permission'} in the app, then retry. ` +
+    `Ask the user to enable "${label}" in the app, then retry. ` +
     'If the tool list in this conversation is stale, start a new chat.'
   );
 }
