@@ -260,6 +260,30 @@ describe('macOS desktop safety hardening', () => {
     expect(swift).not.toContain('no matching visible window is available');
   });
 
+  /**
+   * An unrecognized field is refused everywhere it is cheap to check, not just on `act`.
+   *
+   * `window` was fixed as its own case first, then `act` got a general stray-key check — and a
+   * QA round measured that the rule had still not reached anywhere else: `warm`, `cursor` and
+   * `windows` took any key at all and silently did nothing with it, answering `ok: true` for a
+   * field that was never read. This pins that the same shape of check now guards those three.
+   */
+  it('rejects an unrecognized field on warm, cursor and windows instead of silently ignoring it', () => {
+    expect(swift).toMatch(/operation == "warm" \|\| operation == "cursor"/);
+    expect(swift).toMatch(/request\.keys\.first\(where: \{ \$0 != "op" \}\)/);
+    expect(swift).toContain('It takes no fields beyond `op`. Nothing was done.');
+
+    expect(swift).toMatch(/if operation == "windows" \{[\s\S]{0,300}knownWindowsKeys/);
+    expect(swift).toContain('let knownWindowsKeys: Set<String> = ["op", "focusable"]');
+    expect(swift).toContain('windows does not recognize `\\(strayKey)`. It reads `focusable` only, besides `op`. Nothing was done.');
+
+    // Both new checks run before the switch that actually does the work, the same place the
+    // existing `act` check runs — a request refused here must not fall through and act anyway.
+    const beforeSwitch = swift.slice(swift.indexOf('private func handle('), swift.indexOf('var result: JSONObject = ["ok": true]'));
+    expect(beforeSwitch).toContain('operation == "warm" || operation == "cursor"');
+    expect(beforeSwitch).toContain('if operation == "windows" {');
+  });
+
   it('retains the documented process-global AX timeout contract', () => {
     expect(swift).toContain('let system = AXUIElementCreateSystemWide()');
     expect(swift).toContain('AXUIElementSetMessagingTimeout(system, 1.0)');
