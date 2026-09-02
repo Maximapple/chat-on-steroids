@@ -256,10 +256,21 @@ async function ungroupDrivenTab(tabId, groupId) {
  * does not just switch a Chrome tab, it switches the *macOS application* — measured directly,
  * TextEdit frontmost to Chrome frontmost, 1191 ms. That takes real keystrokes away from
  * whoever is typing, unlike the debugger banner, tab group and pointer overlay, none of which
- * take anything from the person watching. The reproduced bug only ever needed the tab to be
- * its *window's* active tab, not the frontmost application, so the window is only brought
- * forward when tab activation alone does not recover visibility within the same budget that
- * used to be spent unconditionally.
+ * take anything from the person watching. `visibilityState` turns out to track only whether a
+ * tab is its *window's* active one and whether that window is open — not which macOS
+ * application is frontmost — so a later measurement found the ordinary "working in another
+ * app" case never needs to escalate at all: tab activation alone recovered visibility with
+ * TextEdit genuinely frontmost throughout. The one case that reliably does need it is a
+ * minimized Chrome window.
+ *
+ * `broughtToFront` reports whether that escalation was *attempted* without error — not whether
+ * `visibilityState` confirmed it within some poll afterward. Those used to be the same return
+ * value, and a minimized window's own un-minimize animation measured a reproducible 556–588 ms
+ * against a 300 ms poll, so the one case the field exists to name was exactly the case it
+ * reported wrong: the window came forward, the scroll worked, and `broughtToFront` still said
+ * `false`. The wait after escalating is now purely a courtesy — giving the caller's own action
+ * a real chance to see `visible` before proceeding — and is generous enough to usually see it,
+ * without being what the field means.
  *
  * Best-effort and bounded throughout: a tab that cannot be activated (closed mid-call, or a
  * withdrawn permission) still gets to attempt the action rather than fail before it starts.
@@ -289,14 +300,19 @@ async function ensureTabActive(tabId) {
   }
   if (await waitVisible(300)) return { broughtToFront: false };
 
-  // The lighter fix was not enough — the window itself was not the focused application, which
-  // tab activation alone cannot reach. Pay the real cost only now that it is the thing missing.
+  // The lighter fix was not enough — the window itself was not visible, which tab activation
+  // alone cannot reach. Pay the real cost only now that it is the thing missing.
   try {
     if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
   } catch {
     return { broughtToFront: false };
   }
-  return { broughtToFront: await waitVisible(300) };
+  // 900 ms, not 300: measured at 556-588 ms for a minimized window's own un-minimize animation
+  // on real hardware, so 300 reported this exact case wrong. This wait no longer decides
+  // broughtToFront — escalating without error already did — it only gives the action that
+  // follows a real chance to find the page visible before it runs.
+  await waitVisible(900);
+  return { broughtToFront: true };
 }
 
 /**
