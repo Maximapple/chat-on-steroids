@@ -396,6 +396,14 @@ private func scrollFraction(near element: AXUIElement) -> Double? {
  * about 30 ms where 120 was spent, and — unlike any fixed figure — it still waits for an
  * application whose scrolling is animated rather than instant, which the measurement explicitly
  * did not cover. The 120 ms survives as the ceiling, so nothing can wait longer than before.
+ *
+ * "Nothing can wait longer than before" held only in requested microseconds, not on the clock. A
+ * later QA round measured the actual ceiling at 145–348 ms and traced it here: the loop counted
+ * `elapsed` by adding the *requested* 10_000 µs each turn, never the time `usleep` had actually
+ * spent — and `usleep(10_000)` measured a median 12.06 ms on that machine, over the nominal
+ * request before a single read even ran. Twelve turns of that under-count alone reach 145 ms
+ * before the requested total says 120. `systemUptime`, the deadline idiom every other wait in
+ * this file already uses, reads the clock instead of trusting the request.
  */
 private func settledScrollState(_ point: CGPoint, startedAt start: Double?) -> (pid: pid_t?, role: String?, fraction: Double?) {
     // Nothing scrollable is under the pointer, so there is no reading to settle. Give the
@@ -405,11 +413,10 @@ private func settledScrollState(_ point: CGPoint, startedAt start: Double?) -> (
         return pointerScrollState(point)
     }
     var last: (pid: pid_t?, role: String?, fraction: Double?) = (nil, nil, nil)
-    var elapsed: useconds_t = 0
     var moved = false
-    while elapsed < 120_000 {
+    let deadline = ProcessInfo.processInfo.systemUptime + 0.120
+    while ProcessInfo.processInfo.systemUptime < deadline {
         usleep(10_000)
-        elapsed += 10_000
         let current = pointerScrollState(point)
         guard let now = current.fraction else { return current }
         // Two readings agree only once the scroll has actually begun. Comparing a reading to
