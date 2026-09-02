@@ -251,30 +251,52 @@ async function ungroupDrivenTab(tabId, groupId) {
  * `findCreatedTab`'s comparison against the driven tab's own id can never match. Widening its
  * poll window would not have helped; the condition itself does not hold while backgrounded.
  *
- * Best-effort and bounded: a tab that cannot be activated (closed mid-call, or a withdrawn
- * permission) still gets to attempt the action rather than fail before it starts.
+ * `chrome.tabs.update({ active: true })` is tried first and alone, because the follow-up round
+ * that confirmed this fix also measured its cost: `chrome.windows.update({ focused: true })`
+ * does not just switch a Chrome tab, it switches the *macOS application* — measured directly,
+ * TextEdit frontmost to Chrome frontmost, 1191 ms. That takes real keystrokes away from
+ * whoever is typing, unlike the debugger banner, tab group and pointer overlay, none of which
+ * take anything from the person watching. The reproduced bug only ever needed the tab to be
+ * its *window's* active tab, not the frontmost application, so the window is only brought
+ * forward when tab activation alone does not recover visibility within the same budget that
+ * used to be spent unconditionally.
+ *
+ * Best-effort and bounded throughout: a tab that cannot be activated (closed mid-call, or a
+ * withdrawn permission) still gets to attempt the action rather than fail before it starts.
  */
 async function ensureTabActive(tabId) {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (!tab) return;
+  if (!tab) return { broughtToFront: false };
+
+  const waitVisible = async (ms) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      try {
+        const reply = await send('Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true });
+        if (reply?.result?.value === 'visible') return true;
+      } catch {
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return false;
+  };
+
   try {
     if (!tab.active) await chrome.tabs.update(tabId, { active: true });
+  } catch {
+    return { broughtToFront: false };
+  }
+  if (await waitVisible(300)) return { broughtToFront: false };
+
+  // The lighter fix was not enough — the window itself was not the focused application, which
+  // tab activation alone cannot reach. Pay the real cost only now that it is the thing missing.
+  try {
     if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
   } catch {
-    return;
+    return { broughtToFront: false };
   }
-  // tabs.update resolving is not the same as the page actually compositing again — wait for
-  // visibilityState itself, the exact fact the compositor work above is gated on.
-  const deadline = Date.now() + 500;
-  while (Date.now() < deadline) {
-    try {
-      const reply = await send('Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true });
-      if (reply?.result?.value === 'visible') return;
-    } catch {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+  return { broughtToFront: await waitVisible(300) };
 }
 
 /**
@@ -1460,7 +1482,7 @@ export const browserDriver = {
         // this one — see ensureTabActive's own comment. Without this, createdTab correlation
         // silently fails whenever the driven tab sits behind the conversation tab, which is the
         // ordinary case rather than the exception.
-        await ensureTabActive(session.tabId);
+        const { broughtToFront } = await ensureTabActive(session.tabId);
         const beforeTabs = new Set(
           (await chrome.tabs.query({}).catch(() => [])).map((tab) => tab.id)
         );
@@ -1481,7 +1503,8 @@ export const browserDriver = {
         const createdTab = await findCreatedTab(openerTabId, beforeTabs);
         return {
           clicked: { x: action.x, y: action.y, button, clickCount },
-          ...(createdTab ? { createdTab } : {})
+          ...(createdTab ? { createdTab } : {}),
+          ...(broughtToFront ? { broughtToFront } : {})
         };
       }
 
@@ -1521,7 +1544,7 @@ export const browserDriver = {
         // need — see ensureTabActive's own comment for the measurement. Without this, a scroll
         // over a backgrounded tab times out and reports moved: false for a scroll that lands a
         // few seconds later, doubled, the instant something brings the tab back.
-        await ensureTabActive(session.tabId);
+        const { broughtToFront } = await ensureTabActive(session.tabId);
         await movePointer(x, y);
         /*
          * Sent, then judged by whether the page moved — not by whether the protocol answered.
@@ -1601,7 +1624,7 @@ export const browserDriver = {
               'where the page is.'
           );
         }
-        return { scrolled: { x, y }, moved, acknowledged };
+        return { scrolled: { x, y }, moved, acknowledged, ...(broughtToFront ? { broughtToFront } : {}) };
       }
 
       case 'type': {

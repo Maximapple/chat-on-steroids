@@ -914,6 +914,13 @@ try {
         bgResult.result?.moved === true && wideAfterBg > wideBefore,
       `bg=${bg.tabId ?? bg.error} hiddenBefore=${hiddenBeforeScroll} visAfter=${visAfterScroll} ` +
         `before=${wideBefore} after=${wideAfterBg} result=${bgScroll.value ?? bgScroll.error}`);
+    // The follow-up Mac round measured windows.update({focused: true}) as a real macOS
+    // application switch and asked for the lighter tabs.update({active: true}) to be tried
+    // first, alone. Both tabs here share one Chrome window (/json/new opens the second one in
+    // it), so activation alone must already recover visibility — broughtToFront should never
+    // appear in a same-window case, only when a tab's own window was not the focused one.
+    check('same-window activation alone recovers it, without escalating to a window focus',
+      !bgResult.result?.broughtToFront, `result=${bgScroll.value ?? bgScroll.error}`);
 
     // Push it to the background again — the scroll above already reactivated it. #popsNewTab
     // lives near the top of the document, unlike #wide, so undo the earlier scroll-down first.
