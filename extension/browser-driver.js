@@ -867,11 +867,11 @@ export function requestBrowserPermissions() {
  * picture that shows something else — so scrolling waits for the position to settle and then for
  * two animation frames, which is the browser's own promise that a paint has happened.
  */
-async function settleAfterScroll(send) {
+async function settleAfterScroll(send, x, y) {
   let last = null;
   const deadline = Date.now() + 1_000;
   while (Date.now() < deadline) {
-    const now = await readScrollPosition(send);
+    const now = await readScrollPosition(send, x, y);
     if (now !== null && last !== null && now.x === last.x && now.y === last.y) break;
     last = now;
     await new Promise((resolve) => setTimeout(resolve, 40));
@@ -934,11 +934,11 @@ async function findCreatedTab(openerTabId, before) {
  * movement the same way settleAfterScroll below polls for its end, so a scroll that lands a
  * little after its dispatch call is still seen landing.
  */
-async function waitForScrollOnset(send, before, timeoutMs) {
+async function waitForScrollOnset(send, before, timeoutMs, x, y) {
   const deadline = Date.now() + timeoutMs;
   let last = before;
   for (;;) {
-    const now = await readScrollPosition(send);
+    const now = await readScrollPosition(send, x, y);
     if (now !== null) {
       last = now;
       if (before === null || now.x !== before.x || now.y !== before.y) return now;
@@ -948,10 +948,41 @@ async function waitForScrollOnset(send, before, timeoutMs) {
   }
 }
 
-async function readScrollPosition(send) {
+/**
+ * The position a scroll at `(x, y)` is actually judged by — the element under that point that
+ * can scroll, not always the window.
+ *
+ * `Input.synthesizeScrollGesture` and a wheel event both scroll whatever the compositor finds
+ * under the pointer, the same way a real wheel does: a small nested strip with its own
+ * `overflow: auto` takes the gesture and never touches `window.scrollX`/`scrollY` at all. Reading
+ * only those two, as this used to, made a real, visible scroll of that strip indistinguishable
+ * from nothing happening — QA's fixture moved WIDE 1/2 → 2/3 → 3/4 on screen while every check
+ * here kept reporting `BROWSER_SCROLL_FAILED`. `elementFromPoint` finds the same element the
+ * gesture would have hit and walks up to the nearest one that can actually scroll in either
+ * axis; only when none exists — the ordinary case, an element-less point or the page itself —
+ * does this fall back to the window, which is the only thing a plain page scroll ever moves.
+ */
+function scrollTargetExpression(x, y) {
+  return (
+    '(() => {' +
+    `const px = ${Math.round(x)}, py = ${Math.round(y)};` +
+    'let el = document.elementFromPoint(px, py);' +
+    'while (el && el !== document.documentElement && el !== document.body) {' +
+    'const style = getComputedStyle(el);' +
+    'const canX = el.scrollWidth > el.clientWidth && /(auto|scroll)/.test(style.overflowX);' +
+    'const canY = el.scrollHeight > el.clientHeight && /(auto|scroll)/.test(style.overflowY);' +
+    'if (canX || canY) return { x: Math.round(el.scrollLeft), y: Math.round(el.scrollTop) };' +
+    'el = el.parentElement;' +
+    '}' +
+    'return { x: Math.round(scrollX), y: Math.round(scrollY) };' +
+    '})()'
+  );
+}
+
+async function readScrollPosition(send, x, y) {
   try {
     const reply = await send('Runtime.evaluate', {
-      expression: '({ x: Math.round(scrollX), y: Math.round(scrollY) })',
+      expression: scrollTargetExpression(x, y),
       returnByValue: true
     });
     const value = reply?.result?.value;
@@ -1452,7 +1483,7 @@ export const browserDriver = {
          */
         const dx = Number(action.scroll_x ?? 0);
         const dy = Number(action.scroll_y ?? 0);
-        const before = await readScrollPosition(send);
+        const before = await readScrollPosition(send, x, y);
         const moveFrom = (position) =>
           position !== null && before !== null && (position.x !== before.x || position.y !== before.y);
 
@@ -1484,7 +1515,7 @@ export const browserDriver = {
           if (error?.code !== 'BROWSER_TIMEOUT') throw error;
           acknowledged = false;
         }
-        let after = await waitForScrollOnset(send, before, SCROLL_ONSET_TIMEOUT_MS);
+        let after = await waitForScrollOnset(send, before, SCROLL_ONSET_TIMEOUT_MS, x, y);
         if (!moveFrom(after)) {
           // The wheel event as a fallback: it is what worked before Chrome stopped acting on it,
           // and a browser that ignores the gesture instead is not one this code has met.
@@ -1497,11 +1528,11 @@ export const browserDriver = {
             if (error?.code !== 'BROWSER_TIMEOUT') throw error;
             acknowledged = false;
           }
-          after = await waitForScrollOnset(send, before, SCROLL_ONSET_TIMEOUT_MS);
+          after = await waitForScrollOnset(send, before, SCROLL_ONSET_TIMEOUT_MS, x, y);
         }
         if (moveFrom(after)) {
-          await settleAfterScroll(send);
-          after = await readScrollPosition(send);
+          await settleAfterScroll(send, x, y);
+          after = await readScrollPosition(send, x, y);
         }
         const moved = moveFrom(after);
         // Not moving is not the same as not working. A page already at its end does not move, and

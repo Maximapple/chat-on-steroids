@@ -114,6 +114,12 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Driver fixture</title>
 <input id="agree" type="checkbox" aria-label="Agree to terms">
 <div id="hoverlog">no hover</div>
 <iframe id="frame" src="/frame" style="width:320px;height:80px;border:1px solid #ccc"></iframe>
+<!-- A small horizontally-scrollable strip, absolutely positioned so it costs the rest of the
+     fixture no layout shift and sits well clear of the (400,300) point the page-scroll checks
+     use. Its own content is wider than its box, so scrolling it is a real, judgeable movement. -->
+<div id="wide" style="position:absolute;left:16px;top:460px;width:200px;height:40px;overflow-x:auto;white-space:nowrap;border:1px solid #999">
+  <span style="display:inline-block;width:700px;padding:0 8px">a strip of content much wider than its own box</span>
+</div>
 <!-- Last, so the page can scroll without pushing anything above it out of the viewport. -->
 <div id="tall" style="height:3000px">room to scroll</div>
 <!-- A band at a known place in the document, so a screenshot of a scrolled page can be judged by
@@ -586,6 +592,40 @@ try {
   // need. Reported rather than asserted exactly — a gesture arrives as several events, so no one
   // number is the total.
   check('the page sees a trusted wheel event going down', wheelArrived, wheelLog);
+
+  /*
+   * Horizontal scroll of an element, not of the page.
+   *
+   * Every scroll check above targets the document itself, judged by `document.scrollingElement`.
+   * QA's real 49-check run hit a case none of them cover: a small horizontally-scrollable strip
+   * nested inside the page. The gesture and the wheel fallback both land on it correctly —
+   * screenshots proved the strip's own content moving — but `readScrollPosition` only ever read
+   * `window.scrollX`/`scrollY`, which an inner element's own scroll never touches, so a scroll
+   * that had worked was judged not to have happened and reported `BROWSER_SCROLL_FAILED`.
+   */
+  const wideBefore = Number(await readPage(`document.getElementById('wide').scrollLeft`));
+  const wideCenter = await readPage(
+    `(() => { const r = document.getElementById('wide').getBoundingClientRect(); ` +
+      'return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()'
+  );
+  const wideScrolled = await run(`(async () => {
+    try {
+      const result = await globalThis.__driver.browserDriver.act({
+        type: 'scroll', x: ${wideCenter.x}, y: ${wideCenter.y}, scroll_x: 150, scroll_y: 0
+      });
+      return JSON.stringify(result);
+    } catch (error) { return JSON.stringify({ error: (error.code || '') + ': ' + error.message }); }
+  })()`);
+  await sleep(700);
+  const wideAfter = Number(await readPage(`document.getElementById('wide').scrollLeft`));
+  const wideResult = JSON.parse(String(wideScrolled.value ?? wideScrolled.error ?? '{}'));
+  // The element moving is not enough to pass: the defect is a wrong *report*, not a dead
+  // gesture — a wheel fallback can move this element for real while the driver still judges
+  // by window.scrollX/scrollY and answers moved:false (or, on QA's machine, times out
+  // entirely and throws). So the returned moved flag has to be checked, not just the pixel.
+  check('a horizontal scroll over a nested scrollable element reports that it moved',
+    wideAfter > wideBefore && wideResult.moved === true && !wideResult.error,
+    `before=${wideBefore} after=${wideAfter} result=${wideScrolled.value ?? wideScrolled.error}`);
 
   /*
    * Where the *picture* says the page is, which is a different fact from where the counter says.
