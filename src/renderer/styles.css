@@ -355,6 +355,16 @@ main {
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 
+/* .hint carries no padding of its own — every other place it appears sits inside a
+   container (a .field, a settings row) that already supplies it. #readOnlyHint is a direct
+   child of the card instead, so without its own it ran flush to the card's edges: 0px
+   left/right against the 15px the header and 16px the permission rows are indented by,
+   which read as misaligned rather than merely close. */
+#readOnlyHint {
+  margin: 0;
+  padding: 0 15px 10px;
+}
+
 .card > h2 {
   display: flex;
   align-items: center;
