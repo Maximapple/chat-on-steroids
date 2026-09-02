@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import {
   act,
   actAndCapture,
@@ -13,6 +13,20 @@ import {
 import { IS_WINDOWS } from './helpers.js';
 
 describe.runIf(IS_WINDOWS)('desktop helper', () => {
+  /**
+   * Pay the helper's cold start once, outside any test that is measured.
+   *
+   * Starting it is a process launch on a hosted Windows runner, behind whatever antivirus that
+   * image runs, and it is not the subject of a single test here. It overran the 15 s default on
+   * one CI run and failed exactly the first two tests in this block, while the other eighteen —
+   * which found the helper already warm — passed. Raising each test's limit would have hidden
+   * that; taking the launch out of the measured region means every test below still asserts
+   * against the default, about its own subject.
+   */
+  beforeAll(async () => {
+    await listWindows();
+  }, 120_000);
+
   // A hosted runner can have no visible desktop window at all, and getWindowState is right
   // to answer that with WINDOW_NOT_FOUND — that is the production semantic, not a bug to
   // work around here. The tests below are about what a window state *says* once there is a
