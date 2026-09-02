@@ -545,7 +545,14 @@ der einzige Eingabepfad ohne Wirkungsbeleg. `scroll` hat `moved`, `act_ui` hat `
 **Was ich am Zustand der Maschine berührt habe.** Zwei Finder-Fenster angelegt und über den Helfer
 wieder geschlossen; Testordner entfernt; zwei TextEdit-Dokumente und zwei Chrome-Tabs im
 Arbeitsordner geöffnet. **Read-only einmal an- und wieder ausgeschaltet** — gegengeprüft, es steht
-wieder aus. An den Systemeinstellungen wurde nichts angefasst, `/pair` nicht aufgerufen.
+wieder aus. `/pair` nicht aufgerufen.
+
+**Für Fund 2 an den Systemeinstellungen:** „Chat On Steroids" die Bildschirmaufnahme entzogen und
+danach wieder erteilt — beide Male hat Maxim sich angemeldet, und beide Male habe ich bei macOS'
+Rückfrage **„Später"** gewählt, damit die App weiterlaufen und beobachtet werden konnte. Danach
+**alle Schalter im Bild gegengeprüft: alle wieder an**, einschließlich beider Einträge der App.
+Die App wurde nach der erneuten Erteilung neu gestartet, hält die Berechtigung also tatsächlich.
+Sonst wurde an den Systemeinstellungen nichts angefasst.
 
 **Fund 2 ist erledigt, und die App kommt dabei gut weg.** Sie liest alle fünf bis sechs Sekunden
 nach, sie zeigt im richtigen Zustand einen Knopf, der zum richtigen Bereich führt, und sie erklärt
