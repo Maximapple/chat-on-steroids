@@ -53,19 +53,10 @@ export const DRIVEN_GROUP_TITLE = 'Chat On Steroids';
  * stored credentials and other extensions. `file:` is refused because a page that can be
  * driven should not also be a filesystem reader.
  */
-export const REFUSED_URLS = [
-  /^https:\/\/chatgpt\.com/i,
-  /^https:\/\/chat\.openai\.com/i,
-  /^chrome:/i,
-  /^edge:/i,
-  /^about:/i,
-  /^devtools:/i,
-  /^chrome-extension:/i,
-  /^moz-extension:/i,
-  /^view-source:/i,
-  /^file:/i,
-  /^javascript:/i
-];
+export const REFUSED_HOSTS = ['chatgpt.com', 'chat.openai.com'];
+
+/** The only two schemes a driven page may use. Everything else is refused by being absent. */
+const DRIVABLE_SCHEMES = ['http:', 'https:'];
 
 /**
  * The modifier that means "select all" on this machine.
@@ -102,6 +93,17 @@ const COMPOSITOR_TIMEOUT_MS = 30_000;
 const SCROLL_TIMEOUT_MS = 5_000;
 /** Upper bound on elements one observation returns, so a huge page cannot flood the model. */
 const MAX_ELEMENTS = 200;
+/**
+ * How long a drag holds the button down before moving, and hovers before letting go.
+ *
+ * The same two numbers both desktop drivers use, for the same reason: a press and a release in
+ * the same instant is a click, and neither an HTML5 drag nor a hover-armed drop target ever
+ * starts. Copied deliberately rather than re-derived, so all three drivers behave alike.
+ */
+const DRAG_PRESS_HOLD_MS = 90;
+const DRAG_DROP_DWELL_MS = 140;
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class BrowserDriverError extends Error {
   constructor(code, message) {
@@ -116,12 +118,32 @@ const fail = (code, message) => new BrowserDriverError(code, message);
 export function refusedUrl(url) {
   const value = String(url ?? '').trim();
   // An address that cannot be read is refused, not allowed. Chrome answers `tab.url` with
-  // undefined for any tab the extension has no access to, and every pattern below then misses —
-  // so the ChatGPT refusal, the one this list exists for, would quietly stop applying to the
-  // tabs it must cover, and `chrome://settings` would read as an ordinary page. A tab whose
-  // address is unknown is a tab that cannot be shown safe to drive, which is the same answer.
+  // undefined for any tab the extension has no access to, and a refusal that misses there would
+  // quietly stop applying to the tabs it must cover. A tab whose address is unknown is a tab
+  // that cannot be shown safe to drive, which is the same answer.
   if (!value) return true;
-  return REFUSED_URLS.some((pattern) => pattern.test(value));
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    // Not an address at all. Same reasoning as above.
+    return true;
+  }
+  // Everything but the ordinary web is refused by not being on this list, rather than by being
+  // on a list of what to reject. The rejection list was the bug: it matched `chrome:`, `file:`,
+  // `javascript:` and the rest by name, so any scheme nobody thought of — and any new one a
+  // browser adds — read as an ordinary page.
+  if (!DRIVABLE_SCHEMES.includes(parsed.protocol.toLowerCase())) return true;
+  // The host, parsed, not the start of the string.
+  //
+  // This was `/^https:\/\/chatgpt\.com/i`, and a string prefix is the wrong instrument for the
+  // most important rule in this file. `http://chatgpt.com/` did not match, and Chrome then
+  // redirects it to https with the session still attached; `https://user@chatgpt.com/` did not
+  // match either, because the userinfo sits where the host was expected. Meanwhile
+  // `https://sub.chatgpt.com/` was allowed and `https://chatgpt.com.example/` was refused —
+  // both backwards. Comparing the parsed host answers all four correctly at once.
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+  return REFUSED_HOSTS.some((refused) => host === refused || host.endsWith(`.${refused}`));
 }
 
 /**
@@ -964,7 +986,11 @@ export const browserDriver = {
     // Say what was let go of. "No tab is under control" is the state afterwards and it is true,
     // but as the answer to detach it reads as though there had been nothing to detach — which is
     // the one thing it cannot distinguish. Naming the tab makes the effect legible.
-    return { attached: false, tabId: null, url: null, title: null, released };
+    // The build belongs on both branches. It was on the one that had nothing to let go of and
+    // not on the one that did, so every successful detach printed "driver build unreported" —
+    // the exact string the QA instructions call a finding. A false alarm in the answer that is
+    // supposed to settle which driver ran is worse than no answer at all.
+    return { attached: false, tabId: null, url: null, title: null, released, build: await stamp() };
   },
 
   /**
@@ -1158,6 +1184,9 @@ export const browserDriver = {
         const url = String(action.url ?? '');
         await send('Page.navigate', { url }, NAVIGATE_TIMEOUT_MS);
         await restorePointer();
+        // Where it landed, not where it was aimed. A redirect can end on a refused page, and an
+        // action that only judges its argument cannot see that.
+        await this.assertPageStillAllowed();
         return { navigated: url };
       }
       case 'back':
@@ -1166,13 +1195,20 @@ export const browserDriver = {
         const index = history.currentIndex + (type === 'back' ? -1 : 1);
         const entry = history.entries?.[index];
         if (!entry) throw fail('BROWSER_NO_HISTORY', `there is nothing to go ${type} to`);
+        // The destination is known before moving, so a refused one is refused before it is
+        // reached rather than after. History is the one navigation that can say this in advance.
+        if (refusedUrl(entry.url)) {
+          throw fail('BROWSER_URL_REFUSED', `browser control refuses ${entry.url}`);
+        }
         await send('Page.navigateToHistoryEntry', { entryId: entry.id }, NAVIGATE_TIMEOUT_MS);
         await restorePointer();
+        await this.assertPageStillAllowed();
         return { navigated: entry.url };
       }
       case 'reload':
         await send('Page.reload', {}, NAVIGATE_TIMEOUT_MS);
         await restorePointer();
+        await this.assertPageStillAllowed();
         return { reloaded: true };
 
       case 'click_ref': {
@@ -1270,6 +1306,11 @@ export const browserDriver = {
         await send('Input.dispatchMouseEvent', {
           type: 'mousePressed', x: path[0].x, y: path[0].y, button, buttons: mask, clickCount: 1, modifiers
         });
+        // Held before moving, and dwelt on before releasing. Both desktop drivers learned this
+        // the hard way and carry the same two numbers; this one still teleported press to
+        // release, so an HTML5 drag never started and a drop target that arms on hover never
+        // armed. A drag that presses and lets go in the same instant is a click with waypoints.
+        await pause(DRAG_PRESS_HOLD_MS);
         for (const point of path.slice(1)) {
           await movePointer(point.x, point.y, true);
           await send('Input.dispatchMouseEvent', {
@@ -1277,6 +1318,7 @@ export const browserDriver = {
           });
         }
         const last = path[path.length - 1];
+        await pause(DRAG_DROP_DWELL_MS);
         await send('Input.dispatchMouseEvent', {
           type: 'mouseReleased', x: last.x, y: last.y, button, buttons: 0, clickCount: 1, modifiers
         });

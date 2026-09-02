@@ -47,6 +47,20 @@ describe('a browser answer carries what the driver answered', () => {
     expect(idle.lines[0]).toContain('driver build a40c45c0ba34');
   });
 
+  it('names the driver on a detach that actually let a tab go', () => {
+    // The branch a review found bare. `status` had the build on both of its branches and detach
+    // on only one, so the answer that reports a real release printed the one phrase the QA
+    // instructions tell a run to treat as a finding.
+    const { lines } = renderBrowserAction('detach', {
+      attached: false,
+      released: { tabId: 7, url: 'https://example.com', title: 'Example' },
+      build: 'a40c45c0ba34'
+    });
+    expect(lines[0]).toContain('let go of tab 7');
+    expect(lines[0]).toContain('driver build a40c45c0ba34');
+    expect(lines[0]).not.toContain('unreported');
+  });
+
   it('says so plainly when the driver did not name itself', () => {
     // Silence here is what made a stale extension indistinguishable from a fresh one.
     const { lines } = renderBrowserAction('status', { attached: false });
