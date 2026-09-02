@@ -100,11 +100,21 @@
               <h2>
                 Permissions
                 <span class="acts">
-                  <button class="btn" id="readOnlyBtn" type="button">
+                  <button
+                    class="btn"
+                    id="readOnlyBtn"
+                    type="button"
+                    title="Disables file changes, commands, browser control, mouse/keyboard input and clipboard writes; screenshots and reads still work."
+                  >
                     <svg class="ico" viewBox="0 0 24 24"><use href="#i-lock" /></svg>Read-only
                   </button>
                 </span>
               </h2>
+              <p class="hint" id="readOnlyHint">
+                Read-only disables file changes, commands, browser control, mouse/keyboard input and
+                clipboard writes at once, regardless of which boxes below are checked — screenshots and
+                reads still work. Turn it back off here to restore write access; nothing else can.
+              </p>
               <div class="scroll">
                 <div id="groups"></div>
                 <div class="desktop-access" id="desktopAccess" hidden>
@@ -399,7 +409,7 @@
                     choose <strong>Load unpacked</strong> and pick the folder the button opens. It
                     pairs with this app by itself — there is no code to type.
                   </p>
-                  <p class="hint is-required">
+                  <p class="hint is-required" id="bridgeRequiredHint">
                     <strong>Required for sub-agents:</strong> the companion extension must be loaded
                     and connected in ChatGPT. Without it, Chat On Steroids cannot identify, open or
                     coordinate worker chats.

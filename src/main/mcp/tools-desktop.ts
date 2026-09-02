@@ -40,6 +40,7 @@ import {
   mouseButtonArg,
   ok,
   pointArg,
+  toolDisabledMessage,
   windowIdArg,
   type SurfaceRegistrar,
   type ToolContent
@@ -99,12 +100,15 @@ const browserActionArg = z.discriminatedUnion('type', [
   z.object({ type: z.literal('back') }).strict().describe('Back.'),
   z.object({ type: z.literal('forward') }).strict().describe('Forward.'),
   z.object({ type: z.literal('reload') }).strict().describe('Reload.'),
-  z.object({ type: z.literal('click_ref'), ref: z.string().min(1).max(16), button: mouseButtonArg.optional() }).strict().describe('Click a ref.'),
-  z.object({ type: z.literal('set_value'), ref: z.string().min(1).max(16), text: z.string().max(20_000) }).strict().describe('Replace a field by ref.'),
+  // 32, not 16: refs now carry the observation generation that minted them (e.g. "g12_e4"), so a
+  // stale one from an earlier observation never coincidentally matches a live one after a later
+  // observation recycles the same short index.
+  z.object({ type: z.literal('click_ref'), ref: z.string().min(1).max(32), button: mouseButtonArg.optional() }).strict().describe('Click a ref.'),
+  z.object({ type: z.literal('set_value'), ref: z.string().min(1).max(32), text: z.string().max(20_000) }).strict().describe('Replace a field by ref.'),
   z.object({ type: z.literal('click'), x: imageCoordinateArg, y: imageCoordinateArg, button: mouseButtonArg.optional() }).strict().describe('Click at pixels.'),
   z.object({ type: z.literal('double_click'), x: imageCoordinateArg, y: imageCoordinateArg }).strict().describe('Double-click at pixels.'),
   z.object({ type: z.literal('move'), x: imageCoordinateArg, y: imageCoordinateArg }).strict().describe('Move the pointer.'),
-  z.object({ type: z.literal('move_ref'), ref: z.string().min(1).max(16) }).strict().describe('Hover a ref, pressing nothing.'),
+  z.object({ type: z.literal('move_ref'), ref: z.string().min(1).max(32) }).strict().describe('Hover a ref, pressing nothing.'),
   z.object({ type: z.literal('drag'), path: z.array(pointArg).min(2).max(64), button: mouseButtonArg.optional() }).strict().describe('Drag along a path.'),
   z.object({ type: z.literal('scroll'), x: imageCoordinateArg, y: imageCoordinateArg, scroll_x: scrollDeltaArg.optional(), scroll_y: scrollDeltaArg.optional() }).strict().describe('Scroll at a point.'),
   z.object({ type: z.literal('type'), text: z.string().max(4_000) }).strict().describe('Type into focus.'),
@@ -507,10 +511,7 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
           // need "control", the clipboard steps need their own, and one blanket refusal
           // would hide which of them the user actually has to switch on.
           if (!caps.control && actions.some((a) => a.type !== 'wait' && !a.type.endsWith('_clipboard'))) {
-            return fail(
-              'TOOL_DISABLED: mouse and keyboard control is disabled by the current Chat On Steroids permissions. ' +
-                'Ask the user to enable "Control mouse and keyboard" in the app, then retry.'
-            );
+            return fail(toolDisabledMessage(ctx.readOnly, 'control', 'mouse and keyboard control', 'Control mouse and keyboard'));
           }
           const parsed: Action[] = [];
           for (const a of actions) {
@@ -551,13 +552,13 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
                 // schema is cached by ChatGPT, and a tool that quietly changes shape when
                 // a checkbox moves is worse than one that says plainly it is switched off.
                 if (!caps.clipboardRead) {
-                  return fail('TOOL_DISABLED: read_clipboard needs the Read the clipboard permission.');
+                  return fail(toolDisabledMessage(ctx.readOnly, 'clipboardRead', 'read_clipboard', 'Read the clipboard'));
                 }
                 parsed.push({ type: 'read_clipboard' });
                 break;
               case 'write_clipboard':
                 if (!caps.clipboardWrite) {
-                  return fail('TOOL_DISABLED: write_clipboard needs the Replace clipboard text permission.');
+                  return fail(toolDisabledMessage(ctx.readOnly, 'clipboardWrite', 'write_clipboard', 'Replace clipboard text'));
                 }
                 parsed.push({ type: 'write_clipboard', text: a.text });
                 break;
@@ -657,7 +658,18 @@ Scroll: ${
                     : `whether it moved is unreadable (${String(result.scroll['movedUnknown'] ?? 'no scroller')})`
               }. ${JSON.stringify(result.scroll)}`
             : '';
-          const done = `Done ${result.completedCount}/${parsed.length} via ${routeSummary}: ${parsed.map((a) => a.type).join(', ')}. ${pointer}${clipboard ? `\n${clipboard}` : ''}${verified}${captureFallback}${scroll}`;
+          // Same reasoning as scroll's `moved`: a click_ref's semantic press can report success
+          // at the accessibility-API level while the control it named never actually changed —
+          // measured against a real System Settings toggle that answered success and stayed put
+          // until a coordinate click on the same spot moved it. Silence here would let that
+          // recur unnoticed on every other control shaped like it.
+          const uiChange =
+            result.uiChanged === true
+              ? '\nClick: the control’s reported value changed.'
+              : result.uiChanged === false
+                ? '\nClick: the accessibility action reported success, but the control’s reported value did not change. Try clicking the same coordinates instead.'
+                : '';
+          const done = `Done ${result.completedCount}/${parsed.length} via ${routeSummary}: ${parsed.map((a) => a.type).join(', ')}. ${pointer}${clipboard ? `\n${clipboard}` : ''}${verified}${captureFallback}${scroll}${uiChange}`;
           const shot = result.screenshot;
           if (shot) {
             return desktopImageResult(

@@ -1542,7 +1542,32 @@ describe('desktop capabilities', () => {
       arguments: { actions: [{ type: 'write_clipboard', text: 'nope' }] }
     });
     expect(written.body.result?.isError).toBe(true);
-    expect(textOf(written)).toContain('Replace clipboard text permission');
+    expect(textOf(written)).toContain('"Replace clipboard text"');
+  });
+
+  // The read-only branch of the same refusal: caps.control is false because Read-only zeroed
+  // it, not because the checkbox is off, so the refusal must name Read-only and not send the
+  // user hunting for a permission that may already be granted.
+  it('blames Read-only by name instead of the individual permission it overrode', async () => {
+    const config = { ...defaultConfig('win32'), capabilities: withCaps({ screen: true, control: true }) };
+    // Expose `computer` first, the same way a real session would have before Read-only was
+    // switched on mid-run — exposedCaps only ever widens, so a fresh context that starts in
+    // read-only mode never registers the tool at all and there is nothing to call.
+    ctx.readOnly = false;
+    ctx.caps = effectiveCapabilities({ ...config, readOnly: false }, 'win32');
+    expect(toolNames(await desktop('tools/list'))).toContain('computer');
+
+    ctx.readOnly = true;
+    ctx.caps = effectiveCapabilities({ ...config, readOnly: true }, 'win32');
+
+    const clicked = await desktop('tools/call', {
+      name: 'computer',
+      arguments: { actions: [{ type: 'click', x: 5, y: 5 }] }
+    });
+    expect(clicked.body.result?.isError).toBe(true);
+    expect(textOf(clicked)).toContain('Read-only mode is on');
+    expect(textOf(clicked)).toContain('turn Read-only off');
+    expect(textOf(clicked)).not.toContain('enable "Control mouse and keyboard"');
   });
 
   it('marks observing read-only and control destructive', async () => {

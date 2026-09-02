@@ -145,6 +145,18 @@ export interface ActionResult {
    * with no scroll in it, and on platforms whose helper does not report it.
    */
   scroll: Record<string, unknown> | null;
+  /**
+   * Whether a `click_ref` on a semantic control actually changed the value it reports, when
+   * that could be checked.
+   *
+   * `AXUIElementPerformAction` returning success is the OS saying the message was accepted, not
+   * that anything happened — measured directly: a System Settings toggle answered success and
+   * stayed exactly where it was, while a coordinate click on the same spot moved it. This is the
+   * same claim as `scroll`'s `moved` for the semantic path. Null when the control has nothing
+   * comparable to check (an ordinary button) or no click_ref ran; that is a different fact from
+   * "unchanged" and must not collapse into it.
+   */
+  uiChanged: boolean | null;
 }
 
 export type VerificationSpec =
@@ -1733,6 +1745,7 @@ async function actLocked(
   const clipboard: string[] = [];
   const routes: ActionResult['routes'] = [];
   let scrollEvidence: ActionResult['scroll'] = null;
+  let uiChanged: ActionResult['uiChanged'] = null;
   let completedCount = 0;
   let batch: ReturnType<typeof mapOne>[] = [];
   let batchIndices: number[] = [];
@@ -1765,6 +1778,9 @@ async function actLocked(
       helperUsed = true;
       if (reply['scroll'] && typeof reply['scroll'] === 'object') {
         scrollEvidence = reply['scroll'] as Record<string, unknown>;
+      }
+      if (typeof reply['ui_changed'] === 'boolean') {
+        uiChanged = reply['ui_changed'];
       }
       const helperRoutes = Array.isArray(reply['routes']) ? reply['routes'].map(String) : [];
       for (let index = 0; index < sending.length; index++) {
@@ -1848,7 +1864,8 @@ async function actLocked(
       completedCount,
       routes,
       targetWindow: inferredTargetWindow ?? null,
-      scroll: scrollEvidence
+      scroll: scrollEvidence,
+      uiChanged
     };
   }
 
@@ -1887,7 +1904,8 @@ async function actLocked(
     completedCount,
     routes,
     targetWindow: inferredTargetWindow ?? null,
-    scroll: scrollEvidence
+    scroll: scrollEvidence,
+    uiChanged
   };
 }
 

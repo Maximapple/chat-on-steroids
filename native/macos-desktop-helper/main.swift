@@ -442,6 +442,19 @@ private func axOptionalBool(_ element: AXUIElement, _ attribute: CFString) -> Bo
     (axAttribute(element, attribute) as? NSNumber)?.boolValue
 }
 
+/**
+ * A comparable snapshot of a control's own reported value, when it has one.
+ *
+ * `AnyObject` bridges every AXValue shape this actually returns for a value worth comparing —
+ * `NSNumber` for a checkbox or switch, `NSString` for a text control — to something `isEqual`
+ * can judge. Nil is not "empty" or "false"; it is "this control publishes no comparable value
+ * at all", which an ordinary action button does not, and must stay distinguishable from a
+ * value that was read and did not change.
+ */
+private func axComparableValue(_ element: AXUIElement) -> NSObject? {
+    axAttribute(element, kAXValueAttribute as CFString) as? NSObject
+}
+
 /** Whether accessibility itself says this control's value can be written. */
 private func axValueIsSettable(_ element: AXUIElement) -> Bool {
     var settable = DarwinBoolean(false)
@@ -1728,12 +1741,17 @@ private func actUI(_ request: JSONObject) throws -> JSONObject {
         throw fail("UI_ACTION_DISABLED", "the referenced accessibility control is disabled")
     }
     var route = "uia"
+    // Whether the control's own reported value actually moved, for the click branch only —
+    // nil where there is nothing comparable to say (an ordinary button, say), which is a
+    // different fact from "unchanged" and must not be reported as one.
+    var changed: Bool?
     if action == "set_value" {
         guard axValueIsSettable(element),
               AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, string(request["value"]) as CFTypeRef) == .success else {
             throw fail("UI_ACTION_FAILED", "the control does not expose a settable value")
         }
     } else if action == "click" {
+        let beforeValue = axComparableValue(element)
         if AXUIElementPerformAction(element, kAXPressAction as CFString) != .success {
             guard try focusWindow(snapshot.window) else {
                 let why = windowRow(snapshot.window).map(inputTargetRefusal) ?? "the window is gone"
@@ -1758,11 +1776,27 @@ private func actUI(_ request: JSONObject) throws -> JSONObject {
                 targetWindow: snapshot.window
             )
             route = "sendinput"
+        } else {
+            /*
+             * `AXUIElementPerformAction` returning `.success` is the protocol saying the message
+             * was accepted, not that anything happened. QA measured the gap directly: pressing a
+             * System Settings toggle through AXPress returned success and the switch stayed
+             * exactly where it was; a coordinate click on the same spot moved it. This is the
+             * same shape as the scroll gesture that used to be judged by acknowledgement instead
+             * of by whether the page moved — so, the same fix: compare the control's own value
+             * before and after, and say so, rather than trust the API's verdict about itself.
+             */
+            let afterValue = axComparableValue(element)
+            if let beforeValue, let afterValue {
+                changed = !beforeValue.isEqual(afterValue)
+            }
         }
     } else {
         throw fail("BAD_ACTION", "unknown UI action \(action)")
     }
-    return ["runtimeKey": runtimeKey, "name": axName(element), "route": route]
+    var result: JSONObject = ["runtimeKey": runtimeKey, "name": axName(element), "route": route]
+    if let changed { result["changed"] = changed }
+    return result
 }
 
 private func validateFrame(_ frame: JSONObject) throws {
@@ -2165,6 +2199,29 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                 "`targetWindow` on an `act` request."
         )
     }
+    /*
+     * An `act` request naming a key this protocol does not have is refused, not ignored.
+     *
+     * `window` above was fixed as its own case because a QA run happened to send that one key.
+     * The rule it revealed is general — an unrecognized field is silently dropped and the call
+     * still answers `ok: true` — and applying it to one key instead of as a rule meant the next
+     * one, whatever its name, would cost the same round again. It did: a later run sent
+     * `verification` (a real field, but one this helper has never implemented — that contract
+     * lives in the app layer, which turns it into ordinary `id`/`find_ui` calls before any of
+     * this runs) and a nonsense key, and both were accepted and quietly did nothing. A caller
+     * who believes an unreachable verification ran, because the call it made for it said `ok`,
+     * is worse off than one who is told plainly that it did not.
+     */
+    if operation == "act" {
+        let knownActKeys: Set<String> = ["op", "frame", "targetWindow", "actions"]
+        if let strayKey = request.keys.first(where: { !knownActKeys.contains($0) }) {
+            throw fail(
+                "BAD_REQUEST",
+                "act does not recognize `\(strayKey)`. It reads `frame`, `targetWindow` and " +
+                    "`actions` only. Nothing was done."
+            )
+        }
+    }
     var result: JSONObject = ["ok": true]
     switch operation {
     case "warm":
@@ -2288,6 +2345,10 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
         let actions = request["actions"] as? [JSONObject] ?? []
         var routes: [String] = []
         var scrollEvidence: JSONObject?
+        // Same evidence-over-acknowledgement shape as scroll's `moved`: whether a `click_ui`'s
+        // own AXPress actually changed the control's reported value, not just whether the API
+        // call was accepted. Nil when the control had nothing comparable to check.
+        var uiChanged: Bool?
         var completed = 0
         for (index, action) in actions.enumerated() {
             do {
@@ -2310,6 +2371,9 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     uiRequest["value"] = action["value"]
                     let reply = try actUI(uiRequest)
                     routes.append(string(reply["route"], default: "uia"))
+                    if type == "click_ui", let changed = reply["changed"] as? Bool {
+                        uiChanged = changed
+                    }
                 case "move":
                     if let frame { _ = try assertFrameTarget(frame) }
                     try movePointer(CGPoint(x: int(action["x"]), y: int(action["y"])), verify: true)
@@ -2431,6 +2495,7 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     "routes": routes
                 ]
                 if let scrollEvidence { failure["scroll"] = scrollEvidence }
+                if let uiChanged { failure["ui_changed"] = uiChanged }
                 return failure
             }
         }
@@ -2439,6 +2504,7 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
         result["completed_count"] = completed
         result["routes"] = routes
         if let scrollEvidence { result["scroll"] = scrollEvidence }
+        if let uiChanged { result["ui_changed"] = uiChanged }
     default:
         throw fail("BAD_REQUEST", "unknown operation \(operation)")
     }
