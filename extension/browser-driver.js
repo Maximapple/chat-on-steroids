@@ -514,7 +514,20 @@ export const COLLECT_SOURCE = `(() => {
       name: name(el).slice(0, 160),
       value: 'value' in el && typeof el.value === 'string' ? String(el.value).slice(0, 160) : '',
       disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
-      checked: el.getAttribute('aria-checked') ?? (typeof el.checked === 'boolean' ? String(el.checked) : ''),
+      // Only for controls that have a checked state at all.
+      //
+      // The checked property is a boolean on every input element, so a text field, a search box
+      // and a submit button all reported false -- and the renderer, reading it as "is there
+      // something to say", printed checked=false beside every one of them. On a login or settings
+      // page that is noise on nearly every line, and it drowns the one signal it exists for: a
+      // checkbox that is already ticked. aria-checked comes first because a div with a role is a
+      // checkbox too, and it carries "mixed", which a boolean cannot.
+      //
+      // No backticks in this comment: everything here is stringified into the page, and a
+      // backtick ends the template literal that carries it.
+      checked:
+        el.getAttribute('aria-checked') ??
+        (/^(checkbox|radio)$/i.test(el.getAttribute('type') ?? '') ? String(el.checked) : ''),
       x: Math.round(rect.left + rect.width / 2),
       y: Math.round(rect.top + rect.height / 2),
       width: Math.round(rect.width),
