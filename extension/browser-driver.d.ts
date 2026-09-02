@@ -11,7 +11,7 @@ export declare class BrowserDriverError extends Error {
 }
 
 export declare const DRIVEN_GROUP_TITLE: string;
-export declare const REFUSED_URLS: RegExp[];
+export declare const REFUSED_HOSTS: string[];
 export declare const BROWSER_PERMISSIONS: { permissions: string[]; origins: string[] };
 export declare const COLLECT_SOURCE: string;
 export declare const MODIFIERS: Record<string, number>;

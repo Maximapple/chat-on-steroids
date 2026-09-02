@@ -40,8 +40,25 @@ describe('what browser control refuses to attach to', () => {
       'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       'https://chatgpt.com/g/g-p-project/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       'https://CHATGPT.com/',
-      'https://chat.openai.com/'
+      'https://chat.openai.com/',
+      // Four addresses a string prefix got wrong. The first two reached ChatGPT: `http://` was
+      // not matched at all and Chrome redirects it to https with the session still attached, and
+      // userinfo sits exactly where the host was expected. The third is a subdomain the prefix
+      // never covered. The fourth is the same host wearing a port.
+      'http://chatgpt.com/',
+      'https://user@chatgpt.com/',
+      'https://sub.chatgpt.com/',
+      'https://chatgpt.com:443/',
+      'https://chatgpt.com./'
     ]) {
+      expect(refusedUrl(url), url).toBe(true);
+    }
+  });
+
+  it('refuses a scheme by it not being the web, rather than by name', () => {
+    // The list named `chrome:`, `file:`, `javascript:` and the rest, so anything nobody thought
+    // of read as an ordinary page. Only http and https are drivable; everything else follows.
+    for (const url of ['data:text/html,<p>hi', 'blob:https://example.com/abc', 'ws://example.com/', 'intent://scan/#Intent;end']) {
       expect(refusedUrl(url), url).toBe(true);
     }
   });
@@ -69,7 +86,10 @@ describe('what browser control refuses to attach to', () => {
       'http://localhost:3000/app',
       'https://github.com/some/repo/pull/1',
       'https://notchatgpt.com/',
-      'https://example.com/?next=https://chatgpt.com/'
+      'https://example.com/?next=https://chatgpt.com/',
+      // Refused by the old prefix and correctly allowed now: it is not ChatGPT, it merely starts
+      // with those letters. A rule that refuses this is refusing by spelling, not by identity.
+      'https://chatgpt.com.example.org/'
     ]) {
       expect(refusedUrl(url), url).toBe(false);
     }

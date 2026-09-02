@@ -83,6 +83,10 @@ function desktopImageResult(text: string, data: string): { content: ToolContent[
  * cases refs cannot express, and they are in the screenshot's own pixels: the driver captures
  * at a scale where one image pixel is one CSS pixel is one input unit.
  */
+/** One scroll step, bounded the same on both surfaces: the two disagreed, and a page
+ * coordinate is a page coordinate whichever driver moves the pointer. */
+const scrollDeltaArg = z.number().int().min(-10_000).max(10_000);
+
 const browserActionArg = z.discriminatedUnion('type', [
   z.object({ type: z.literal('observe') }).strict().describe('Page, refs, screenshot.'),
   // The driver has always been able to let go of a tab and the command channel has always
@@ -97,12 +101,12 @@ const browserActionArg = z.discriminatedUnion('type', [
   z.object({ type: z.literal('reload') }).strict().describe('Reload.'),
   z.object({ type: z.literal('click_ref'), ref: z.string().min(1).max(16), button: mouseButtonArg.optional() }).strict().describe('Click a ref.'),
   z.object({ type: z.literal('set_value'), ref: z.string().min(1).max(16), text: z.string().max(20_000) }).strict().describe('Replace a field by ref.'),
-  z.object({ type: z.literal('click'), x: z.number().int(), y: z.number().int(), button: mouseButtonArg.optional() }).strict().describe('Click at pixels.'),
-  z.object({ type: z.literal('double_click'), x: z.number().int(), y: z.number().int() }).strict().describe('Double-click at pixels.'),
-  z.object({ type: z.literal('move'), x: z.number().int(), y: z.number().int() }).strict().describe('Move the pointer.'),
+  z.object({ type: z.literal('click'), x: imageCoordinateArg, y: imageCoordinateArg, button: mouseButtonArg.optional() }).strict().describe('Click at pixels.'),
+  z.object({ type: z.literal('double_click'), x: imageCoordinateArg, y: imageCoordinateArg }).strict().describe('Double-click at pixels.'),
+  z.object({ type: z.literal('move'), x: imageCoordinateArg, y: imageCoordinateArg }).strict().describe('Move the pointer.'),
   z.object({ type: z.literal('move_ref'), ref: z.string().min(1).max(16) }).strict().describe('Hover a ref, pressing nothing.'),
   z.object({ type: z.literal('drag'), path: z.array(pointArg).min(2).max(64), button: mouseButtonArg.optional() }).strict().describe('Drag along a path.'),
-  z.object({ type: z.literal('scroll'), x: z.number().int(), y: z.number().int(), scroll_x: z.number().int().optional(), scroll_y: z.number().int().optional() }).strict().describe('Scroll at a point.'),
+  z.object({ type: z.literal('scroll'), x: imageCoordinateArg, y: imageCoordinateArg, scroll_x: scrollDeltaArg.optional(), scroll_y: scrollDeltaArg.optional() }).strict().describe('Scroll at a point.'),
   z.object({ type: z.literal('type'), text: z.string().max(4_000) }).strict().describe('Type into focus.'),
   z.object({ type: z.literal('keypress'), keys: z.array(z.string().max(20)).min(1).max(6) }).strict().describe('Press keys.'),
   z.object({ type: z.literal('wait'), ms: z.number().int().min(0).max(10_000).optional() }).strict().describe('Pause.')
@@ -138,7 +142,7 @@ const computerActionArg = z.discriminatedUnion('type', [
       x: imageCoordinateArg,
       y: imageCoordinateArg,
       scroll_x: z.number().int().min(-10_000).max(10_000).optional(),
-      scroll_y: z.number().int().min(-10_000).max(10_000).optional()
+      scroll_y: scrollDeltaArg.optional()
     })
     .strict()
     .describe('Scroll at a point.'),
@@ -777,6 +781,13 @@ export function renderBrowserAction(
               ...elements.map(
                 (element) =>
                   `${String(element['ref'])} ${String(element['role'])} ${JSON.stringify(String(element['name'] ?? ''))}` +
+                  // What the control currently holds. The driver has collected both since it was
+                  // written and neither was ever printed, so a checkbox that is already ticked
+                  // looked exactly like one that is not — and the only way to find out was to
+                  // click it, which is also the way to get it wrong. Same for a field that
+                  // already contains the text a caller is about to set.
+                  `${element['checked'] ? ` checked=${String(element['checked'])}` : ''}` +
+                  `${element['value'] ? ` value=${JSON.stringify(String(element['value']))}` : ''}` +
                   `${element['disabled'] === true ? ' disabled' : ''} at ${String(element['x'])},${String(element['y'])}`
               )
             ] });
