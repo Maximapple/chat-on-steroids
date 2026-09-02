@@ -345,6 +345,16 @@ main {
   overflow: hidden;
 }
 
+/* Permissions is the one card with a static explanatory line between the header and its
+   scroll box (#readOnlyHint). The plain two-row .card template has only one flexible
+   track, so that line inherited it and got squeezed toward its 0 minimum by the group
+   list's own real height, then overflowed its collapsed box over the first permission
+   row instead of clipping. Give this card its own row for the hint, `auto`-sized like the
+   header, so only the actual scroll box takes the flexible track. */
+.card-has-hint {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
 .card > h2 {
   display: flex;
   align-items: center;
