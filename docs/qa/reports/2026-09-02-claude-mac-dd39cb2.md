@@ -317,19 +317,95 @@ dann, wenn sie nichts anzufragen hat. **Fund 1 ist damit kein Befund mehr.**
 Read-only steht wieder auf **aus**, wie ich es vorgefunden habe — gegengeprüft: null Treffer für
 „off in read-only mode".
 
-### Fund 2: weiterhin nicht messbar
+### Fund 2 — nachgeholt, und die Vermutung im Auftrag stimmt
 
-Der Widerruf von Screen Recording verlangt unter macOS 27 Touch ID oder das Passwort. Ich habe das
-in der vorletzten Runde zweimal versucht und 18 Sekunden auf eine Hintergrund-Anmeldung gewartet;
-beide Male abgebrochen und den Zustand wiederhergestellt. Ich habe es diesmal **nicht erneut
-versucht** — das Ergebnis wäre dasselbe, und jeder Versuch fasst deine Systemeinstellungen an.
-**Die Zwei-Minuten-Messung und der Vergleich zwischen frischem und laufendem Prozess bleiben
-offen**, und sie brauchen einen Menschen an der Tastatur.
+Maxim hat die beiden Anmeldungen an der Tastatur übernommen, damit dieser Teil laufen konnte.
+Screen Recording für „Chat On Steroids" in den Systemeinstellungen entzogen, bei macOS' Rückfrage
+**„Später"** gewählt, damit die App weiterläuft — und dann gemessen.
 
-Aus derselben Not folgt: **der Knopf, der den passenden Systembereich öffnet, ist weiterhin
-ungeprüft** — im erteilten Zustand zeigt die Zeile keinen Knopf, nur den Status. Und **einen
-Neustart-Hinweis der App habe ich nirgends gefunden**; der Hinweis, den ich gesehen habe, kam von
-macOS („Beenden & erneut öffnen"), nicht von der App.
+**Der laufende Prozess sieht den Entzug nicht.** Über vier Minuten hinweg, mit Navigation zum
+Setup-Schritt und wiederholtem Abfragen des Fensterbaums:
+
+> **Allow desktop access** — Everything this Mac needs to grant has been granted.
+> ● **Screen Recording** — … — *Granted*
+> ● **Accessibility** — … — *Granted*
+
+Beide Zeilen grün, die Überschrift unverändert. **Und die App liest dabei durchgehend nach:** ihr
+Aktivitätsprotokoll zeigt alle fünf bis sechs Sekunden `desktop timing op=warm`, also einen
+frischen Aufruf an ihren Helfer. Sie fragt, und sie bekommt weiterhin „granted".
+
+**Der frisch gestartete Prozess sieht ihn sofort.** Dieselbe App beendet und neu geöffnet, bei
+unverändertem Systemzustand:
+
+```
+"Not granted"           -> 1 Treffer
+"1 of 2 granted. macOS asks for these one at a time, and each is a diff…"
+"Open Screen Recording" -> 1 Treffer  (Knopf, der vorher nicht existierte)
+"Everything this Mac"   -> 0 Treffer
+```
+
+Im Bild: **Screen Recording — Not granted** (roter Punkt) neben **Accessibility — Granted**
+(grüner Punkt).
+
+**Damit ist die Frage des Auftrags beantwortet, und zwar in seinem Sinne:** der frische Prozess
+liest die Wahrheit, der laufende nicht. **Das ist macOS, das seine Antwort pro Prozess festhält —
+nicht diese App, die zu selten nachsieht.**
+
+**Und die App weiß es selbst.** Im nicht erteilten Zustand steht im Kasten darunter:
+
+> „Already switched this on in System Settings? macOS keeps its old answer for as long as the app
+> is running. Fully quit Chat On Steroids and open it again to pick up the change."
+
+Das ist zugleich die Antwort auf **„Der Neustart-Hinweis verdient seinen Platz oder nicht"**: er
+erscheint genau in dem Zustand, in dem er gebraucht wird, und er beschreibt genau das Verhalten,
+das ich gerade gemessen habe. Im erteilten Zustand ist er nicht da. **Er verdient seinen Platz.**
+
+**Die Gegenrichtung ebenfalls gemessen.** Berechtigung wieder erteilt, erneut „Später" gewählt,
+damit die App weiterläuft — und dann über zwei Minuten beobachtet:
+
+```
+  +10s … +110s: "Not granted"=1   "1 of 2 granted"=1
+  +120s:        (kurzer Aussetzer beim Neuzeichnen)
+  danach:       "Not granted"=1   "1 of 2 granted"=1   "Already switched…"=1
+```
+
+**Der laufende Prozess sieht auch die Erteilung nicht** — über zwei Minuten hinweg nicht. Erst
+nach einem Neustart der App verschwindet der rote Punkt. Die Zwischenspeicherung wirkt also in
+**beide** Richtungen.
+
+**Ein Widerspruch zu meiner eigenen früheren Messung, den ich benennen muss.** Am 31. August habe
+ich am **Helfer** gemessen, dass ein *Entzug* sofort gesehen wird — 107 Messpunkte, null
+Abweichungen — und nur eine *Erteilung* nie. Heute sieht die **App** auch den Entzug nicht. Zwei
+verschiedene Prozesse, womöglich zwei verschiedene Abfragewege; ich habe nicht geprüft, welcher.
+Was heute gilt: für diesen Prozess und diese App hält macOS die alte Antwort in beiden Richtungen
+fest.
+
+### Der Knopf führt, wohin er sagt
+
+Weil die Zeile im nicht erteilten Zustand endlich einen Knopf zeigt, war das zum ersten Mal
+prüfbar. Systemeinstellungen vorher geschlossen, dann **„Open Screen Recording"** geklickt:
+
+```
+  geoeffnet: 845x1002 "Aufnahme von Bildschirm & Systemaudio"
+```
+
+**Genau der benannte Bereich.** Für Accessibility ist es weiterhin ungeprüft — diese Zeile stand
+in keinem Moment auf „nicht erteilt", also gab es dort keinen Knopf.
+
+### Der Zustand danach
+
+Alle Schalter stehen wieder auf ein — im Bild gegengeprüft —, und die App wurde nach der erneuten
+Erteilung neu gestartet, hält die Berechtigung also tatsächlich. `/hello` antwortet,
+`2.0.2+95984b9`, Tunnel verbunden.
+
+### Was davon nicht mehr messbar war
+
+### Der frühere Stand dieses Punktes
+
+
+In zwei Runden davor war dieser Punkt nicht messbar, weil macOS für jeden Rechte-Wechsel Touch ID
+oder das Passwort verlangt und ich beides nicht liefere. Diesmal hat Maxim die zwei Anmeldungen
+übernommen; damit ist er erledigt.
 
 ### Wie ich den Kasten als Mensch beurteile
 
@@ -443,7 +519,7 @@ dokumentierte Umfang dieser Runde und kein Befund**, wie im Auftrag ausdrücklic
 | **Permissions-Kasten** | **Ja** — der Hinweis steht sauber über einer vollständig sichtbaren ersten Zeile, in beiden Read-only-Zuständen |
 | **Der Zug-Rückschritt** | **Weiterhin unreproduziert**, zweiter Lauf in Folge |
 | **Fund 1** | **Kein Befund mehr** — mit Read-only aus erscheinen beide Zeilen; die App protokolliert beide Rechte |
-| **Fund 2** | **Weiterhin offen**, weil macOS für den Widerruf Touch ID oder Passwort verlangt |
+| **Fund 2** | **Erledigt und erklärt.** Laufender Prozess sieht weder Entzug (>4 min) noch Erteilung (>2 min); ein frisch gestarteter sieht beides sofort. macOS hält die Antwort pro Prozess fest — nicht die App |
 
 ---
 
@@ -471,6 +547,13 @@ wieder geschlossen; Testordner entfernt; zwei TextEdit-Dokumente und zwei Chrome
 Arbeitsordner geöffnet. **Read-only einmal an- und wieder ausgeschaltet** — gegengeprüft, es steht
 wieder aus. An den Systemeinstellungen wurde nichts angefasst, `/pair` nicht aufgerufen.
 
-**Was ich nicht belegt habe.** Fund 2, aus dem bekannten Grund. Der Knopf zum Systembereich und
-der Neustart-Hinweis, weil beide nur im nicht erteilten Zustand erscheinen. Und warum der Zug vor
-zwei Runden viermal scheiterte — das bleibt unerklärt, auch wenn es nicht mehr auftritt.
+**Fund 2 ist erledigt, und die App kommt dabei gut weg.** Sie liest alle fünf bis sechs Sekunden
+nach, sie zeigt im richtigen Zustand einen Knopf, der zum richtigen Bereich führt, und sie erklärt
+das Verhalten von macOS in eigenen Worten an der Stelle, wo es jemanden trifft. Was aussah wie eine
+veraltete Zeile, ist eine veraltete Antwort des Betriebssystems — und die App sagt das, sobald sie
+sie bekommt.
+
+**Was ich nicht belegt habe.** Der Knopf für Accessibility, weil diese Zeile nie im nicht erteilten
+Zustand war. Welcher Abfrageweg den Unterschied zu meiner Helfer-Messung vom 31. August erklärt.
+Und warum der Zug vor zwei Runden viermal scheiterte — das bleibt unerklärt, auch wenn es nicht
+mehr auftritt.
