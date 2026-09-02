@@ -181,6 +181,40 @@ describe('the chat panel cards', () => {
 });
 
 /**
+ * The Permissions card is the only Home card with a static explanatory line between its
+ * header and its scroll box: `#readOnlyHint`, added when read-only mode shipped. The base
+ * two-row `.card` template has only one flexible track, so that line inherited it and was
+ * squeezed toward its 0 minimum by the permission list's own real height — a list that
+ * always needs more than the leftover space — then overflowed its collapsed box over the
+ * first permission row instead of clipping. Same class of bug as the chat panel cards
+ * above (a child added without a matching row), just on Home, and just as invisible to
+ * jsdom: this counts tracks against children rather than measuring the overlap in pixels.
+ */
+describe('the permissions card', () => {
+  function tracks(selector: string): string[] {
+    const declarations = rule(selector);
+    const match = /grid-template-rows:([^;]*)/.exec(declarations);
+    expect(match, `${selector} declares no grid-template-rows`).not.toBeNull();
+    // minmax(0, 1fr) is one track despite its comma.
+    return match![1]!.trim().replace(/minmax\([^)]*\)/g, 'minmax').split(/\s+/);
+  }
+
+  it("gives the hint its own row instead of sharing the scroll box's flexible track", () => {
+    const card = document.getElementById('readOnlyHint')!.closest('.card')!;
+    expect(card.classList.contains('card-has-hint')).toBe(true);
+
+    const list = tracks('.card-has-hint');
+    expect(list).toHaveLength(card.children.length);
+
+    const hintIndex = [...card.children].indexOf(document.getElementById('readOnlyHint')!);
+    const scrollIndex = [...card.children].indexOf(card.querySelector('.scroll')!);
+    expect(list[hintIndex]).toBe('auto');
+    expect(list[scrollIndex]).toBe('minmax');
+    expect(list.filter((track) => track === 'minmax')).toHaveLength(1);
+  });
+});
+
+/**
  * A recorded tool call is a `<details>`. A `<details>` whose `display` is changed stops
  * stacking its summary above its body and lays the two out as siblings — which is how the
  * arguments/result panel came to sit beside the row, pinned to the right edge of the card
