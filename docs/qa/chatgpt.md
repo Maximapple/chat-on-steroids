@@ -210,6 +210,23 @@ both are now actually fixed rather than just moved.**
   `observe` actually runs behind. The same default reaches every other tool with the same gap,
   not only this one, so a similarly generic refusal anywhere else is worth reporting too.
 
+**Your next run confirmed check 50 and complicated check 46 — read both before reporting either
+by memory of last time.**
+
+- **Check 50 is confirmed fixed.** Your run quoted the refusal verbatim: `enable "See the screen"`
+  in the app, not the old generic wording. Nothing further to do here unless it regresses.
+- **Check 46 is not resolved, and the evidence is genuinely mixed — say so rather than picking a
+  side.** The scroll-target fix above is independently verified correct: 43/43 in
+  `verify:browser`, run both headless and headed, against this exact build, including the new
+  check built specifically for a nested `overflow: auto` strip. Your own run still returned
+  `BROWSER_SCROLL_FAILED` on your ad-hoc fixture's horizontal strip, and in the same run two checks
+  that share no code with this fix (45's `createdTab`, 33's plain page scroll) also regressed
+  together — a pattern that points at that run's own fixture rather than proving the fix wrong, but
+  does not settle it either. **If check 46 fails again: keep the fixture file** (`cos_qa/index.html`
+  or whatever you name it) rather than deleting it in cleanup, and quote the exact markup around
+  the coordinate that failed. A guess fixed against a fixture nobody can see is a guess twice.
+  `docs/qa/reports/2026-09-02-chatgpt-735c269.md` has the full detail from this round.
+
 Still worth confirming from earlier rounds: typing no longer loses text past a newline (check 7);
 a click cannot escape the window it is leased to (check 10); the pointer line names the frame it
 was handed (check 37); a missing window is named (check 31); `detach` says what it let go of
@@ -382,6 +399,11 @@ need a document in it.
     horizontally scrolling strip, `scroll` with `scroll_x` and confirm from the screenshot that
     the content moved sideways. Then `double_click` a word in a paragraph and confirm from a
     fresh `observe` or a screenshot that it selected the word rather than clicking twice.
+    **If this fails again: do not delete the fixture in cleanup.** Two rounds have now measured
+    this exact contradiction — the screenshot moves, the reply still says `BROWSER_SCROLL_FAILED`
+    — against two different ad-hoc fixtures, and neither survived to be read afterward. Keep the
+    file and quote the exact markup around the coordinate you scrolled at; that is the one piece
+    of evidence still missing.
 47. **A control inside an iframe.** Find a page with an iframe carrying a real control — a
     payment field, an embedded map, a comment widget — `observe`, and confirm controls from
     inside the frame appear in the refs. Then `click_ref` one and confirm the effect. The driver

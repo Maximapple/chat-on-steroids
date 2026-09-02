@@ -8,31 +8,41 @@ below turns three of those skips into answers.
 Nothing here needs ChatGPT, and nothing here needs a person: every step is a command you can run.
 Parts 1–4 do not even need the installed app; part 5 does.
 
-**Your last full run (dated 2026-09-02 against `dd39cb2`) closed out everything this document was
-still carrying as open, by measurement rather than argument.** Both fixes from the round before
-held at runtime: the Permissions hint reads clean above a fully visible first row in both
-Read-only states, and `warm`/`cursor`/`windows` each refuse a stray key with the exact right
-per-operation message. The drag regression did not reproduce a second round running and is
-dropped rather than carried forward again. And you settled both of the standing Funde yourself,
-with a measurement neither of us had before:
+**Your last full run (dated 2026-09-02 against `416a060`) was a clean regression pass carrying two
+real findings of its own, both now addressed.**
 
-- **Fund 1 — no code defect, confirmed by toggling the setting and counting the rows.** With
-  Read-only on, the Accessibility row is correctly absent (`control` genuinely is not being
-  requested); with it off, both rows appear, and the app's own activity log
-  (`macos permissions screen=granted accessibility=granted execution=in-process`) shows it read
-  both permissions the whole time. This is closed; section 5b below no longer needs to carry it.
-- **Fund 2 — macOS's own per-process TCC cache, not this app's polling.** A long-running process
-  saw neither a revocation (>4 minutes) nor a later grant (>2 minutes); a freshly started one saw
-  each immediately. The app itself already explains this in its own restart note, which appears
-  exactly when it is true and nowhere else. Closed; section 5b's notes on it are historical now.
+- **The 120 ms scroll ceiling was nominal, not by the clock — your own measurement.** You clocked
+  ten settled scrolls at a median 152.8 ms and the end-of-document no-op case at 297–348 ms, then
+  traced it to source: `settledScrollState`'s loop counted `elapsed` by adding the *requested*
+  10,000 µs each turn, never what `usleep` actually spent — and you measured `usleep(10_000)`
+  costing a median 12.06 ms on that machine, before a single AX read even ran. It now reads
+  `ProcessInfo.processInfo.systemUptime` against a real deadline, the same idiom every other wait
+  in this file already uses. Re-run your ten-scroll measurement; the real number is what a fix here
+  can be judged by, not a re-read of the source.
+- **`moved: null` for Chromium content is real, and is not fixed.** You scrolled the app's own
+  Setup step — the heading measurably moved from y=832 to y=313 — and `act` still answered
+  `movedUnknown: "nothing scrollable under the pointer"`. Chromium does not publish a reachable
+  `AXVerticalScrollBar` within eight parent steps of the hit point, in the browser or in this app's
+  own Electron surface, so `pointerScrollState`'s walk finds nothing to read. The field is honest
+  about not knowing rather than lying `false` — that distinction is what the round that built it
+  was for, and it holds — but the one case it exists for, ChatGPT scrolling a web page and getting
+  `moved: null` back, is exactly where it stays silent. The browser has a working second path
+  already (`verify:browser` judges scroll by position and pixels through the extension, not this
+  native read), which is why this is recorded rather than chased further this round: fixing it
+  would mean widening the AX parent-walk or finding a different Chromium-specific signal, and nothing
+  here has measured which, if either, actually reaches far enough.
+- **The `pre-push` hook not finding `node` is fixed too**, from your own report of it. `.githooks/`
+  now searches a few common install locations before giving up, and says plainly if it still can't
+  find one, instead of the bare `exec: node: not found` that read as a git problem.
 
-**This document has nothing new to ask of this machine.** Two more defects from that same run —
-horizontal scroll judged by the window instead of the element the gesture actually hit, and a
-`TOOL_DISABLED` refusal naming no capability — are fixed too, but neither is Swift or anything
-this machine's protocol-level checks touch; they live in the browser extension and the MCP tool
-layer, and `docs/qa/chatgpt.md` carries the round's acknowledgment for them. Confirming that
-`npm run desktop:mac` still compiles clean and the six parts below still hold is what this round
-is actually for.
+**Two things from that run this document is not asking you to chase.** `maxResults` clamps hard at
+100 with no way past it except an already-known `query` — you hit this exploring the app's own
+Setup tree, which has more than 100 elements and no way to page through them blind. And
+`docs/qa/reports/2026-09-02-chatgpt-735c269.md`, the other half of that same round, found checks
+33/45/46 either still failing or newly regressed on its own ad-hoc fixture, against a browser-driver
+fix that is independently verified correct here (`verify:browser`, 43/43, both headless elsewhere
+and headed on this machine) — neither is Swift, and neither has a clear enough repro yet to act on
+blind. Read that file if you want the detail; nothing below asks about either.
 
 **Two UX opinions from your own "wie ich den Kasten beurteile" section, worth keeping in view but
 not asked as checks below.** The Permissions box scrolls without showing it — six rows exist,
@@ -468,6 +478,7 @@ says to expect. Then, plainly:
 - **The Permissions card: does the read-only hint still read cleanly above a fully visible first
   permission row, at the default window size?**
 - **The drag regression: still gone, or back? Two clean rounds so far.**
+- **The scroll ceiling, re-measured: median close to 120 ms now, or still well past it?**
 - **The two open UX opinions — the invisibly-scrolling Permissions box and the missing
   last-checked timestamp: still true? Still worth fixing, in your judgement?**
 
