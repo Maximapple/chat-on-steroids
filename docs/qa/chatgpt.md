@@ -190,6 +190,26 @@ each check should now show.**
   stay red even once the extension was actually connected, next to its own green checkmark — it
   now reads as neutral explanation once connected. Checks 55 and 56 below ask for both.
 
+**This round: your real 49-check run found the last two open items were only half fixed, and
+both are now actually fixed rather than just moved.**
+
+- **Check 46 — the false negative was still there, for a different reason.** The previous fix
+  made the *timing* right (poll for the position to start changing) but not the *target*: it only
+  ever read `window.scrollX`/`scrollY`. A horizontal scroll over a nested `overflow: auto` strip
+  moves that element, not the window — your screenshots proved it moving, WIDE 1/2 → 2/3 → 3/4,
+  while the reply kept reporting `BROWSER_SCROLL_FAILED` or `moved: false` regardless. The
+  position is now read from whichever element the gesture actually hit —
+  `document.elementFromPoint` at the scroll's own coordinates, walking up to the nearest one that
+  can scroll in either axis — and only falls back to the window when nothing narrower can.
+  Re-run the same horizontal case; `moved` should now agree with the screenshot, not contradict it.
+- **Check 50 — the transport fix held, the wording didn't.** Disabling Desktop no longer tears
+  down the tunnel (that part was already right and still is), but the refusal itself named
+  nothing: `"is disabled by the current Chat On Steroids permissions... enable the permission"`.
+  Every capability-gated tool that does not pass its own label now defaults to the capability's
+  own Settings row name, so this refusal should read `enable "See the screen"` — the capability
+  `observe` actually runs behind. The same default reaches every other tool with the same gap,
+  not only this one, so a similarly generic refusal anywhere else is worth reporting too.
+
 Still worth confirming from earlier rounds: typing no longer loses text past a newline (check 7);
 a click cannot escape the window it is leased to (check 10); the pointer line names the frame it
 was handed (check 37); a missing window is named (check 31); `detach` says what it let go of

@@ -8,38 +8,37 @@ below turns three of those skips into answers.
 Nothing here needs ChatGPT, and nothing here needs a person: every step is a command you can run.
 Parts 1–4 do not even need the installed app; part 5 does.
 
-**This round mixes a renderer fix with a Swift one, and only the Swift half needs this machine to
-prove it.** Your last full run (the six-part German report, dated 2026-09-02 against `ff8c161`)
-is the one this addresses. Two real defects from it are fixed; the rest stands exactly as you left
-it, because neither can be investigated without this machine.
+**Your last full run (dated 2026-09-02 against `dd39cb2`) closed out everything this document was
+still carrying as open, by measurement rather than argument.** Both fixes from the round before
+held at runtime: the Permissions hint reads clean above a fully visible first row in both
+Read-only states, and `warm`/`cursor`/`windows` each refuse a stray key with the exact right
+per-operation message. The drag regression did not reproduce a second round running and is
+dropped rather than carried forward again. And you settled both of the standing Funde yourself,
+with a measurement neither of us had before:
 
-**"Der Tooltip verdeckt die Zeile, die er erklärt" — reported three rounds running.** It was never
-a tooltip: the Permissions card is a CSS grid built for the two-row shape every other Home card
-has, header plus one scroll box. The static read-only explanation added between them inherited the
-only flexible row, got squeezed toward 0 height by the permission list's own real size below it,
-and — since the text itself was never clipped — spilled out of its collapsed box over the row it
-sits above, "Look at files". It now gets its own row. Section 5b's "What it looks like" asks you to
-confirm it at the default window size.
+- **Fund 1 — no code defect, confirmed by toggling the setting and counting the rows.** With
+  Read-only on, the Accessibility row is correctly absent (`control` genuinely is not being
+  requested); with it off, both rows appear, and the app's own activity log
+  (`macos permissions screen=granted accessibility=granted execution=in-process`) shows it read
+  both permissions the whole time. This is closed; section 5b below no longer needs to carry it.
+- **Fund 2 — macOS's own per-process TCC cache, not this app's polling.** A long-running process
+  saw neither a revocation (>4 minutes) nor a later grant (>2 minutes); a freshly started one saw
+  each immediately. The app itself already explains this in its own restart note, which appears
+  exactly when it is true and nowhere else. Closed; section 5b's notes on it are historical now.
 
-**"Die Schlüsselprüfung ist auf `act` beschränkt... das Muster selbst ist der Befund."** Also
-yours, and the third time this exact shape has needed fixing — `window` first, then `act`'s own
-stray-key check, and now this. `windows`, `warm` and `cursor` took any key at all and silently did
-nothing with it, answering `ok: true` for a field that was never read. All three now refuse an
-unrecognized key the same way `act` already did. `find_ui`, `act_ui`, `capture` and `snapshot` are
-deliberately left out — they forward fields between each other, and enumerating those safely is
-its own round. Section 5d has the new case.
+**This document has nothing new to ask of this machine.** Two more defects from that same run —
+horizontal scroll judged by the window instead of the element the gesture actually hit, and a
+`TOOL_DISABLED` refusal naming no capability — are fixed too, but neither is Swift or anything
+this machine's protocol-level checks touch; they live in the browser extension and the MCP tool
+layer, and `docs/qa/chatgpt.md` carries the round's acknowledgment for them. Confirming that
+`npm run desktop:mac` still compiles clean and the six parts below still hold is what this round
+is actually for.
 
-**Neither fix has been proven at runtime yet, only compiled.** The six-platform release build
-(`95984b9`) compiled and ran the helper on both macOS architectures and launched the packaged app,
-but sent it no malformed request — `npm run desktop:mac` below is a second, independent compile,
-and the `warm`/`cursor`/`windows` refusal in section 5d is the first time any of this actually
-runs.
-
-**Not touched, and both still open.** The drag regression — five waypoints, `ok: true`,
-`routes: ["sendinput"]`, the file not moving, against a `drag` path unchanged since a run before it
-where the same call worked nine times running — has no diagnosis. Fund 1 and Fund 2 stand exactly
-as your report left them two rounds ago; section 5b below still carries those notes, unchanged —
-read them before concluding either is still broken.
+**Two UX opinions from your own "wie ich den Kasten beurteile" section, worth keeping in view but
+not asked as checks below.** The Permissions box scrolls without showing it — six rows exist,
+three are visible, nothing hints at the other three, and it fooled you into almost reporting "Look
+at files" as gone. And a permission row has no "checked Ns ago" the way the header line does. Say
+whether either is still true; neither has a fix in this round.
 
 Paste everything below the line into Claude Code on the Mac.
 
@@ -366,37 +365,34 @@ the installed app on a machine whose permissions can actually be revoked.
   a revocation is worse than no row, because a person acts on it. Then grant it again and confirm
   the row recovers, again without a restart. Say how long the change took to appear.
 
-  **Fund 2, from last round: the row read "Granted" for over a minute after a real revocation.**
-  The code already polls continuously — even after everything shows granted, at a slower cadence,
-  specifically so a later revocation is not missed — and there is a test proving that polling never
-  stops. So if the row is still stale this round, the interesting question is not "does it poll"
-  but "does `CGPreflightScreenCaptureAccess` itself answer honestly for an already-running
-  process". Time it past two minutes this time, and separately ask whether a **freshly launched**
-  process (a second `{"op":"warm"}` against a *new* helper invocation, not the long-running one)
-  reports the revocation correctly where the long-running one does not. If the fresh process sees
-  it and the running one does not, that is macOS caching its answer per-process, not this app.
+  **Fund 2 is closed.** Your last run measured it directly: a long-running process saw neither a
+  real revocation (over 4 minutes) nor a later grant (over 2 minutes), while a freshly started one
+  saw each immediately — macOS's own per-process TCC cache, which the app's restart note already
+  names in its own words at the point someone would hit it. Nothing to re-test unless the timing
+  changes; re-run this bullet as an ordinary regression check, not a hunt.
 - **The restart note earns its place or it does not.** There is a case where the app tells you a
   restart is needed. Find out which one, and whether the note appears only there. A restart note
   shown when no restart is needed trains people to ignore it.
 - **The button goes where it says.** Each row can offer a button that opens the right System
   Settings pane. Confirm the pane that opens is the one named, for both permissions.
-- **Fund 1, from last round: only one permission row shown, next to "Everything ... has been
-  granted".** The row is gated on the `control` capability actually being on (and Read-only being
-  off) — with only `screen` on, Accessibility genuinely is not being asked for yet, and the
-  headline is honest about what it currently covers. Confirm this by checking the setting itself
-  before judging the row: with `control` on, both rows must appear; with only `screen` on, only
-  Screen Recording should, and the headline should not overreach.
+- **Fund 1 is closed.** Your last run toggled Read-only and counted rows in both states: on shows
+  only Screen Recording, off shows both — exactly what "gated on `control` actually being
+  requested" predicts — and the app's own activity log confirms it reads both permissions
+  throughout. Nothing to re-test unless the gating logic changes.
 - **What it looks like.** Judge the pane as a person: is it obvious what each switch does, does
   anything clip or overlap at the default window size, is any wording ambiguous or alarming
-  without cause. Say what you would change. Nobody has ever reported an opinion on this surface,
-  which is not evidence that it is fine.
+  without cause. Say what you would change. Nobody had ever reported an opinion on this surface
+  before your last two rounds, which is not evidence that it was fine.
 
-  **From last round: the read-only hint sat printed on top of "Look at files" instead of above
-  it.** A CSS grid row-count bug, not a tooltip — the Permissions card had three children sharing
-  a template built for two, so the hint inherited the list's own flexible row and overflowed its
-  squeezed box onto the row underneath. It now has its own row. Confirm the hint reads cleanly
-  above a fully visible first permission row at the app's default window size, with Read-only both
-  on and off.
+  **The read-only hint's grid-row fix holds — confirmed two rounds running,** in both Read-only
+  states, at the default window size. No longer worth a dedicated look; fold it back into the
+  ordinary judgement above.
+
+  **Two things you raised as opinion, not yet acted on.** The box scrolls without showing it — six
+  rows exist, three are visible, nothing hints at the other three, and it is what nearly cost you a
+  false "Look at files is gone" report. And a permission row carries no "checked Ns ago" the way
+  the header line does. Neither has a fix this round; say whether either is still true and whether
+  it is still worth fixing, rather than re-deriving it from nothing.
 
 ## 5c. Two contracts the helper offers, and two that had never actually held
 
@@ -469,11 +465,11 @@ says to expect. Then, plainly:
   screen actually showed?**
 - **`warm`, `cursor` and `windows` with a stray key: `BAD_REQUEST` naming it on all three, or
   still silently `ok` on any of them?**
-- **The Permissions card: does the read-only hint read cleanly above a fully visible first
+- **The Permissions card: does the read-only hint still read cleanly above a fully visible first
   permission row, at the default window size?**
-- **The drag regression: still unreproducible, or back? Not touched this round either way.**
-- **Fund 1 and Fund 2 from two rounds back: still findings, or explained by the capability/OS-caching
-  notes above? Say which.**
+- **The drag regression: still gone, or back? Two clean rounds so far.**
+- **The two open UX opinions — the invisibly-scrolling Permissions box and the missing
+  last-checked timestamp: still true? Still worth fixing, in your judgement?**
 
 Then anything that struck you as wrong, slow or dangerous that no part above covers. On the last
 five rounds that section has been the most valuable part of the report.
