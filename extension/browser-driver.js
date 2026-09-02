@@ -905,11 +905,16 @@ async function findCreatedTab(openerTabId, before) {
   for (;;) {
     let tabs = [];
     try {
-      tabs = await chrome.tabs.query({ openerTabId });
+      // `openerTabId` is a property Chrome reports on a returned Tab, not a filter
+      // `tabs.query` accepts — passing it as query criteria throws ACTION_REFUSED
+      // ("Unexpected property"). Query everything and filter here instead.
+      tabs = await chrome.tabs.query({});
     } catch {
       return null;
     }
-    const created = tabs.find((tab) => Number.isSafeInteger(tab?.id) && !before.has(tab.id));
+    const created = tabs.find(
+      (tab) => tab?.openerTabId === openerTabId && Number.isSafeInteger(tab?.id) && !before.has(tab.id)
+    );
     if (created) {
       return { tabId: created.id, url: created.url || created.pendingUrl || null, title: created.title || null };
     }
@@ -1376,7 +1381,7 @@ export const browserDriver = {
         const clickCount = type === 'double_click' ? 2 : 1;
         const openerTabId = session.tabId;
         const beforeTabs = new Set(
-          (await chrome.tabs.query({ openerTabId }).catch(() => [])).map((tab) => tab.id)
+          (await chrome.tabs.query({}).catch(() => [])).map((tab) => tab.id)
         );
         await movePointer(action.x, action.y);
         await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: action.x, y: action.y, modifiers });
