@@ -210,21 +210,37 @@ both are now actually fixed rather than just moved.**
   `observe` actually runs behind. The same default reaches every other tool with the same gap,
   not only this one, so a similarly generic refusal anywhere else is worth reporting too.
 
-**Your next run confirmed check 50 and complicated check 46 — read both before reporting either
-by memory of last time.**
+**Your next run confirmed check 50 and found 45/46 shared one real cause — read all three below
+before reporting any of them from memory of last time.**
 
 - **Check 50 is confirmed fixed.** Your run quoted the refusal verbatim: `enable "See the screen"`
   in the app, not the old generic wording. Nothing further to do here unless it regresses.
-- **Check 46 is not resolved, and the evidence is genuinely mixed — say so rather than picking a
-  side.** The scroll-target fix above is independently verified correct: 43/43 in
-  `verify:browser`, run both headless and headed, against this exact build, including the new
-  check built specifically for a nested `overflow: auto` strip. Your own run still returned
-  `BROWSER_SCROLL_FAILED` on your ad-hoc fixture's horizontal strip, and in the same run two checks
-  that share no code with this fix (45's `createdTab`, 33's plain page scroll) also regressed
-  together — a pattern that points at that run's own fixture rather than proving the fix wrong, but
-  does not settle it either. **If check 46 fails again: keep the fixture file** (`cos_qa/index.html`
-  or whatever you name it) rather than deleting it in cleanup, and quote the exact markup around
-  the coordinate that failed. A guess fixed against a fixture nobody can see is a guess twice.
+- **Check 46 — and 45, and half of 33 — had one shared root cause, found by instrumentation
+  rather than another blind run, and it is fixed at the source.** A Mac-side investigation
+  added `_debug` to the scroll hit test and A/B'd the driven tab foregrounded against
+  backgrounded, same point, same element, same call. Foregrounded: 388 ms, `moved: true`,
+  correct. Backgrounded: 7275 ms, `moved: false` — and the instant something brought the tab
+  back, the strip's `scrollLeft` jumped to *double* the requested distance, both the gesture and
+  its own wheel fallback delivered together the moment the tab could actually composite. Chrome
+  does not drop the events; it defers them, and the driver was judging the deferred moment.
+  `createdTab` shared the cause from a different angle: a link opened from a backgrounded tab
+  gets a new tab whose `openerTabId` names whichever tab is actually active, not the one that
+  dispatched the click — ten runs, 5/5 correct foregrounded, 0/5 backgrounded, every single time,
+  which is why widening `findCreatedTab`'s poll window would never have helped.
+
+  The driver now activates the driven tab — and waits for it to actually report
+  `visibilityState: "visible"`, not just for the activation call to resolve — before a scroll or
+  a click. Verified directly (not just reasoned about): a new automated check drives the fixture
+  with another tab deliberately in front, and it fails on the old code and passes clean on the
+  fix. **Re-run 45 and 46 as ordinary checks now** — if your driven tab was ever likely to sit
+  behind the conversation tab (the ordinary case, not a rare one), that is exactly the condition
+  this closes. If either still fails, that is a real, new finding, not the same one again; keep
+  the fixture file this time either way, since two rounds lost it.
+- **Check 33's "blank white screenshot / refs no longer reachable" is not explained by this fix**
+  and was not chased further this round — the plain page-scroll half of that failure shares the
+  same background-tab mechanism above and should be watched for whether it recurs on its own now
+  that 45/46 are addressed, but the blank-screenshot/unreachable-refs half needs its own
+  reproduction if it happens again.
   `docs/qa/reports/2026-09-02-chatgpt-735c269.md` has the full detail from this round.
 
 Still worth confirming from earlier rounds: typing no longer loses text past a newline (check 7);
