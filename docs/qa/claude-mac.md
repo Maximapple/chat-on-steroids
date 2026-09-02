@@ -37,25 +37,34 @@ application switch, not just a Chrome tab switch — TextEdit frontmost to Chrom
 1191 ms, measured directly — and takes real keystrokes from whoever is typing, unlike the
 debugger banner, tab group and pointer overlay, none of which take anything away. Per your own
 recommended order: `tabs.update({ active: true })` is now tried alone first, and only escalates
-to the window focus when that alone does not recover `visibilityState`. A new `broughtToFront`
+to the window focus when that alone does not recover `visibilityState`. A `broughtToFront`
 field on the scroll/click reply says which happened, so a real switch is now a fact rather than
-a surprise.
+a surprise — and your cross-app measurement is exactly what found the field itself was wrong.
 
-**This is the one thing from this whole chain your confirmation round could not test, because it
-never needed the window to switch app.** Re-run your same repro, but this time with a *different
-macOS application* frontmost when the driven tab is backgrounded (not just a same-window tab
-switch) — confirm `tabs.update` alone still recovers `visibilityState` where it can, and that
-`broughtToFront: true` appears (and the real app switch happens) only in the case that actually
-needs it, not on every call. `scripts/diag-scroll46.mjs` and the temporary `_debug` fields are
-gone from the tree now (you removed them, recoverable with `git checkout afcb694 -- <path>`), so
-this one is best done by reading `broughtToFront` off the ordinary reply rather than rebuilding
-the instrumentation — the field exists for exactly this.
+**Your escalation round found the real thing: `broughtToFront` misreported the one case that
+actually needed it.** The good news first — the ordinary "working in another app" case never
+escalates at all, because `visibilityState` tracks a tab's own window, not macOS application
+focus; `tabs.update` alone recovered it with TextEdit genuinely frontmost the whole time. The
+one state that measurably does need the real switch is a **minimized** window, and there
+`broughtToFront` reported `false` while the window state plainly read
+`{"state":"normal","focused":true}` and the scroll worked. Root cause: the field's old value
+was "did visibility confirm within 300 ms of escalating," and un-minimizing measured a
+reproducible 556–588 ms on your machine — past the poll, not past reality. It now reports `true`
+the instant `windows.update({ focused: true })` itself succeeds, independent of how long
+`visibilityState` then takes to catch up. **Re-run your exact 3z minimize repro** and confirm
+`broughtToFront: true` this time, with the same window-state and scroll evidence as before.
+`scripts/diag-scroll46.mjs` is back in the tree (your call to keep it) — this is the one-line
+change it exists to re-measure.
 
-**Also worth a look while you're in the Permissions card: the read-only hint's own indent.** It
-sat flush with the card's edges — 0px in, against the header's 15px and the permission rows'
-16px — which was reported directly as still looking "poorly fitted." It now carries
-`padding: 0 15px 10px`. Confirm it lines up with the header and the rows below it, at the
-default window size.
+**Also: the read-only hint's indent, this time with a real DMG to check it against.** Your last
+round measured the installed app at `2.0.2+735c269` — older than the padding fix — and correctly
+declined to call that a confirmation. A build carrying `0af28f0` exists now. Your own predicted
+value: the hint moves from **x=339 to x=354**, exactly `PERMISSIONS`'s own position. One line to
+confirm either way.
+
+**Not asking you to chase, but noting it since you saw it:** `Poll errors 1` and "13 problems" in
+the health/activity header during your last run, next to an otherwise green state. Say if it's
+still there; not a request to investigate it cold.
 
 **Two UX opinions from your own "wie ich den Kasten beurteile" section, worth keeping in view but
 not asked as checks below.** The Permissions box scrolls without showing it — six rows exist,
@@ -488,13 +497,11 @@ says to expect. Then, plainly:
   screen actually showed?**
 - **`warm`, `cursor` and `windows` with a stray key: `BAD_REQUEST` naming it on all three, or
   still silently `ok` on any of them?**
-- **The Permissions card: does the read-only hint still read cleanly above a fully visible first
-  permission row, and now also indented to match the header and rows, at the default window
-  size?**
+- **The Permissions card: does the read-only hint now sit at x=354, matching `PERMISSIONS`,
+  against a real DMG carrying `0af28f0`?**
 - **The drag regression: still gone, or back? Two clean rounds so far.**
-- **`broughtToFront` with a real application switch: does `tabs.update` alone recover
-  `visibilityState` when only the Chrome tab was backgrounded, and does the window only come
-  forward — with `broughtToFront: true` on the reply — when the app itself was not frontmost?**
+- **`broughtToFront: true` on your minimized-window repro — does it now match the window state
+  and scroll evidence, instead of reporting `false` for a real escalation?**
 - **The two open UX opinions — the invisibly-scrolling Permissions box and the missing
   last-checked timestamp: still true? Still worth fixing, in your judgement?**
 
