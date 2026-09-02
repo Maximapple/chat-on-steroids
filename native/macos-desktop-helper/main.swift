@@ -2222,6 +2222,36 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
             )
         }
     }
+    /*
+     * The same rule, on the three operations simple enough to enumerate without re-auditing
+     * every field the richer operations read.
+     *
+     * `act`'s stray-key check above was itself the second fix for this exact shape — `window`
+     * was fixed as its own case first — and a QA round measured that the rule still had not
+     * reached anywhere else: `windows`, `warm` and `cursor` took any key at all and silently
+     * did nothing with it, answering `ok: true` for a field that was never read. `warm` and
+     * `cursor` read nothing but `op`; `windows` reads one optional field besides it. Both are
+     * short enough lists to check safely here; `find_ui`, `act_ui`, `capture` and `snapshot`
+     * read enough fields, some of them forwarded between each other, that enumerating them
+     * belongs in its own change rather than being guessed at alongside this one.
+     */
+    if operation == "warm" || operation == "cursor" {
+        if let strayKey = request.keys.first(where: { $0 != "op" }) {
+            throw fail(
+                "BAD_REQUEST",
+                "\(operation) does not recognize `\(strayKey)`. It takes no fields beyond `op`. Nothing was done."
+            )
+        }
+    }
+    if operation == "windows" {
+        let knownWindowsKeys: Set<String> = ["op", "focusable"]
+        if let strayKey = request.keys.first(where: { !knownWindowsKeys.contains($0) }) {
+            throw fail(
+                "BAD_REQUEST",
+                "windows does not recognize `\(strayKey)`. It reads `focusable` only, besides `op`. Nothing was done."
+            )
+        }
+    }
     var result: JSONObject = ["ok": true]
     switch operation {
     case "warm":
