@@ -109,7 +109,6 @@ import {
   stageFinishAgent,
   stageMessages,
   stageSpawn,
-  swarmRunning,
   swarmStateForCaller,
   type Caller
 } from '../agents.js';
@@ -582,7 +581,10 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             return fail('apply_patch environment selection is unavailable for this turn');
           }
           const workspace = currentWorkspace();
-          if (!workspace && swarmRunning()) {
+          // Scoped to this call's own conversation, not to whether any swarm exists anywhere —
+          // see resolveCwd's own comment in kernel.ts for the measured reason and the fix it
+          // shares this shape with.
+          if (!workspace && currentCall()?.agent) {
             return fail(
               'WORKSPACE_REQUIRED: this multi-agent chat has no proven workspace. Use an absolute path in another tool first so the approved project can be learned.'
             );
