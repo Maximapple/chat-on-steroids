@@ -84,6 +84,16 @@ has.
 
 ## What changed since the last run
 
+**Your last run measured 20–40 second browser calls across a large block of the suite, on build
+`244aaff`, and it eventually ran long enough that the surrounding ChatGPT turn was cut off before
+the report could be written.** Nothing in `extension/` or the browser driver changed between that
+build and now — this is not a fix landing on top of a diagnosed cause, because there isn't one yet.
+Everything still passed, so this is a performance observation, not a functional one, but it's worth
+isolating rather than re-measuring blind: if it recurs, name which specific operation was slow (not
+just "the suite"), and say whether it correlates with anything — a specific tool, a specific
+fixture, the point where the settings/Accessibility-tree checks ran. A vague "many calls were slow"
+cannot be turned into a fix; three or four named, timed operations can.
+
 **Since your last run, three cloud reviews read this code and found six things.** The one that
 matters to you: the rule that keeps this driver out of a ChatGPT tab was a string prefix, so
 `http://chatgpt.com/` was never refused — Chrome then redirects it to https with the session still
