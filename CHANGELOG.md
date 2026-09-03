@@ -47,6 +47,20 @@ the app refuses the extension and asks you to reload the matching copy.
 - **The Permissions card's read-only explanation no longer overlaps or misaligns the list below
   it.** A grid-row and padding fix keeps it readable and indented to match the header and rows at
   every window size.
+- **A scrollable card that ends mid-row no longer reads as broken.** The Permissions card holds
+  five permission groups in a box tall enough for three-and-a-bit, and Chromium's overlay
+  scrollbar gives no visible cue that there is more — so whichever row landed on the fold looked
+  sliced off rather than merely scrolled past. Every card's scroll area now fades toward its own
+  background at whichever edge still has more content behind it, and only that edge, so a cut row
+  reads as a fade instead of a clip.
+- **A single-chat session no longer gets refused for a swarm it was never part of.** Running a
+  command with no workdir used to check whether *any* multi-agent run existed anywhere in the
+  app, not whether the calling conversation belonged to one — an ordinary chat could be told
+  `WORKSPACE_REQUIRED: this multi-agent chat has no proven workspace` on its very first command
+  merely because an unrelated swarm happened to be active elsewhere. The check is now scoped to
+  this call's own proven agent membership, the same identity the dispatcher already resolves for
+  every call; a genuine swarm member with no learned folder of its own is still refused exactly as
+  before.
 - The native scroll-settle wait now measures the real clock instead of counting requested sleep
   durations, which had let a documented 120 ms ceiling run past 300 ms on real hardware.
 
