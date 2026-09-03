@@ -203,6 +203,10 @@ function send(method, params = {}, timeoutMs = COMMAND_TIMEOUT_MS) {
 async function groupDrivenTab(tabId) {
   try {
     if (!chrome.tabs?.group || !chrome.tabGroups?.update) return null;
+    // A stray group from a session this worker no longer remembers (see sweepStaleDrivenGroups
+    // below) must not be left standing beside the one this call is about to create — that is
+    // exactly how two "Chat On Steroids" bands end up visible at once.
+    await sweepStaleDrivenGroups();
     const groupId = await chrome.tabs.group({ tabIds: [tabId] });
     await chrome.tabGroups.update(groupId, { title: DRIVEN_GROUP_TITLE, color: 'blue' });
     return groupId;
@@ -229,6 +233,42 @@ async function ungroupDrivenTab(tabId, groupId) {
     if (chrome.tabs?.ungroup) await chrome.tabs.ungroup(tabId);
   } catch {
     // The tab is gone, or grouping was never permitted. Either way there is nothing to undo.
+  }
+}
+
+/**
+ * Ungroups every "Chat On Steroids" band this worker is not currently using.
+ *
+ * `session` is the only record this module keeps of which group belongs to a live run, and it
+ * is plain memory — nothing survives an MV3 service worker being recycled, which Chrome does
+ * on its own after roughly thirty seconds of inactivity, restart or update entirely outside
+ * this driver's control. A restart mid-session, or between the last action and a person
+ * noticing the tab is still there, wipes `session` with no `detach` ever having run: the tab
+ * keeps its blue band with nothing left owning it, and it stays that way until something
+ * cleans it up, because nothing was going to run `ungroupDrivenTab` for a session this worker
+ * no longer remembers existed. This is that cleanup. It runs before every new group is created
+ * (so an orphan is never left standing beside a fresh one) and on the extension's own wake
+ * timer (so an orphan is still caught even if nothing ever attaches again). Never touches the
+ * tabs themselves — same as `detach`, only the grouping goes away, never the page.
+ */
+export async function sweepStaleDrivenGroups() {
+  if (!chrome.tabGroups?.query || !chrome.tabs?.query || !chrome.tabs?.ungroup) return;
+  let groups;
+  try {
+    groups = await chrome.tabGroups.query({ title: DRIVEN_GROUP_TITLE });
+  } catch {
+    return;
+  }
+  for (const group of groups) {
+    if (session && group.id === session.groupId) continue;
+    try {
+      const tabs = await chrome.tabs.query({ groupId: group.id });
+      const tabIds = tabs.map((tab) => tab.id).filter((id) => typeof id === 'number');
+      if (tabIds.length > 0) await chrome.tabs.ungroup(tabIds);
+    } catch {
+      // The group or its tabs may already be gone by the time this runs. Best effort, same as
+      // ungroupDrivenTab: there is nothing left to undo either way.
+    }
   }
 }
 

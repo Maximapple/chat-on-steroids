@@ -593,3 +593,42 @@ describe('the ensureTabActive review findings', () => {
     expect(updateAt).toBeLessThan(finalReturnAt);
   });
 });
+
+describe('a driven tab group does not outlive the session that created it', () => {
+  const driver = readFileSync(path.join(process.cwd(), 'extension/browser-driver.js'), 'utf8');
+  const background = readFileSync(path.join(process.cwd(), 'extension/background.js'), 'utf8');
+
+  it('sweeps stale groups before creating a new one, not after', () => {
+    const body = driver.slice(driver.indexOf('async function groupDrivenTab'));
+    const fn = body.slice(0, body.indexOf('\n}\n'));
+    const sweepAt = fn.indexOf('await sweepStaleDrivenGroups()');
+    const createAt = fn.indexOf('chrome.tabs.group(');
+    expect(sweepAt).toBeGreaterThan(-1);
+    expect(createAt).toBeGreaterThan(-1);
+    expect(sweepAt).toBeLessThan(createAt);
+  });
+
+  it('never ungroups the session it is currently running', () => {
+    const body = driver.slice(driver.indexOf('export async function sweepStaleDrivenGroups'));
+    const fn = body.slice(0, body.indexOf('\n}\n'));
+    expect(fn).toMatch(/if \(session && group\.id === session\.groupId\) continue;/);
+    const guardAt = fn.indexOf('session.groupId) continue');
+    const ungroupAt = fn.indexOf('chrome.tabs.ungroup(tabIds)');
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(ungroupAt);
+  });
+
+  it('never closes the tabs it ungroups, only the grouping', () => {
+    const body = driver.slice(driver.indexOf('export async function sweepStaleDrivenGroups'));
+    const fn = body.slice(0, body.indexOf('\n}\n'));
+    expect(fn).not.toMatch(/chrome\.tabs\.remove/);
+  });
+
+  it('also runs on the extension\'s own wake timer, not only before a new attach', () => {
+    const alarmHandler = background.slice(
+      background.indexOf('webext.alarms.onAlarm.addListener'),
+      background.indexOf('webext.alarms.onAlarm.addListener') + 800
+    );
+    expect(alarmHandler).toMatch(/browserDriverModule\.sweepStaleDrivenGroups\(\)/);
+  });
+});

@@ -2904,6 +2904,10 @@ if (webext.alarms && webext.alarms.onAlarm && typeof webext.alarms.onAlarm.addLi
     void drainCommandAcks()
       .then(() => drain())
       .then(() => drainCloses())
+      // Catches a "Chat On Steroids" tab group left behind by a session this worker no longer
+      // remembers — the MV3 recycle case sweepStaleDrivenGroups exists for — even when nothing
+      // ever attaches again to trigger the other place it runs.
+      .then(() => browserDriverModule.sweepStaleDrivenGroups())
       .catch(() => undefined);
   });
 }
