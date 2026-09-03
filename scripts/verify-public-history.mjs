@@ -6,11 +6,19 @@ const maintainerLogin = 'totec448-spec';
 const safeMaintainerEmail = /^(?:\d+\+)?totec448-spec@users\.noreply\.github\.com$/i;
 
 // Keep the blocked values split so this guard does not contain the data it rejects.
+//
+// `totec` here is the upstream maintainer's own local account; the fork's own contributor
+// carries the same exposure and gets the same treatment — a QA report reached this check with
+// a real `/Users/<name>/…` path and a real machine hostname in it (a code review caught both;
+// this check did not, because the blocklist did not yet know either value existed) and both are
+// now fixed at the source and added here so the same leak cannot recur unnoticed.
 const blockedText = [
   { label: 'private maintainer email', value: ['totec448', 'gmail.com'].join('@') },
   { label: 'Claude session trailer', value: ['Claude', 'Session:'].join('-') },
   { label: 'Claude session URL', value: ['https://claude.ai/code/', 'session_'].join('') },
   { label: 'private Windows user path', value: ['C:', 'Users', 'totec'].join('\\') },
+  { label: 'private macOS user path', value: ['', 'Users', 'maxim', ''].join('/') },
+  { label: 'private machine hostname', value: ['Maxims', 'MacBook', 'Pro'].join('-') },
 ];
 
 function runGit(args, { allowFailure = false, encoding = 'utf8' } = {}) {
