@@ -302,8 +302,13 @@ async function ensureTabActive(tabId) {
 
   // The lighter fix was not enough — the window itself was not visible, which tab activation
   // alone cannot reach. Pay the real cost only now that it is the thing missing.
+  //
+  // No windowId means no escalation is possible, not that one was tried and skipped — the
+  // earlier form fell through this case into the unconditional `return true` below, reporting
+  // a switch that never happened. The one thing broughtToFront exists to get right.
+  if (tab.windowId === undefined) return { broughtToFront: false };
   try {
-    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+    await chrome.windows.update(tab.windowId, { focused: true });
   } catch {
     return { broughtToFront: false };
   }
@@ -1528,6 +1533,11 @@ export const browserDriver = {
         const path = Array.isArray(action.path) ? action.path : [];
         if (path.length < 2) throw fail('BAD_REQUEST', 'drag needs at least two points');
         const mask = buttonMask(action.button);
+        // A drag presses, moves and releases through the same Input.dispatchMouseEvent calls
+        // click does, and a backgrounded tab defers all of them the same way — see
+        // ensureTabActive's own comment. Missing here, a drag over a backgrounded tab would
+        // fail exactly how scroll and click used to: silently, with no escalation available.
+        const { broughtToFront } = await ensureTabActive(session.tabId);
         await movePointer(path[0].x, path[0].y, true);
         await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: path[0].x, y: path[0].y, modifiers });
         await send('Input.dispatchMouseEvent', {
@@ -1550,7 +1560,7 @@ export const browserDriver = {
           type: 'mouseReleased', x: last.x, y: last.y, button, buttons: 0, clickCount: 1, modifiers
         });
         await movePointer(last.x, last.y);
-        return { dragged: path.length };
+        return { dragged: path.length, ...(broughtToFront ? { broughtToFront } : {}) };
       }
 
       case 'scroll': {
