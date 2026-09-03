@@ -8,69 +8,51 @@ below turns three of those skips into answers.
 Nothing here needs ChatGPT, and nothing here needs a person: every step is a command you can run.
 Parts 1–4 do not even need the installed app; part 5 does.
 
-**Your last two rounds (the `416a060` regression pass, then your own `ensureTabActive`
-confirmation against `17d9b8f`) closed out everything this document was carrying, and one more
-round on top of your confirmation changed the fix again — worth reading before you re-test.**
+## This round is the release-readiness pass — run all six parts in full, not just the deltas
 
-- **The 120 ms scroll ceiling is fixed and confirmed.** `settledScrollState` now reads
-  `ProcessInfo.processInfo.systemUptime` against a real deadline instead of counting requested
-  microseconds. Nothing further here.
-- **`moved: null` for Chromium content is closed, not deferred — your own follow-up measurement
-  settled it.** You walked the AX parent chain 60 steps deep from both a Chrome tab and this
-  app's own Electron surface; both chains end at `AXApplication` after 17–19 real steps, and the
-  `AXScrollArea` that sits directly over `AXWebArea` in both carries thirteen attributes, none of
-  which holds a scroll position under any name. **The answer is "not further out — not there at
-  all."** Widening the walk would cost 0.3–0.65 ms a call and find nothing; not worth building.
-  `movedUnknown: "nothing scrollable under the pointer"` is the correct, final answer for
-  Chromium content through this path, and the browser driver already answers the question that
-  actually matters through the DOM instead. Nothing to re-test; this is settled.
-- **The `pre-push` hook not finding `node` is fixed**, from your own report of it.
+Every round since `ff8c161` has been narrow on purpose: one finding, one fix, one targeted
+re-check. That was right while each fix was unproven. It stops being right now — a long chain of
+narrow confirmations is not the same thing as one look at the whole surface at once, and a
+"flawless before we ship" bar needs the second kind, not another twelfth round of the first.
+**So: run every part below in full, including what earlier rounds already confirmed.** Don't skip
+a section because a past round passed it — the point this time is one comprehensive pass a
+release decision can actually rest on, not one more incremental diff.
 
-**Checks 33/45/46 are fixed, confirmed by you against the same repro that found them, and then
-changed once more from what you measured.** Both shared one cause: a backgrounded driven tab.
-Your confirmation run measured the first fix exactly right — 7275 ms → 528 ms, `moved: false` →
-`true`, the strip landing on exactly 150 rather than doubling to 300, `createdTab` 5/5 in the
-background where it had been 0/5 — and check 33's blank-screenshot/unreachable-refs half gone
-with it, as a downstream symptom of the same missing compositor. **You also measured the fix's
-own cost**, which the next commit acted on: `windows.update({ focused: true })` is a real macOS
-application switch, not just a Chrome tab switch — TextEdit frontmost to Chrome frontmost,
-1191 ms, measured directly — and takes real keystrokes from whoever is typing, unlike the
-debugger banner, tab group and pointer overlay, none of which take anything away. Per your own
-recommended order: `tabs.update({ active: true })` is now tried alone first, and only escalates
-to the window focus when that alone does not recover `visibilityState`. A `broughtToFront`
-field on the scroll/click reply says which happened, so a real switch is now a fact rather than
-a surprise — and your cross-app measurement is exactly what found the field itself was wrong.
+**What's accumulated since the last full six-part round (`416a060`), for context — verify all of
+it fresh rather than trusting this summary:**
 
-**Your escalation round found the real thing: `broughtToFront` misreported the one case that
-actually needed it.** The good news first — the ordinary "working in another app" case never
-escalates at all, because `visibilityState` tracks a tab's own window, not macOS application
-focus; `tabs.update` alone recovered it with TextEdit genuinely frontmost the whole time. The
-one state that measurably does need the real switch is a **minimized** window, and there
-`broughtToFront` reported `false` while the window state plainly read
-`{"state":"normal","focused":true}` and the scroll worked. Root cause: the field's old value
-was "did visibility confirm within 300 ms of escalating," and un-minimizing measured a
-reproducible 556–588 ms on your machine — past the poll, not past reality. It now reports `true`
-the instant `windows.update({ focused: true })` itself succeeds, independent of how long
-`visibilityState` then takes to catch up. **Re-run your exact 3z minimize repro** and confirm
-`broughtToFront: true` this time, with the same window-state and scroll evidence as before.
-`scripts/diag-scroll46.mjs` is back in the tree (your call to keep it) — this is the one-line
-change it exists to re-measure.
+- The 120 ms scroll ceiling reads the real clock now (`settledScrollState` /
+  `ProcessInfo.processInfo.systemUptime`).
+- `moved: null` for Chromium content was investigated to the end (60-step AX walk, both Chrome
+  and this app's own Electron surface, nothing scrollable at any depth) and is a correct final
+  answer, not a defect.
+- The `pre-push` hook now finds `node` in common install locations.
+- Checks 33/45/46 shared one cause — a backgrounded driven tab — fixed by activating it before a
+  scroll or a click, confirmed against the exact repro that found the bug (7275 ms → 528 ms,
+  `moved: false` → `true`, `createdTab` 0/5 → 5/5 backgrounded).
+- That fix's own cost (an unconditional real macOS application switch, 1191 ms, TextEdit → Chrome)
+  is now paid only when a lighter tab-activation alone does not recover `visibilityState` — which
+  turned out to be almost never; the ordinary "working in another app" case never escalates.
+- **Still open, from the escalation measurement:** the one case that does need the real switch —
+  a minimized driven window — measured `broughtToFront: false` when the switch had, in fact,
+  happened (a timing bug in the field, not in the switch itself: un-minimizing took 556–588 ms
+  against a 300 ms confirmation window). Fixed by reporting the field the instant the switch is
+  requested rather than after a poll. **Re-run the 3z minimize repro and confirm
+  `broughtToFront: true`** — this is the one item from the whole chain that hasn't been
+  confirmed fixed yet, everything else above has.
+- The read-only hint's indent (`0af28f0`) has a DMG to check it against now. Predicted:
+  `PERMISSIONS` and the hint both sit at `x=354`.
+- `Poll errors 1` / "13 problems" was seen once in the health/activity header, unexplained. Note
+  whether it's still there; this pass is a reasonable place to also just look, not only re-test.
 
-**Also: the read-only hint's indent, this time with a real DMG to check it against.** Your last
-round measured the installed app at `2.0.2+735c269` — older than the padding fix — and correctly
-declined to call that a confirmation. A build carrying `0af28f0` exists now. Your own predicted
-value: the hint moves from **x=339 to x=354**, exactly `PERMISSIONS`'s own position. One line to
-confirm either way.
+**Two UX opinions, still open, still not asked as a numbered check:** the Permissions box scrolls
+without showing it (six rows exist, three visible, no hint of the rest — this already almost
+produced a false report once), and a permission row has no "checked Ns ago" the way the header
+line does. Give both a real opinion this round rather than carrying them forward again.
 
-**Not asking you to chase, but noting it since you saw it:** `Poll errors 1` and "13 problems" in
-the health/activity header during your last run, next to an otherwise green state. Say if it's
-still there; not a request to investigate it cold.
-
-**Two UX opinions from your own "wie ich den Kasten beurteile" section, worth keeping in view but
-not asked as checks below.** The Permissions box scrolls without showing it — six rows exist,
-three are visible, nothing hints at the other three, and it fooled you into almost reporting "Look
-at files" as gone. And a permission row has no "checked Ns ago" the way the header line does. Say
-whether either is still true; neither has a fix in this round.
+**What "flawless" actually means for this pass:** not zero findings — a comprehensive pass that
+finds something real is more valuable than a narrow one that finds nothing. Report exactly what
+each part shows, the same evidence-first way every round before this one has.
 
 Paste everything below the line into Claude Code on the Mac.
 
