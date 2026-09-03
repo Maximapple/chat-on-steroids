@@ -748,7 +748,17 @@ export async function resolveCwd(ctx: ToolContext, virtualPath: string | undefin
   const workspace = currentWorkspace();
   // Codex treats an explicitly empty workdir exactly like an omitted one.
   const provided = virtualPath !== undefined && virtualPath !== '';
-  if (!provided && !workspace && swarmRunning()) {
+  // `swarmRunning()` used to gate this — whether *any* run exists anywhere in the app, not
+  // whether this call's own conversation is part of one. QA hit it on the very first command
+  // of an entirely ordinary, single-chat session, over and over, because some unrelated swarm
+  // happened to be alive elsewhere — the message says "this multi-agent chat" but nothing had
+  // checked whether it actually was one. `ctx.roots[0]` is the same shared default every
+  // ordinary chat has always defaulted to; a conversation with no swarm membership at all
+  // defaults to it exactly as safely whether some other swarm exists or not. `context.agent` is
+  // resolved once per call, before any handler runs, from this exact conversation's identity
+  // (`agentForCaller`/`resolve()` in agents.ts) — non-null only when *this* call is genuinely a
+  // member of the active run, which is the one case defaulting could reach the wrong project.
+  if (!provided && !workspace && currentCall()?.agent) {
     throw new SandboxError(
       'WORKSPACE_REQUIRED: this multi-agent chat has no proven workspace. Supply an explicit approved workdir before running a command.'
     );

@@ -2569,4 +2569,72 @@ describe('through the MCP endpoint', () => {
     const worker = (structured.agents as Array<Record<string, unknown>>).find((agent) => agent.id === 'worker-1');
     expect(worker).toMatchObject({ id: 'worker-1', role: 'worker', state: 'active' });
   });
+
+  describe('the workdir gate scopes to this call, not to whether any swarm exists anywhere', () => {
+    // WORKSPACE_REQUIRED used to fire on swarmRunning() — true the instant *any* run existed
+    // in the app, regardless of whether the calling conversation belonged to it. QA hit this
+    // refusal on the very first, entirely ordinary command of a plain single-chat session, over
+    // and over, only because some unrelated swarm happened to be alive elsewhere. It must gate
+    // on this call's own proven agent membership instead.
+
+    const startCommandEndpoint = async (): Promise<void> => {
+      await endpoint.stop();
+      endpoint = await startMcpServer(() => ({
+        roots: [{ name: 'probe', path: dir }],
+        caps: { ...DEFAULT_CAPABILITIES, command: true },
+        readOnly: false,
+        sessionTools: false,
+        agentTools: true
+      }));
+    };
+
+    /** exec_command with no `workdir`, attributed to `conversationId` the same way the held-call test is. */
+    const execWithNoWorkdir = async (conversationId: string): Promise<string> => {
+      const seq = ++evidenceSeq;
+      const requestId = `wfr_exec_ws_${seq}`;
+      const shell =
+        process.platform === 'win32'
+          ? `${process.env.SystemRoot ?? 'C:\\Windows'}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+          : '/bin/sh';
+      const cmd = process.platform === 'win32' ? "Write-Output 'workspace-gate-ok'" : "printf '%s\\n' workspace-gate-ok";
+      const pending = post(
+        {
+          jsonrpc: '2.0',
+          id: nextId++,
+          method: 'tools/call',
+          params: { name: 'exec_command', arguments: { cmd, shell, yield_time_ms: 5_000 } }
+        },
+        { 'x-request-id': `${requestId}/relay` }
+      );
+      await recordChatObservations(conversationId, [
+        { kind: 'turn_start', time: Date.now(), turnId: `t-${seq}` },
+        {
+          kind: 'tool_evidence',
+          time: Date.now(),
+          turnId: `t-${seq}`,
+          calls: [{ messageId: `m-${seq}`, tool: 'exec_command', order: 0, answered: false, requestId }]
+        }
+      ]);
+      return textOfReply(await pending);
+    };
+
+    it('runs for an ordinary chat that belongs to no swarm, even while an unrelated one is running', async () => {
+      await startCommandEndpoint();
+      startSwarm(1);
+      bindConversation('worker-1', 'c-worker-elsewhere');
+
+      const text = await execWithNoWorkdir('c-ordinary-no-swarm');
+      expect(text).not.toContain('WORKSPACE_REQUIRED');
+      expect(text).toContain('workspace-gate-ok');
+    });
+
+    it('still refuses a genuine swarm member that has no learned workspace of its own', async () => {
+      await startCommandEndpoint();
+      startSwarm(1);
+      bindConversation('worker-1', 'c-worker-needs-workspace');
+
+      const text = await execWithNoWorkdir('c-worker-needs-workspace');
+      expect(text).toContain('WORKSPACE_REQUIRED');
+    });
+  });
 });
