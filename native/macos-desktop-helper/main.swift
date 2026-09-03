@@ -457,9 +457,18 @@ private func axOptionalBool(_ element: AXUIElement, _ attribute: CFString) -> Bo
  * can judge. Nil is not "empty" or "false"; it is "this control publishes no comparable value
  * at all", which an ordinary action button does not, and must stay distinguishable from a
  * value that was read and did not change.
+ *
+ * A Chromium accessibility tree answers `AXValue` with an empty string for a control that has
+ * nothing to say about its own state, rather than omitting the attribute the way AppKit does —
+ * measured on both a `PopUpButton` (the extension's own toolbar icon) and a real
+ * `<input type="checkbox">` inside its popup. An empty string still equals itself, so treating
+ * it as a genuine value reported `changed: false` — "nothing changed" — for both, when the
+ * honest answer this function exists to give is "nothing to compare".
  */
 private func axComparableValue(_ element: AXUIElement) -> NSObject? {
-    axAttribute(element, kAXValueAttribute as CFString) as? NSObject
+    guard let value = axAttribute(element, kAXValueAttribute as CFString) as? NSObject else { return nil }
+    if let text = value as? String, text.isEmpty { return nil }
+    return value
 }
 
 /** Whether accessibility itself says this control's value can be written. */

@@ -33,17 +33,21 @@ it fresh rather than trusting this summary:**
 - That fix's own cost (an unconditional real macOS application switch, 1191 ms, TextEdit → Chrome)
   is now paid only when a lighter tab-activation alone does not recover `visibilityState` — which
   turned out to be almost never; the ordinary "working in another app" case never escalates.
-- **Still open, from the escalation measurement:** the one case that does need the real switch —
-  a minimized driven window — measured `broughtToFront: false` when the switch had, in fact,
-  happened (a timing bug in the field, not in the switch itself: un-minimizing took 556–588 ms
-  against a 300 ms confirmation window). Fixed by reporting the field the instant the switch is
-  requested rather than after a poll. **Re-run the 3z minimize repro and confirm
-  `broughtToFront: true`** — this is the one item from the whole chain that hasn't been
-  confirmed fixed yet, everything else above has.
+- **Confirmed, not just fixed:** the minimized-window escalation case that used to measure
+  `broughtToFront: false` when the switch had, in fact, happened now reports `broughtToFront: true`
+  — two rounds running, the second with its own dedicated `verify:browser` check ("a minimized
+  driven window escalates and correctly reports broughtToFront"). Nothing left to re-derive here;
+  an ordinary regression check going forward.
 - The read-only hint's indent (`0af28f0`) has a DMG to check it against now. Predicted:
   `PERMISSIONS` and the hint both sit at `x=354`.
 - `Poll errors 1` / "13 problems" was seen once in the health/activity header, unexplained. Note
   whether it's still there; this pass is a reasonable place to also just look, not only re-test.
+- **Driver/build provenance, explained rather than fixed.** The last ChatGPT run flagged the
+  packaged `browser-driver.js` digest staying identical across a Core version bump as ambiguous,
+  proven not to be stale Chrome. It's not a bug: `244aaff` and `45c602e` touched TypeScript, CSS
+  and docs only — nothing under `extension/`. An unchanged digest is the correct answer for a
+  round that shipped no extension change; note in your report whether that's still true for
+  whatever commit you're actually running against.
 - **The invisibly-scrolling Permissions box is fixed, not just opined on.** The indent fix above
   pushed the read-only hint onto a fifth line, which is exactly what turned "three of six rows
   visible" into "a row sliced in half at the bottom with nothing on screen explaining why" —
@@ -466,34 +470,42 @@ enough fields, some forwarded from `snapshot` into the other two, that enumerati
 its own round rather than being guessed at here. Do not report their continued silence on a stray
 key as a regression; it is the documented scope of this round, not an oversight.
 
-## 5e. The extension popup and its toolbar button — two findings from the same run, unfixed
+## 5e. The extension popup and its toolbar button — one fixed, one still genuinely open
 
-The last run found these on the current build (`9f9160b`); nothing since has touched either, so
-they are still open. Both are about `act`'s semantic click landing on the extension's own UI —
-the popup Chrome shows when its toolbar icon is clicked — rather than on a page.
+The last round root-caused both findings from `9f9160b` down to instrumented pixel/AX evidence —
+exact roles, actions, AXValue contents, before/after pixel diffs, screenshots. That measurement is
+why one of these now has a precise fix and the other doesn't: it showed they were never the same
+bug wearing two faces.
 
-**Finding 1: the popup's custom "Browser control" checkbox does not toggle through a semantic
-click.** Open the popup by hand once, so you know where it lives. `find_ui` it and locate the
-checkbox; record its AX role, its actions, and its current checked state. `act` a semantic click
-on it — not coordinates — then `find_ui` again immediately. Report whether the checked state
-actually changed. Last round it did not; only a raw coordinate click at the same spot moved it.
-If it still does not, look at whether the control is a real `<input type="checkbox">` or a custom
-div/ARIA toggle in `popup.html`/`popup.js` — the question this answers is whether
-`AXUIElementPerformAction`'s press is reaching a real click handler at all for this shape of
-control, which decides whether the fix belongs in the popup's markup or in the native click path.
+**The `changed: false` false negative is fixed — confirm it, don't re-diagnose it.** Both the
+toolbar `PopUpButton` and the popup's real `<input type="checkbox">` answer `AXValue` with an
+*empty string* rather than omitting the attribute the way AppKit controls do. An empty string
+still equals itself, so comparing it before/after a press reported `changed: false` — "nothing
+changed" — on both, when `act_ui`'s own contract says to omit the field entirely when there is
+nothing comparable to say. `axComparableValue` now treats an empty AXValue as no value at all.
+Re-run both repros from last round and confirm the field is now *absent*, not `false`:
+- `act` a semantic click on the Chrome toolbar extension icon; snapshot `{"op":"windows"}` before
+  and after to confirm the popup opened (a new window in the list), and check `changed`/
+  `ui_changed` is omitted this time.
+- `act_ui` a semantic press on the popup's Timestamps toggle (harmless, no permission involved,
+  identical markup to Browser control) and confirm the same.
 
-**Finding 2: clicking the toolbar icon itself succeeds, but `act` calls it a no-op.** Snapshot
-`{"op":"windows"}` before. `act` a semantic click on the Chrome toolbar extension icon. Snapshot
-`{"op":"windows"}` again and take a screenshot immediately after. Confirm the popup actually
-opened — a new window in the list, visible in the picture — while separately recording what
-`act`/`act_ui`'s own `changed`/`ui_changed` field said about the click. Last round the popup
-opened correctly and the field still said nothing changed: a false negative, because the check
-was reading the clicked element's own AX value, and a toolbar button that opens a *separate*
-window has no reason to change any attribute of itself. Report both readings — the window list
-and the field — so it's clear whether this is still checking the wrong signal.
-
-Quote the exact AX role/action names and the raw JSON replies for both, not just pass/fail; that
-detail is what decides where either fix lands.
+**The checkbox still does not actually toggle through a semantic press — this is still open, and
+still needs a design decision, not a guess.** Last round proved, on two separate controls with
+identical markup, that `AXUIElementPerformAction(kAXPressAction)` returns success against these
+popup checkboxes and changes *nothing*: 0 pixels differ before/after, and — the more telling half
+— no error appears either, which rules out the checkbox's own `change` handler running and failing
+on a missing user gesture (that path writes a visible error; nothing was written). A coordinate
+click on the identical spot works immediately, every time. So the press is not reaching a real
+click handler at all for this control, specifically inside the extension's own popup surface,
+and the existing markup (`<label for>` around a real `<input type="checkbox">`) is already the
+correct, accessible shape — there's nothing left to fix there. Two things worth gathering if you
+have time, since they'd shape what a fix even looks like: does the same `AXPress`-does-nothing
+result hold for this exact same control type in an *ordinary tab* (not a popup surface, to tell
+apart "Chromium popups specifically" from "Chromium checkboxes in general"), and does `act_ui`
+already have anywhere it could safely fall back to a coordinate click when a press provably had no
+effect — or would that change behavior for controls where "no effect" is the *correct* outcome.
+Don't implement a fix without an answer to that second question; report what you find instead.
 
 ## 6. What to report
 
@@ -522,9 +534,9 @@ says to expect. Then, plainly:
 - **The Permissions card's scroll fade: does a row on the fold now read as "more below" rather
   than clipped? The one open UX opinion left — the missing last-checked timestamp: still true?
   Still worth fixing, in your judgement?**
-- **The popup checkbox and the toolbar button (5e): does `act` toggle the checkbox now, or only
-  coordinates still do? Does the toolbar click's `changed`/`ui_changed` field now agree with the
-  window list and screenshot, or is it still a false negative?**
+- **5e: is `changed`/`ui_changed` now omitted (not `false`) for the toolbar click and the
+  Timestamps toggle? And still separately: does a semantic press toggle the popup checkbox yet,
+  or does only a coordinate click still do it?**
 
 Then anything that struck you as wrong, slow or dangerous that no part above covers. On the last
 five rounds that section has been the most valuable part of the report.

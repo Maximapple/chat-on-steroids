@@ -61,6 +61,16 @@ the app refuses the extension and asks you to reload the matching copy.
   this call's own proven agent membership, the same identity the dispatcher already resolves for
   every call; a genuine swarm member with no learned folder of its own is still refused exactly as
   before.
+- **`act_ui`'s `changed` field no longer reports `false` for a control it never actually read.**
+  Chromium answers `AXValue` with an empty string for a control with nothing to say about its own
+  state — measured on both a toolbar `PopUpButton` and a real `<input type="checkbox">` in the
+  extension's own popup — rather than omitting the attribute the way AppKit controls do. Reading
+  an empty string before and after a press "isEqual"s itself, so both reported `changed: false`
+  ("nothing changed") when the field's own contract calls for omitting it ("nothing to compare").
+  An empty AXValue is now treated the same as no value at all. This does not fix the click itself:
+  `AXPress` on that same checkbox measurably does nothing — 0 pixels differ, no error is shown —
+  while a coordinate click on the identical control works immediately; that half stays open,
+  tracked in `docs/qa/claude-mac.md`.
 - The native scroll-settle wait now measures the real clock instead of counting requested sleep
   durations, which had let a documented 120 ms ceiling run past 300 ms on real hardware.
 
