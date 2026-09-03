@@ -551,3 +551,45 @@ describe('the browser driver scrolls the way the caller asked', () => {
     expect(driver).not.toMatch(/modifiers: 4, key: 'a'/);
   });
 });
+
+/**
+ * Two findings from a review of the ensureTabActive round, both real.
+ *
+ * The scroll and click cases were each fixed in their own commit; a drag is the same
+ * Input.dispatchMouseEvent machinery those fixes exist for, and was never given the same call.
+ * And ensureTabActive's own return had a gap the review found by reading, not by running: a tab
+ * whose windowId is somehow undefined skips the escalation entirely, but execution still fell
+ * through the unconditional `return { broughtToFront: true }` at the end of the function — the
+ * exact misreport class this round's whole fix was for, on a path no live-Chrome run exercises
+ * (a real tab always carries a windowId), which is why this is a source assertion and not a
+ * driven-fixture one.
+ */
+describe('the ensureTabActive review findings', () => {
+  const driver = readFileSync(path.join(process.cwd(), 'extension/browser-driver.js'), 'utf8');
+
+  it('activates the driven tab before a drag, the same as before a scroll or a click', () => {
+    const dragCase = driver.slice(driver.indexOf("case 'drag': {"), driver.indexOf('case \'scroll\': {'));
+    expect(dragCase).toMatch(/const \{ broughtToFront \} = await ensureTabActive\(session\.tabId\);/);
+    // Before the first Input.dispatchMouseEvent this case sends, not after.
+    const activateAt = dragCase.indexOf('ensureTabActive(session.tabId)');
+    // The literal call, not a comment mentioning the method — this file's own comments say
+    // "Input.dispatchMouseEvent" in prose above the real call.
+    const firstDispatchAt = dragCase.indexOf("send('Input.dispatchMouseEvent'");
+    expect(activateAt).toBeGreaterThan(-1);
+    expect(activateAt).toBeLessThan(firstDispatchAt);
+  });
+
+  it('never reports broughtToFront: true on the one path that never attempted it', () => {
+    const body = driver.slice(driver.indexOf('async function ensureTabActive'));
+    const fn = body.slice(0, body.indexOf('\n}\n'));
+    // The undefined-windowId guard must return on its own, before the escalation call — not
+    // fall through to it, and not fall through to the unconditional true at the end.
+    expect(fn).toMatch(/if \(tab\.windowId === undefined\) return \{ broughtToFront: false \};/);
+    const guardAt = fn.indexOf('tab.windowId === undefined');
+    const updateAt = fn.indexOf('chrome.windows.update(tab.windowId');
+    const finalReturnAt = fn.lastIndexOf('return { broughtToFront: true };');
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(updateAt);
+    expect(updateAt).toBeLessThan(finalReturnAt);
+  });
+});
