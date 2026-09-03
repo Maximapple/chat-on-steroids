@@ -58,6 +58,30 @@ done, and a run that measures the old driver while reading the new release notes
 fixes as broken. That happened last round. If your `build` equals the one the previous run quoted,
 step 2 did not take: redo it, redo step 3, and start again rather than reporting the results.
 
+## This round is the release-readiness pass
+
+Run all 49 checks in full — including everything a past round already passed. Every round up to
+this one was deliberately narrow: one finding, one fix, one targeted re-check, because each fix
+was unproven and a narrow check was the fast way to prove it. That's not what this round is for.
+A chain of narrow confirmations is not the same thing as one look at the whole surface at once,
+and "flawless enough to ship" needs the second kind. Don't skip a check because an earlier round
+passed it — that's exactly the assumption a comprehensive pass exists to not make.
+
+Two things from the most recent rounds are still genuinely open rather than just unconfirmed —
+give them real attention, not a rubber stamp:
+
+- **Check 46's fix (and 45's, and half of 33's) shares one root cause: a backgrounded driven
+  tab.** The driver now activates it before a scroll or a click. Confirmed on the exact fixture
+  that found the bug; not yet confirmed on whatever fixture this round builds fresh. If your
+  driven tab is ever behind the ChatGPT conversation tab — which is the ordinary case, not a rare
+  one — this is exactly the condition to exercise.
+- **Check 50 is confirmed fixed** (names the capability, e.g. `enable "See the screen"`) —
+  reconfirm it holds, since this pass is about the whole surface, not just what's new.
+
+A comprehensive pass that finds something real is worth more than a narrow one that finds
+nothing — report exactly what happens, the same evidence-first way every round before this one
+has.
+
 ## What changed since the last run
 
 **Since your last run, three cloud reviews read this code and found six things.** The one that
