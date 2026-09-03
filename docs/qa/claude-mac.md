@@ -44,11 +44,17 @@ it fresh rather than trusting this summary:**
   `PERMISSIONS` and the hint both sit at `x=354`.
 - `Poll errors 1` / "13 problems" was seen once in the health/activity header, unexplained. Note
   whether it's still there; this pass is a reasonable place to also just look, not only re-test.
+- **The invisibly-scrolling Permissions box is fixed, not just opined on.** The indent fix above
+  pushed the read-only hint onto a fifth line, which is exactly what turned "three of six rows
+  visible" into "a row sliced in half at the bottom with nothing on screen explaining why" —
+  confirmed against the DMG this round measured. Every `.scroll` card (Permissions, Folders,
+  Health, Activity) now fades toward its own background at whichever edge still has more content
+  behind it. **Re-check this as a confirm, not an opinion**: scroll the Permissions card to where a
+  row would land on the fold, and say whether it now reads as "more below" rather than as clipped.
 
-**Two UX opinions, still open, still not asked as a numbered check:** the Permissions box scrolls
-without showing it (six rows exist, three visible, no hint of the rest — this already almost
-produced a false report once), and a permission row has no "checked Ns ago" the way the header
-line does. Give both a real opinion this round rather than carrying them forward again.
+**One UX opinion still open, still not asked as a numbered check:** a permission row has no
+"checked Ns ago" the way the header line does. Give a real opinion this round rather than carrying
+it forward again.
 
 **What "flawless" actually means for this pass:** not zero findings — a comprehensive pass that
 finds something real is more valuable than a narrow one that finds nothing. Report exactly what
@@ -460,6 +466,35 @@ enough fields, some forwarded from `snapshot` into the other two, that enumerati
 its own round rather than being guessed at here. Do not report their continued silence on a stray
 key as a regression; it is the documented scope of this round, not an oversight.
 
+## 5e. The extension popup and its toolbar button — two findings from the same run, unfixed
+
+The last run found these on the current build (`9f9160b`); nothing since has touched either, so
+they are still open. Both are about `act`'s semantic click landing on the extension's own UI —
+the popup Chrome shows when its toolbar icon is clicked — rather than on a page.
+
+**Finding 1: the popup's custom "Browser control" checkbox does not toggle through a semantic
+click.** Open the popup by hand once, so you know where it lives. `find_ui` it and locate the
+checkbox; record its AX role, its actions, and its current checked state. `act` a semantic click
+on it — not coordinates — then `find_ui` again immediately. Report whether the checked state
+actually changed. Last round it did not; only a raw coordinate click at the same spot moved it.
+If it still does not, look at whether the control is a real `<input type="checkbox">` or a custom
+div/ARIA toggle in `popup.html`/`popup.js` — the question this answers is whether
+`AXUIElementPerformAction`'s press is reaching a real click handler at all for this shape of
+control, which decides whether the fix belongs in the popup's markup or in the native click path.
+
+**Finding 2: clicking the toolbar icon itself succeeds, but `act` calls it a no-op.** Snapshot
+`{"op":"windows"}` before. `act` a semantic click on the Chrome toolbar extension icon. Snapshot
+`{"op":"windows"}` again and take a screenshot immediately after. Confirm the popup actually
+opened — a new window in the list, visible in the picture — while separately recording what
+`act`/`act_ui`'s own `changed`/`ui_changed` field said about the click. Last round the popup
+opened correctly and the field still said nothing changed: a false negative, because the check
+was reading the clicked element's own AX value, and a toolbar button that opens a *separate*
+window has no reason to change any attribute of itself. Report both readings — the window list
+and the field — so it's clear whether this is still checking the wrong signal.
+
+Quote the exact AX role/action names and the raw JSON replies for both, not just pass/fail; that
+detail is what decides where either fix lands.
+
 ## 6. What to report
 
 Part by part: what you ran, what came back verbatim, and whether it agrees with what this document
@@ -484,8 +519,12 @@ says to expect. Then, plainly:
 - **The drag regression: still gone, or back? Two clean rounds so far.**
 - **`broughtToFront: true` on your minimized-window repro — does it now match the window state
   and scroll evidence, instead of reporting `false` for a real escalation?**
-- **The two open UX opinions — the invisibly-scrolling Permissions box and the missing
-  last-checked timestamp: still true? Still worth fixing, in your judgement?**
+- **The Permissions card's scroll fade: does a row on the fold now read as "more below" rather
+  than clipped? The one open UX opinion left — the missing last-checked timestamp: still true?
+  Still worth fixing, in your judgement?**
+- **The popup checkbox and the toolbar button (5e): does `act` toggle the checkbox now, or only
+  coordinates still do? Does the toolbar click's `changed`/`ui_changed` field now agree with the
+  window list and screenshot, or is it still a false negative?**
 
 Then anything that struck you as wrong, slow or dangerous that no part above covers. On the last
 five rounds that section has been the most valuable part of the report.
