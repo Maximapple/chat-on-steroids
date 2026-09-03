@@ -478,9 +478,16 @@ async function loadMoreSessions(): Promise<void> {
   if (sessionPageLoading || !sessionPageCursor || sessions.length >= sessionTotal) return;
   sessionPageLoading = true;
   const cursor = sessionPageCursor;
+  const generation = sessionsLoadGeneration;
   try {
     const page = await run(api.listSessions({ cursor, limit: SESSION_PAGE_SIZE }));
     if (!page) return;
+    // A hot refresh (loadSessions) can replace the first page and its cursor while this
+    // older-page request is in flight. Committing this response's cursor over that newer one
+    // would silently strand whatever rows sit between the refresh's cursor and this page's
+    // start, with no cursor left able to reach them. Discard instead — the next scroll or hot
+    // refresh already carries the current cursor and will recover the gap on its own.
+    if (generation !== sessionsLoadGeneration || cursor !== sessionPageCursor) return;
     mergeSessionRows(page.sessions);
     loadedOlderSessions = true;
     sessionTotal = page.total;
