@@ -62,8 +62,6 @@ export const MAX_OVERFLOW_ASSET_CHARS = 8 * 1024 * 1024;
 const MAX_LINE_BYTES = 512 * 1024;
 /** How many sessions the UI shows. Lookups and pruning still see every session. */
 const MAX_LISTED_SESSIONS = 200;
-/** Bound for legacy/model-facing full-list scans. Identity and retention use the uncapped cached catalog. */
-const MAX_SCANNED_SESSIONS = 5_000;
 /** Keep the uncapped authoritative scan fast without opening thousands of files at once. */
 const ATTACHMENT_CATALOG_READ_CONCURRENCY = 64;
 
@@ -1444,10 +1442,6 @@ async function readMetaCheckpoint(id: string): Promise<MetaCheckpoint | null> {
   return null;
 }
 
-async function readMeta(id: string): Promise<SessionSummary | null> {
-  return (await readMetaCheckpoint(id))?.summary ?? null;
-}
-
 function addAttachment(map: Map<string, Set<string>>, conversationId: string, sessionId: string): void {
   if (!conversationId) return;
   const ids = map.get(conversationId) ?? new Set<string>();
@@ -1586,37 +1580,6 @@ async function ensureAttachmentCatalog(): Promise<AttachmentCatalog> {
 }
 
 /**
- * Every readable session, newest first. Live summaries win over what is on disk.
- *
- * Legacy/model-facing bounded list. Do not use this for correctness properties that promise
- * to see every retained session; identity, latest-handoff recovery and retention use the
- * uncapped process catalog instead.
- */
-async function readAllSummaries(): Promise<SessionSummary[]> {
-  assertReady();
-  let names: string[];
-  try {
-    names = await fs.readdir(root);
-  } catch {
-    return [];
-  }
-  const summaries: SessionSummary[] = [];
-  let scanned = 0;
-  for (const name of names) {
-    if (!/^[0-9a-z-]{8,64}$/i.test(name)) continue;
-    if (++scanned > MAX_SCANNED_SESSIONS) {
-      logWarn(`session store: more than ${MAX_SCANNED_SESSIONS} session folders; older ones were not scanned`);
-      break;
-    }
-    const live = open.get(name);
-    const summary = live ? live.summary : await readMeta(name);
-    if (summary) summaries.push({ ...summary });
-  }
-  summaries.sort((a, b) => b.updatedAt - a.updatedAt);
-  return summaries;
-}
-
-/**
  * Every valid session summary, with no maintenance/UI scan cap.
  *
  * Most callers deliberately stop after 5,000 folders so a pathological history cannot make a
@@ -1624,8 +1587,16 @@ async function readAllSummaries(): Promise<SessionSummary[]> {
  * authority. Missing the newest resumable handoff because `readdir()` happened to return that
  * folder after an arbitrary cap can resume the wrong work. Keep the expensive path explicit
  * and use it only where "every session" is part of the contract.
+ *
+ * Request-correlation crash-window reconciliation, deterministic Unattributed repair and
+ * model-facing session search are the same kind of caller: each one's own contract promises to
+ * see every retained session (or, for search, to know when it truly has), so each uses this
+ * instead of a capped list. There used to be a `listAllSessions()` wrapping the capped
+ * `readAllSummaries()` for exactly those three callers, discovered and deleted after a
+ * 2026-08-31 audit found it being read as if it were authoritative — the cap silently turned
+ * "session 5,001" into "does not exist" for callers whose whole job was not to do that.
  */
-async function readEverySummary(): Promise<SessionSummary[]> {
+export async function readEverySummary(): Promise<SessionSummary[]> {
   const catalog = await ensureAttachmentCatalog();
   const summaries = new Map<string, SessionSummary>();
   for (const summary of catalog.summaries.values()) summaries.set(summary.id, summary);
@@ -1710,11 +1681,6 @@ export async function listSessionPage(options: {
 /** Newest first, capped for older internal/UI callers. */
 export async function listSessions(): Promise<SessionSummary[]> {
   return (await listSessionPage({ limit: MAX_LISTED_SESSIONS })).sessions;
-}
-
-/** Full bounded compatibility/model-facing view. Never use it for retention or identity. */
-export async function listAllSessions(): Promise<SessionSummary[]> {
-  return readAllSummaries();
 }
 
 /**
