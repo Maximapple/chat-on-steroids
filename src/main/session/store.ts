@@ -759,7 +759,7 @@ async function ensureOpen(id: string): Promise<OpenSession> {
   }
 }
 
-function applyToSummary(summary: SessionSummary, event: SessionEvent): void {
+function applyToSummary(summary: SessionSummary, event: SessionEvent, options: { skipContextTokens?: boolean } = {}): void {
   summary.events += 1;
   // Never backwards. A tool call is written once the app knows which chat it belongs to,
   // which can be after the page has already reported the end of the turn it ran in, and
@@ -769,7 +769,12 @@ function applyToSummary(summary: SessionSummary, event: SessionEvent): void {
   const tokens = eventTokens(event);
   summary.estimatedTokens += tokens;
   // What the attached chat is carrying. Reset by a compaction rebind; see rebindSession.
-  summary.contextTokens += tokens;
+  // A late-attributed call proven to belong to a conversation this session has since moved
+  // away from (see fileToolCall's re-check in recorder.ts) is durable history, not something
+  // the *now-attached* chat is carrying — counting it here would silently re-inflate a meter
+  // a rebind just reset, and a busy in-flight call (a browser screenshot, most often) is
+  // exactly what can still be landing seconds after the compaction that reset it committed.
+  if (!options.skipContextTokens) summary.contextTokens += tokens;
   if (event.kind === 'user_message') summary.userMessages += 1;
   if (event.kind === 'tool_call') {
     summary.toolCalls += 1;
@@ -866,7 +871,20 @@ export function appendEvent(sessionId: string, event: NewSessionEvent): Promise<
       entry.nextSeq += 1;
       entry.tail.push(full);
       if (entry.tail.length > MAX_EVENT_TAIL) entry.tail.splice(0, entry.tail.length - MAX_EVENT_TAIL);
-      applyToSummary(entry.summary, full);
+      // A tool call's own storage work — text, images — can still be in flight when a Compact
+      // & Resume rebind lands for this exact session, since rebindSession() and this append
+      // share the one queue above but a slow call (a browser screenshot, typically) can already
+      // be past the recorder's own superseded check by then. Both operations are ordered by
+      // that shared queue, so `entry.summary.conversationId` here is never stale: if this
+      // event's own recorded conversation no longer matches it, the call landed after its chat
+      // was superseded. It is still durable history — worth keeping on this exact row — but not
+      // something the *now-attached* chat is carrying, and counting it would silently re-inflate
+      // the auto-compaction meter a rebind just reset, straight back over the threshold.
+      const supersededCall =
+        full.kind === 'tool_call' &&
+        full.call.conversationId !== null &&
+        full.call.conversationId !== entry.summary.conversationId;
+      applyToSummary(entry.summary, full, { skipContextTokens: supersededCall });
       entry.historySeq = full.seq;
       scheduleMeta(entry);
       return full;
