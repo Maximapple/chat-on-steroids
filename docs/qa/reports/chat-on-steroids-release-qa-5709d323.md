@@ -63,7 +63,7 @@ Die Tests liefen auf echter Apple-Silicon-Hardware, nicht in einer VM und nicht 
 Beobachtete Systemdaten:
 
 ```text
-Darwin Maxims-MacBook-Pro 27.0.0
+Darwin <hostname> 27.0.0
 Darwin Kernel Version 27.0.0
 RELEASE_ARM64_T6041
 Architecture: arm64
