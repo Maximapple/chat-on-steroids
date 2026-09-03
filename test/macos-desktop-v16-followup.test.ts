@@ -11,24 +11,25 @@ describe('PR #28 v16 follow-up review fixes', () => {
   it('does not retarget an explicit find_ui request to the foreground window', () => {
     const start = swift.indexOf('private func findUI');
     const body = swift.slice(start, start + 6000);
-    expect(body).toContain('else if request["id"] != nil');
+    expect(body).toContain('else if let rawRequested = request["id"], !(rawRequested is NSNull)');
     expect(body).toContain('WINDOW_NOT_FOUND');
-    expect(body.indexOf('request["id"] != nil')).toBeLessThan(body.indexOf('foregroundWindowID()'));
+    expect(body.indexOf('let rawRequested = request["id"]')).toBeLessThan(body.indexOf('foregroundWindowID()'));
   });
 
   it('treats asynchronous capture as one exact display-topology epoch', () => {
     expect(swift).toContain('let contentDisplayRects = content.displays.map(\\.frame)');
-    expect(swift).toContain('display topology changed before capture began');
+    expect(swift).toContain('active display topology changed before screenshot capture began');
     expect(swift).toContain('let finalDisplayRects = try activeDisplayRects()');
     expect(swift).toContain('display topology changed while screenshot was captured');
     expect(swift).toContain('displayTopologyObject(finalDisplayRects)');
   });
 
-  it('does not label a macOS visible-screen crop as a window frame', () => {
-    expect(computer).toMatch(
-      /opts\.crop[\s\S]*process\.platform === 'darwin'[\s\S]*\? null[\s\S]*cropSourceFrame\?\.windowId/
-    );
-    expect(computer).toContain("opts.crop && process.platform !== 'darwin'");
+  it('does not label a visible-screen crop as a window frame, on any platform', () => {
+    // Keeping the source window id on a crop would let pixels from an occluding app authorize
+    // input against the covered window — true everywhere, not only on the one platform this
+    // used to carve out an exception for. The crop is always screen-bound now.
+    expect(computer).toMatch(/screenshotFromReply\(reply, file, opts\.crop \? null : opts\.window \?\? null\)/);
+    expect(computer).not.toContain('lastFrame?.windowId ?? null : cropFrame?.windowId');
   });
 
   it('prevalidates cross-window batches before their first side effect', () => {

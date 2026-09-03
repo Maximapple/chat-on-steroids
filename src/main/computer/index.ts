@@ -30,7 +30,7 @@ export const MAX_SCREENSHOT_WIDTH = 2560;
 const HELPER_TIMEOUT_MS = 30_000;
 const HELPER_STARTUP_GRACE_MS = 10_000;
 const MAX_FRAMES = 16;
-/** Keeps the base64 image plus ordinary MCP metadata inside an 8 MiB wire envelope. */
+/** Per-image ceiling; the final Desktop tool layer separately measures text + image together. */
 export const MAX_SCREENSHOT_PNG_BYTES = Math.floor((((8 * 1024 * 1024) - (64 * 1024)) * 3) / 4);
 
 let macOSDesktopAccess: MacOSDesktopAccessStatus | null = null;
@@ -973,7 +973,9 @@ async function findUiLocked(
     let imageCenter: { x: number; y: number } | null = null;
     if (
       frame &&
-      // A visible fallback can contain an occluder even though semantic refs belong to the requested window.
+      // A screen fallback can contain an occluding application's pixels even though the
+      // semantic tree belongs to the requested window. Keep refs and desktop bounds, but
+      // do not claim those controls occupy pixels the screenshot may not show.
       frame.captureMode !== 'screen_fallback' &&
       bounds.x >= frame.region.x &&
       bounds.y >= frame.region.y &&
@@ -1132,8 +1134,7 @@ export async function screenshot(opts: {
 async function screenshotFromReply(
   reply: Record<string, any>,
   file: string,
-  requestedWindow: number | null,
-  inheritedWindowGeometry?: Rect | null
+  requestedWindow: number | null
 ): Promise<Screenshot> {
   const region = reply['region'] as Rect;
   const size = reply['image'] as { width: number; height: number };
@@ -1171,8 +1172,9 @@ async function screenshotFromReply(
   const rawMode = String(reply['captureMode'] ?? (requestedWindow === null ? 'screen' : 'screen_fallback'));
   const captureMode: Screenshot['captureMode'] =
     rawMode === 'window' || rawMode === 'screen_fallback' ? rawMode : 'screen';
-  // Only an actual background-window bitmap can authorize later input against that window.
-  // Visible screen fallbacks may contain an occluding app and therefore remain screen-bound.
+  // Only an actual background-window bitmap can authorize later input against that
+  // window. A screen fallback contains visible pixels (possibly an occluder), so it must
+  // retain screen topology rather than relabel those pixels with the requested window.
   const frameWindow = captureMode === 'window' ? requestedWindow : null;
   const scale = size.width / region.width;
   const replyWindowGeometry = reply['windowGeometry'] as Rect | undefined;
@@ -1199,12 +1201,7 @@ async function screenshotFromReply(
     width: size.width,
     height: size.height,
     windowId: frameWindow,
-    windowGeometry:
-      frameWindow === null
-        ? null
-        : inheritedWindowGeometry === undefined
-          ? replyWindowGeometry ?? { ...region }
-          : inheritedWindowGeometry,
+    windowGeometry: frameWindow === null ? null : replyWindowGeometry ?? { ...region },
     displayTopology: frameWindow === null ? displayTopology : null,
     captureMode
   };
@@ -1307,19 +1304,11 @@ async function screenshotLocked(
       ...(opts.window === undefined ? {} : { id: opts.window }),
       ...(opts.full === true ? { full: true } : {})
     });
-    const cropSourceFrame = opts.crop ? (cropFrame === undefined ? lastFrame : cropFrame) : null;
-    return await screenshotFromReply(
-      reply,
-      file,
-      opts.crop
-        ? process.platform === 'darwin'
-          ? null
-          : cropSourceFrame?.windowId ?? null
-        : opts.window ?? null,
-      opts.crop && process.platform !== 'darwin'
-        ? cropSourceFrame?.windowGeometry ?? null
-        : undefined
-    );
+    // A crop is a fresh capture of visible display pixels, even when its coordinates came
+    // from a window-bound frame. Keeping the source window id here would let pixels from an
+    // occluding app authorize later input against the covered window. Publish the crop as
+    // screen-bound so its frame identity describes the pixels that were actually captured.
+    return await screenshotFromReply(reply, file, opts.crop ? null : opts.window ?? null);
   } finally {
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
   }

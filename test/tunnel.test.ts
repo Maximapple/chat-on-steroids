@@ -14,9 +14,10 @@ import {
   isUnreachableError,
   NO_OUTAGE,
   outageConfirmed,
-  outageRecovered
+  outageRecovered,
+  routeObservation
 } from '../src/main/tunnel/index.js';
-import { describeRoute } from '../src/main/diagnostics.js';
+import { describeRoute, metadataErrorIsCurrent } from '../src/main/diagnostics.js';
 import { commonBinaryDirsForPlatform, locateBinary, tunnelExecutableName } from '../src/main/tunnel/locate.js';
 import { makeTempDir, removeTempDir } from './helpers.js';
 
@@ -83,6 +84,7 @@ describe('network error classification', () => {
     expect(isUnreachableError('context deadline exceeded')).toBe(false);
     expect(isUnreachableError('mcp probe failed: context deadline exceeded')).toBe(false);
     expect(isUnreachableError('dial tcp: i/o timeout')).toBe(false);
+    expect(isUnreachableError('context deadline exceeded while probing the local MCP server')).toBe(false);
   });
 
   it('explains the cause in words a non-engineer can act on', () => {
@@ -271,11 +273,38 @@ describe('outage confirmation', () => {
   });
 });
 
+describe('route observation under partial health failures', () => {
+  const T = 1_000_000_000_000;
+
+  it('keeps missing metrics unknown instead of guessing from old complaints or handshakes', () => {
+    expect(routeObservation(null, T - 1_000, NO_OUTAGE, T)).toBe('unknown');
+    expect(routeObservation(null, null, { since: T - 100_000, handshakeBefore: null }, T)).toBe(
+      'unknown'
+    );
+  });
+
+  it('reports a ready startup while the first readable long poll is still open', () => {
+    expect(routeObservation(0, null, NO_OUTAGE, T)).toBe('connected');
+  });
+
+  it('requires the full complaint window before calling a ready client offline', () => {
+    const run = { since: T, handshakeBefore: T - 10_000 };
+    expect(routeObservation(0, T - 10_000, run, T + 34_999)).toBe('connected');
+    expect(routeObservation(0, T - 10_000, run, T + 35_000)).toBe('offline');
+  });
+
+  it('does not repeat a sticky metadata error after a fresh handshake proves recovery', () => {
+    const health = { lastSuccessMs: T, polls: 5, errors: 1 };
+    expect(metadataErrorIsCurrent('poll timed out; backing off', health, T + 1_000)).toBe(false);
+    expect(metadataErrorIsCurrent('poll timed out; backing off', health, T + 200_000)).toBe(true);
+  });
+});
+
 /**
  * The other half of the same log: every launch reported "1 problem: Route to OpenAI"
  * three seconds after "tunnel connected", because the first long poll had not come
- * back yet. The tunnel supervisor already gives that first poll a grace period; the
- * self-test has to agree with it or it accuses a healthy connection of being broken.
+ * back yet. Runtime readiness and verified-link age are separate facts; the self-test adds a
+ * bounded startup grace before it calls a still-unverified route broken.
  */
 describe('self-test route check', () => {
   const T = 1_000_000_000_000;

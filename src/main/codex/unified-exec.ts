@@ -650,6 +650,11 @@ interface ProcessEntry {
   lastUsed: number;
 }
 
+export interface BackgroundExecState {
+  running: number[];
+  exitedUnread: Array<{ processId: number; exitCode: number | null }>;
+}
+
 export class UnifiedExecProcessManager {
   private readonly processes = new Map<number, ProcessEntry>();
   private readonly reservedProcessIds = new Set<number>();
@@ -780,7 +785,6 @@ export class UnifiedExecProcessManager {
     try {
       const current = this.processes.get(request.processId);
       if (!current || current.process !== locked) throw UnifiedExecError.unknownProcessId(request.processId);
-      current.lastUsed = Date.now();
       const { process, tty } = { process: current.process, tty: current.tty };
 
       let statusAfterWrite: ProcessStatus | null = null;
@@ -877,17 +881,39 @@ export class UnifiedExecProcessManager {
    * Non-destructive lifecycle projection for /activity. This never drains output and never
    * removes an exited process; write_stdin remains the only consumer of the pending result.
    */
-  backgroundState(processId: number): BackgroundTerminalState | null {
-    const entry = this.processes.get(processId);
-    if (!entry) return null;
-    const exited = entry.process.hasExited();
+  backgroundState(processId: number): BackgroundTerminalState | null;
+  /** Non-destructive obligation view for a caller-owned set of retained sessions. */
+  backgroundState(processIds: ReadonlySet<number>): BackgroundExecState;
+  backgroundState(
+    target: number | ReadonlySet<number>
+  ): BackgroundTerminalState | null | BackgroundExecState {
+    if (typeof target === 'number') {
+      const entry = this.processes.get(target);
+      if (!entry) return null;
+      const exited = entry.process.hasExited();
+      return {
+        processId: target,
+        running: !exited,
+        exitedUnread: exited,
+        tty: entry.tty,
+        startedAt: entry.startedAt,
+        changedAt: entry.process.exitedAt() ?? entry.startedAt
+      };
+    }
+    const running: number[] = [];
+    const exitedUnread: Array<{ processId: number; exitCode: number | null }> = [];
+    for (const entry of this.processes.values()) {
+      if (entry.initialExecCommandActive) continue;
+      if (!target.has(entry.processId)) continue;
+      if (entry.process.hasExited()) {
+        exitedUnread.push({ processId: entry.processId, exitCode: entry.process.exitCode() });
+      } else {
+        running.push(entry.processId);
+      }
+    }
     return {
-      processId,
-      running: !exited,
-      exitedUnread: exited,
-      tty: entry.tty,
-      startedAt: entry.startedAt,
-      changedAt: entry.process.exitedAt() ?? entry.startedAt
+      running: running.sort((left, right) => left - right),
+      exitedUnread: exitedUnread.sort((left, right) => left.processId - right.processId)
     };
   }
 
@@ -903,6 +929,11 @@ export class UnifiedExecProcessManager {
         pid: entry.process.pid,
         tty: entry.tty
       }));
+  }
+
+  /** Exited rows not handled by the starting exec; polling releases these rows. */
+  exitedUnread(processIds: ReadonlySet<number>): Array<{ processId: number; exitCode: number | null }> {
+    return this.backgroundState(processIds).exitedUnread;
   }
 
   async terminateProcess(processId: number): Promise<boolean> {
