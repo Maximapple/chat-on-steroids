@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 const swift = readFileSync(path.join(process.cwd(), 'native/macos-desktop-helper/main.swift'), 'utf8');
 const preparation = readFileSync(path.join(process.cwd(), 'scripts/prepare-macos-desktop-helper.mjs'), 'utf8');
 const computer = readFileSync(path.join(process.cwd(), 'src/main/computer/index.ts'), 'utf8');
+const desktopTools = readFileSync(path.join(process.cwd(), 'src/main/mcp/tools-desktop.ts'), 'utf8');
 
 describe('macOS desktop safety hardening', () => {
   /**
@@ -64,6 +65,41 @@ describe('macOS desktop safety hardening', () => {
     // frontWindowID is still WindowServer z-order; it only resolves which of one app's own
     // windows is front. All four clauses above still have to agree.
     expect(swift).toMatch(/private func frontWindowID[\s\S]*windowServerFrontWindowID\(rows: rows\)/);
+  });
+
+  /**
+   * QA hit `No foreground window` while Chrome was plainly the active application, twice in a
+   * row, with Chrome's link-preview bubble (`175x22` at the screen edge) and its omnibox popup
+   * on top. Both are ordinary layer-0 windows of the browser, so WindowServer's topmost window
+   * was the bubble while AX focus — and the user's typing — was the real window. The mismatch
+   * was read as "an app transition is in flight" and everything was refused, which also made
+   * `focusWindow` poll `inputTargetMatches` for a condition it could never satisfy.
+   *
+   * Only that intra-application case is resolved, and only in the frontmost application:
+   * a covering window owned by *another* process must still refuse.
+   */
+  it('resolves one app\'s transient child windows without relaxing cross-app refusal', () => {
+    expect(swift).toContain(
+      'private func frontWindowID(rows: [WindowRow], focusedWindow: CGWindowID? = nil) -> CGWindowID?'
+    );
+    // Another app on top: returned as-is, so the caller's frontmostPID check still refuses.
+    expect(swift).toContain(
+      'guard let topRow = rows.first(where: { $0.id == top }), frontmostPID() == topRow.pid else { return top }'
+    );
+    // AX only wins when it names a different window this same scan already saw and admitted.
+    // A caller that has already read the focused window hands it in, so the two of them cannot
+    // reach different conclusions from two reads taken moments apart — see the race below.
+    expect(swift).toContain(
+      'guard let focused = focusedWindow ?? focusedAXWindowID(for: topRow.pid, rows: rows),'
+    );
+    expect(swift).toContain(
+      'guard rows.contains(where: { $0.id == focused && $0.pid == topRow.pid }) else { return top }'
+    );
+    // Both readers go through it, so observation and input can never disagree about which
+    // window is front.
+    expect(swift).toMatch(/private func foregroundWindowID[\s\S]*guard let frontID = frontWindowID\(rows: rows, focusedWindow: focused\)/);
+    expect(swift).toMatch(/private func inputTargetMatches[\s\S]*guard frontWindowID\(rows: rows, focusedWindow: focused\) == row\.id/);
+    expect(swift).not.toMatch(/private func inputTargetMatches[\s\S]{0,200}windowServerFrontWindowID/);
   });
 
   /**
@@ -167,6 +203,9 @@ describe('macOS desktop safety hardening', () => {
     expect(swift).toContain('accessibility traversal exceeded its bounded native deadline');
     expect(swift).toContain('AXUIElementCopyAttributeValues');
     expect(swift).toContain('axChildren(element, limit: remainingBudget)');
+    expect(swift).toContain('axElementValues(app, attribute: kAXWindowsAttribute as CFString, limit: 64)');
+    expect(swift).not.toContain('windows.prefix(64)');
+    expect(swift).toContain('matchingAXWindow(row, deadline: deadline)');
   });
 
   it('validates AX value types and the live owning window of every semantic ref', () => {
@@ -181,9 +220,48 @@ describe('macOS desktop safety hardening', () => {
   it('binds screen frames to the exact active-display topology', () => {
     expect(swift).toContain('private func sameDisplayTopology');
     expect(swift).toContain('"displays": displayTopologyObject(finalDisplayRects)');
+    expect(swift).toContain('let contentDisplayRects = content.displays.map(\\.frame)');
+    expect(swift).toContain('sameDisplayTopology(displayRects, contentDisplayRects)');
+    expect(swift).toContain('active display topology changed while screenshot capture was in progress');
+    expect(swift).toContain('active display topology changed while screenshot was captured');
     expect(swift).toContain('active display topology changed after the screenshot');
     expect(computer).toContain('displayTopology: Rect[] | null');
     expect(computer).toContain('displays: frame.displayTopology');
+  });
+
+  it('keeps explicit UI and captured-pixel target identities fail-closed', () => {
+    expect(swift).toMatch(/rawRequested = request\["id"\][\s\S]*WINDOW_NOT_FOUND/);
+    expect(swift).toContain('window \\(requested) is no longer available');
+    expect(computer).toContain('Publish the crop as');
+    expect(computer).toMatch(/screenshotFromReply\(reply, file, opts\.crop \? null : opts\.window \?\? null\)/);
+    expect(computer).not.toContain('lastFrame?.windowId ?? null : cropFrame?.windowId');
+    expect(computer).toContain("const frameWindow = captureMode === 'window' ? requestedWindow : null");
+    expect(computer).toContain('windowId: frameWindow');
+    expect(computer).toContain("frame.captureMode !== 'screen_fallback'");
+  });
+
+  it('keeps every valid upscaled image pixel inside its desktop frame', () => {
+    expect(computer).toContain('const upper = Math.max(lower, Math.ceil(origin + extent) - 1)');
+    expect(computer).toContain('clampMappedCoordinate(Math.round(frame.region.x + x / frame.scale)');
+    expect(computer).toContain('clampMappedCoordinate(Math.round(frame.region.y + y / frame.scale)');
+  });
+
+  it('budgets the actual combined Desktop text and image response', () => {
+    expect(desktopTools).toContain("Buffer.byteLength(JSON.stringify(result), 'utf8')");
+    expect(desktopTools).toContain('MAX_MCP_RESPONSE_BYTES - MCP_RESPONSE_ENVELOPE_RESERVE_BYTES');
+    expect(desktopTools).toContain('DESKTOP_RESULT_TOO_LARGE');
+  });
+
+  it('carries proven semantic and explicit focus targets into later keyboard input', () => {
+    expect(swift).toContain('var leasedWindow = frameWindow ?? requestedTargetWindow');
+    expect(swift).toMatch(/case "click_ui", "set_value_ui":[\s\S]*leasedWindow = actionWindow/);
+    expect(swift).toMatch(
+      /case "type":[\s\S]*guard let target = leasedWindow[\s\S]*assertInputTarget\(target\)[\s\S]*targetWindow: target/
+    );
+    expect(swift).toMatch(
+      /case "keypress":[\s\S]*if let target = leasedWindow \{[\s\S]*assertInputTarget\(target\)[\s\S]*targetWindow: target/
+    );
+    expect(swift).toMatch(/case "focus":[\s\S]*leasedWindow = requested/);
   });
 
   it('publishes only the newest overlapping macOS permission refresh', () => {

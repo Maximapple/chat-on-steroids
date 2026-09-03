@@ -41,10 +41,10 @@ describe('open upstream issue hardening bundle', () => {
   it('keeps a browser-proven compaction capture out of recursive auto-compaction', () => {
     const content = source('extension/content.js');
     const continuation = source('src/main/session/continuation.ts');
-    expect(content).toContain('if (compactCapture || nativeBusy || pressedAt > 0) return;');
+    expect(content).toContain('if (compactCapture || nativeBusy || pressedAt > 0 || localError) return;');
     expect(content).toContain('compactToken: compactCapture.token');
     expect(continuation).toContain('export function touchContinuation');
-    expect(continuation).toContain('Date.now() - entry.touchedAt < CONTINUATION_TTL_MS');
+    expect(continuation).toContain('now - entry.touchedAt >= CONTINUATION_TTL_MS');
   });
 
   it('projects returned background exec lifecycle separately from pending MCP handlers', () => {
@@ -61,9 +61,9 @@ describe('open upstream issue hardening bundle', () => {
     const tunnel = source('src/main/tunnel/index.ts');
     expect(tunnel).toContain('CONTROL_PLANE_POLL');
     expect(tunnel).toContain('UNREACHABLE_NETWORK');
-    expect(tunnel).toContain('supervisorStops');
-    expect(tunnel).toContain('watcherEpoch');
-    expect(tunnel).toContain('showWaiting');
+    expect(tunnel).toContain('interface ClientRun');
+    expect(tunnel).toContain('stopped || current !== run');
+    expect(tunnel).toContain('showUnknown');
   });
 
   it('scopes privacy history to the checked-out line and keeps fork inheritance buildable', () => {

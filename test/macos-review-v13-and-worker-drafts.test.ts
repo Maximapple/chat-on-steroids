@@ -38,6 +38,6 @@ describe('macOS review v16 plus retained worker-draft hardening', () => {
     expect(content).toContain('waitForRevivalSubmitReady(openedConversation, attempt)');
     expect(content).toContain("the composer changed before bootstrap send; the draft was preserved");
     expect(dom).toContain('function insertPrompt(value, replaceExisting = false)');
-    expect(dom).toContain('range.selectNodeContents(box)');
+    expect(dom).toContain('box.replaceChildren()');
   });
 });

@@ -808,7 +808,8 @@ private func matchingAXWindow(_ row: WindowRow, deadline suppliedDeadline: TimeI
     guard ProcessInfo.processInfo.systemUptime < deadline else {
         throw fail("UIA_TIMEOUT", "accessibility window matching exceeded its bounded native deadline")
     }
-    // Bound at the native copy boundary; prefixing afterwards would already materialize unbounded provider state.
+    // The limit belongs at the AX copy boundary. Fetching the complete provider array and
+    // applying prefix(64) afterwards would already have materialized unbounded native state.
     let windows = axElementValues(app, attribute: kAXWindowsAttribute as CFString, limit: 64)
     for window in windows {
         guard ProcessInfo.processInfo.systemUptime < deadline else {
@@ -989,17 +990,19 @@ private func findUI(
     _ request: JSONObject,
     suppliedWindow: WindowRow? = nil
 ) throws -> JSONObject {
-    // Window matching and traversal share one native six-second budget.
+    // Window matching and control traversal are two phases of one native operation, not
+    // two independent six-second allowances. The parent timeout can now safely outlive
+    // this one aggregate deadline even though a synchronous addon call is not pre-emptible.
     let deadline = ProcessInfo.processInfo.systemUptime + maxAXTraversalSeconds
     let row: WindowRow
     if let suppliedWindow {
         row = suppliedWindow
-    } else if request["id"] != nil {
-        guard let requested = number(request["id"])?.uint32Value else {
-            throw fail("BAD_REQUEST", "find_ui id must be a valid window id")
+    } else if let rawRequested = request["id"], !(rawRequested is NSNull) {
+        guard let requested = number(rawRequested)?.uint32Value else {
+            throw fail("BAD_REQUEST", "find_ui window id is malformed")
         }
         guard let found = windowRow(requested) else {
-            throw fail("WINDOW_NOT_FOUND", "no window with id \(requested) is available")
+            throw fail("WINDOW_NOT_FOUND", "window \(requested) is no longer available")
         }
         row = found
     } else if let foreground = foregroundWindowID(), let found = windowRow(foreground) {
@@ -1019,7 +1022,6 @@ private func findUI(
     var visited = 0
     var returned: [JSONObject] = []
     var retained: [String: AXUIElement] = [:]
-
     while cursor < queue.count && visited < maxVisited && returned.count < maxResults {
         guard ProcessInfo.processInfo.systemUptime < deadline else {
             throw fail("UIA_TIMEOUT", "accessibility traversal exceeded its bounded native deadline")
@@ -2061,7 +2063,12 @@ private func captureDisplay(_ display: SCDisplay, maxWidth: Int) throws -> (CGIm
     return (try resizedImage(image, width: width, height: height), region)
 }
 
-private func captureComposite(region target: CGRect, maxWidth: Int, displays: [SCDisplay]) throws -> CGImage {
+private func captureComposite(
+    region target: CGRect,
+    maxWidth: Int,
+    displays: [SCDisplay],
+    expectedDisplays: [CGRect]
+) throws -> CGImage {
     let (outputWidth, outputHeight) = scaledDimensions(region: target, maxWidth: maxWidth)
     let scale = CGFloat(outputWidth) / target.width
     let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -2078,7 +2085,13 @@ private func captureComposite(region target: CGRect, maxWidth: Int, displays: [S
     context.fill(CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight))
 
     for display in displays where display.frame.intersects(target) {
+        guard sameDisplayTopology(expectedDisplays, try activeDisplayRects()) else {
+            throw fail("STALE_FRAME", "active display topology changed while screenshot capture was in progress")
+        }
         let (image, displayRegion) = try captureDisplay(display, maxWidth: display.width)
+        guard sameDisplayTopology(expectedDisplays, try activeDisplayRects()) else {
+            throw fail("STALE_FRAME", "active display topology changed while screenshot capture was in progress")
+        }
         let intersection = displayRegion.intersection(target)
         guard !intersection.isNull, !intersection.isEmpty else { continue }
         let imageScaleX = CGFloat(image.width) / displayRegion.width
@@ -2112,7 +2125,7 @@ private func capture(_ request: JSONObject, forcedWindow: CGWindowID? = nil) thr
     let content = try shareableContent()
     let contentDisplayRects = content.displays.map(\.frame)
     guard sameDisplayTopology(displayRects, contentDisplayRects) else {
-        throw fail("STALE_FRAME", "display topology changed before capture began")
+        throw fail("STALE_FRAME", "active display topology changed before screenshot capture began")
     }
     let requestedWindow = forcedWindow ?? number(request["id"])?.uint32Value
 
@@ -2143,7 +2156,12 @@ private func capture(_ request: JSONObject, forcedWindow: CGWindowID? = nil) thr
             ].contains(error.code)
             guard canUseVisibleFallback else { throw error }
             region = row.bounds
-            image = try captureComposite(region: region, maxWidth: maxWidth, displays: content.displays)
+            image = try captureComposite(
+                region: region,
+                maxWidth: maxWidth,
+                displays: content.displays,
+                expectedDisplays: displayRects
+            )
             captureMode = "screen_fallback"
             pointerNote = "system"
         }
@@ -2152,12 +2170,22 @@ private func capture(_ request: JSONObject, forcedWindow: CGWindowID? = nil) thr
         }
     } else if let requestedRegion = rect(request["region"]) {
         region = requestedRegion
-        image = try captureComposite(region: region, maxWidth: maxWidth, displays: content.displays)
+        image = try captureComposite(
+            region: region,
+            maxWidth: maxWidth,
+            displays: content.displays,
+            expectedDisplays: displayRects
+        )
         captureMode = "screen"
         pointerNote = "system"
     } else if bool(request["full"]) {
         region = screen
-        image = try captureComposite(region: region, maxWidth: maxWidth, displays: content.displays)
+        image = try captureComposite(
+            region: region,
+            maxWidth: maxWidth,
+            displays: content.displays,
+            expectedDisplays: displayRects
+        )
         captureMode = "screen"
         pointerNote = "system"
     } else {
@@ -2171,6 +2199,9 @@ private func capture(_ request: JSONObject, forcedWindow: CGWindowID? = nil) thr
     let finalDisplayRects = try activeDisplayRects()
     guard sameDisplayTopology(displayRects, finalDisplayRects) else {
         throw fail("STALE_FRAME", "display topology changed while screenshot was captured")
+    }
+    guard sameDisplayTopology(displayRects, try activeDisplayRects()) else {
+        throw fail("STALE_FRAME", "active display topology changed while screenshot was captured")
     }
     try writePNG(image, path: file)
     var response: JSONObject = [
