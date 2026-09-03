@@ -548,14 +548,45 @@ says to expect. Then, plainly:
   than clipped? The one open UX opinion left — the missing last-checked timestamp: still true?
   Still worth fixing, in your judgement?**
 - **A driven tab's group survives the extension's service worker being killed mid-session — does
-  it still get cleaned up?** Attach the browser driver to a tab, then terminate the extension's
-  service worker directly (`chrome://extensions` → this extension → "service worker" → the
-  terminate/inspect control Chrome offers there) to simulate the MV3 recycle `sweepStaleDrivenGroups`
-  exists for, rather than waiting ~30s of idle for Chrome to do it on its own. The "Chat On
-  Steroids" tab group should still be there (nothing runs to remove it yet) but the tab is now
-  orphaned from this worker's perspective. Either attach to a *different* tab and confirm the old
-  group is gone rather than sitting beside a new one, or just wait up to a minute for the wake
-  alarm and confirm it disappears on its own with nothing else happening.
+  it still get cleaned up? Answered: yes.** Verified 2026-09-03 against `752a07d` in a clean
+  Chrome for Testing 152.0.7977.64 profile, driving the extension's own service worker over CDP
+  (`scripts/diag-tabgroup-sweep.mjs`). Grouping an already-open ordinary tab, titling the band
+  "Chat On Steroids", then firing the `clf-bridge-drain` alarm:
+
+  ```
+  using existing tab: 1790622594 http://127.0.0.1:9939/
+  groupId: 445767902
+  before sweep: [{"collapsed":false,"color":"blue","id":445767902,"shared":false,
+                  "title":"Chat On Steroids","windowId":1790622593}]
+  after sweep:  []
+  tab still exists, ungrouped: {"id":1790622594,"groupId":-1,"status":"complete",
+                  "url":"http://127.0.0.1:9939/","index":0,…}
+  ```
+
+  **The band is gone, the tab survives ungrouped rather than closed.** Re-run this as an ordinary
+  regression check; it needs no person.
+
+  **The "Tabs can only be moved to and from normal windows" error does not reproduce here, and the
+  create-then-group race is not the cause.** All three variants pass in a clean profile — including
+  the one whose tab was still `status: "loading"` when it was grouped, which is the race that was
+  suspected:
+
+  ```
+  1) tabs.create({about:blank, active:false}) -> OK {"id":…,"windowId":…,"status":"loading"}
+  1) tabs.group sofort danach                 -> OK 494672884
+  2) windows.getAll({windowTypes:["normal"]}) -> OK [{"id":…,"type":"normal","state":"normal","focused":true}]
+  2) tabs.create mit windowId                 -> OK {"id":…,"status":"loading"}
+  2) tabs.group sofort danach                 -> OK 1017720587
+  3) tabs.create, dann 600 ms warten          -> OK {"status":"complete","index":4}
+  3) tabs.group nach der Pause                -> OK 852233251
+  ```
+
+  So the failure is **specific to the live browser's window state**, not to tab freshness and not
+  to Chrome 152 in general. Whoever hits it again should capture, at the moment of the throw,
+  `chrome.windows.getAll({ populate: true })` and the offending tab's own `windowId`, `index` and
+  `splitViewId` — the clean profile had exactly one `type: "normal"` window and no split view, and
+  that is the difference this repro cannot see. `groupDrivenTab`'s production path is not implicated
+  by anything measured here: it groups a tab it is already attached to, never a freshly created one.
 
 Then anything that struck you as wrong, slow or dangerous that no part above covers. On the last
 five rounds that section has been the most valuable part of the report.
