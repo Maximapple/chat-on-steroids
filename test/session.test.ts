@@ -2346,6 +2346,57 @@ describe('naming the chats this app opened', () => {
     expect((await listSessions()).filter((entry) => entry.chatIds.includes(oldConversation))).toHaveLength(1);
   });
 
+  it('does not let a tool call already in flight when a rebind lands re-inflate the meter it just reset', async () => {
+    // A slow call (a browser screenshot, typically) can pass its own superseded check, then
+    // spend real time storing text/images, and only reach appendEvent after Compact & Resume
+    // has already rebound this exact session to a new chat. It is still durable history — kept
+    // on this row — but must not count toward contextTokens, or a rebind's reset is silently
+    // undone by whatever was already in flight, and auto-compaction re-fires almost immediately
+    // in the chat that reset was supposed to give a fresh budget.
+    const oldConversation = 'conv-inflight-before-rebind';
+    const newConversation = 'conv-inflight-after-rebind';
+    const summary = await createSession({ conversationId: oldConversation, title: 'in-flight call race' });
+
+    expect(await rebindSession(summary.id, oldConversation, newConversation)).toBe(true);
+    const afterRebind = await getSession(summary.id);
+    expect(afterRebind?.conversationId).toBe(newConversation);
+    expect(afterRebind?.contextTokens).toBe(0);
+
+    const staleCall = {
+      time: Date.now(),
+      source: 'mcp' as const,
+      kind: 'tool_call' as const,
+      call: {
+        callId: 'in-flight-before-rebind',
+        tool: 'browser',
+        attribution: 'request_id' as const,
+        requestId: 'wfr_inflight_race',
+        // Proven against the conversation this call actually started in, before the rebind —
+        // exactly what a real late completion still carries.
+        conversationId: oldConversation,
+        attributionMethod: 'request_id' as const,
+        args: { text: '{}', truncated: false, chars: 2 },
+        result: { text: 'a screenshot worth of result text', truncated: false, chars: 34 },
+        outcome: 'ok' as const,
+        durationMs: 9872,
+        summary: { title: 'in-flight browser call', tone: 'neutral' as const, kind: 'browse' as const }
+      }
+    };
+    const appended = await appendEvent(summary.id, staleCall);
+    const tokens = eventTokens(appended);
+    expect(tokens).toBeGreaterThan(0);
+
+    const after = await getSession(summary.id);
+    // The whole point: history keeps it, the fresh chat's own meter does not.
+    expect(after?.contextTokens).toBe(0);
+    expect(after?.estimatedTokens).toBe(tokens);
+    expect(
+      (await readEvents(summary.id, { kinds: ['tool_call'] })).some(
+        (event) => event.kind === 'tool_call' && event.call.callId === 'in-flight-before-rebind'
+      )
+    ).toBe(true);
+  });
+
   it('does not publish or return stale A→S first-sight state after S durably rebinds to B', async () => {
     const oldConversation = `conv-init-old-${Date.now()}`;
     const newConversation = `conv-init-new-${Date.now()}`;

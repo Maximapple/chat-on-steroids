@@ -32,6 +32,14 @@ the app refuses the extension and asks you to reload the matching copy.
   executable and exercised over its real newline-delimited JSON protocol.
 
 ### Fixed
+- **Compact & Resume could loop, undoing its own fresh-chat reset within seconds.** A tool call
+  still in flight when a rebind landed — a slow browser screenshot was the common case — could
+  pass its own attribution check, then only reach the recorder after the session had already
+  moved to the new chat, adding its tokens to the meter the rebind had just reset to zero. On a
+  tool-heavy conversation that was enough to cross the auto-compaction threshold again almost
+  immediately, sending the fresh chat straight back into another compaction, and another, each
+  brief larger than the last. The call is still kept as durable history on the row it belongs to;
+  it just no longer counts toward the chat that didn't make it.
 - **A backgrounded driven tab used to make `browser` scroll and click lie.** Chrome defers
   compositor work for a tab that is not its window's active one, so a scroll could sit for
   seconds before landing — doubled, once the tab came back — while the reply had already said
