@@ -12,6 +12,16 @@ the app refuses the extension and asks you to reload the matching copy.
 ## Unreleased
 
 ### Added
+- **ChatGPT can now drive a real web page, not just the desktop.** A `browser` tool talks to the
+  companion extension over the Chrome DevTools protocol — `navigate`, `observe`, `click_ref`,
+  `type`, `scroll`, `drag`, hover, and back/forward/reload — with `isTrusted: true` input a page
+  cannot tell apart from a person, refs that expire the moment a newer observation supersedes
+  them, and a hard refusal list (ChatGPT's own tab, `chrome://`, `file://`, and lookalike
+  addresses judged by parsed identity rather than string prefix) enforced before any action
+  reaches the page. A driven tab is collected into a visibly labelled tab group, carries a
+  debugger banner Chrome itself shows, and draws a pointer overlay so what the model does is
+  never invisible to the person watching. Verified against a real Chromium build, not only unit
+  tests, in `npm run verify:browser`.
 - **macOS now publishes the optional Desktop connector.** A thin architecture-specific Swift
   helper implements window/display capture through ScreenCaptureKit, snapshot-scoped semantic
   controls through AXUIElement, and physical mouse/keyboard input through CGEvent while preserving
@@ -19,6 +29,26 @@ the app refuses the extension and asks you to reload the matching copy.
 - **macOS packaging and smoke checks include the Desktop helper and screen-capture purpose string.**
   The helper is compiled natively for each x64/arm64 package, kept outside asar, audited as a thin
   executable and exercised over its real newline-delimited JSON protocol.
+
+### Fixed
+- **A backgrounded driven tab used to make `browser` scroll and click lie.** Chrome defers
+  compositor work for a tab that is not its window's active one, so a scroll could sit for
+  seconds before landing — doubled, once the tab came back — while the reply had already said
+  `moved: false`; a link opened from that state got a new tab Chrome attributed to whichever tab
+  was actually active, not the one that clicked, so the reply never reported it. The driver now
+  activates the tab first, escalating to a real window switch only on the rare case (a minimized
+  window) that a lighter activation can't reach — and says so, via a new `broughtToFront` field,
+  rather than silently taking focus away from whatever the person was doing.
+- **A capability refusal now names the actual switch to flip.** `TOOL_DISABLED` used to fall back
+  to "enable the permission" when a tool's capability had no custom message configured; it now
+  names the capability's own Settings row (`enable "See the screen"`) by default.
+- **`warm`, `cursor` and `windows` now refuse a field they don't recognize**, the same way `act`
+  already did, instead of silently accepting and ignoring it.
+- **The Permissions card's read-only explanation no longer overlaps or misaligns the list below
+  it.** A grid-row and padding fix keeps it readable and indented to match the header and rows at
+  every window size.
+- The native scroll-settle wait now measures the real clock instead of counting requested sleep
+  durations, which had let a documented 120 ms ceiling run past 300 ms on real hardware.
 
 ### Security
 - macOS Screen Recording and Accessibility remain independent OS grants. The helper requests no
