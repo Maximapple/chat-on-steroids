@@ -470,42 +470,55 @@ enough fields, some forwarded from `snapshot` into the other two, that enumerati
 its own round rather than being guessed at here. Do not report their continued silence on a stray
 key as a regression; it is the documented scope of this round, not an oversight.
 
-## 5e. The extension popup and its toolbar button — one fixed, one still genuinely open
+## 5e. The extension popup and its toolbar button — both closed, one as a fix, one as a known limit
 
-The last round root-caused both findings from `9f9160b` down to instrumented pixel/AX evidence —
-exact roles, actions, AXValue contents, before/after pixel diffs, screenshots. That measurement is
-why one of these now has a precise fix and the other doesn't: it showed they were never the same
-bug wearing two faces.
+Two rounds of instrumented pixel/AX evidence closed both findings from `9f9160b` for good — the
+second round specifically to answer whether the checkbox press was a popup quirk or something
+bigger, using `scripts/diagnose-popup-checkbox.mjs` against a brand-new, plain Chrome tab holding
+nothing but a checkbox. It was bigger.
 
-**The `changed: false` false negative is fixed — confirm it, don't re-diagnose it.** Both the
-toolbar `PopUpButton` and the popup's real `<input type="checkbox">` answer `AXValue` with an
-*empty string* rather than omitting the attribute the way AppKit controls do. An empty string
-still equals itself, so comparing it before/after a press reported `changed: false` — "nothing
-changed" — on both, when `act_ui`'s own contract says to omit the field entirely when there is
-nothing comparable to say. `axComparableValue` now treats an empty AXValue as no value at all.
-Re-run both repros from last round and confirm the field is now *absent*, not `false`:
-- `act` a semantic click on the Chrome toolbar extension icon; snapshot `{"op":"windows"}` before
-  and after to confirm the popup opened (a new window in the list), and check `changed`/
-  `ui_changed` is omitted this time.
-- `act_ui` a semantic press on the popup's Timestamps toggle (harmless, no permission involved,
-  identical markup to Browser control) and confirm the same.
+**The `changed: false` false negative is fixed.** Chromium answers `AXValue` with an *empty
+string* for a checkbox or a toolbar button — measured on the popup's own controls and, this round,
+confirmed on an ordinary page's plain `<input type="checkbox">` too — rather than omitting the
+attribute the way AppKit does. An empty string equals itself, so comparing it before/after a press
+always reported `changed: false`, when the field's own contract says to omit it when there is
+nothing comparable to say. `axComparableValue` now treats an empty AXValue as no value at all, and
+the diagnostic script confirmed it: the reply on a fresh checkbox came back with `changed` absent
+entirely, not `false`. Nothing left to re-check here.
 
-**The checkbox still does not actually toggle through a semantic press — this is still open, and
-still needs a design decision, not a guess.** Last round proved, on two separate controls with
-identical markup, that `AXUIElementPerformAction(kAXPressAction)` returns success against these
-popup checkboxes and changes *nothing*: 0 pixels differ before/after, and — the more telling half
-— no error appears either, which rules out the checkbox's own `change` handler running and failing
-on a missing user gesture (that path writes a visible error; nothing was written). A coordinate
-click on the identical spot works immediately, every time. So the press is not reaching a real
-click handler at all for this control, specifically inside the extension's own popup surface,
-and the existing markup (`<label for>` around a real `<input type="checkbox">`) is already the
-correct, accessible shape — there's nothing left to fix there. Two things worth gathering if you
-have time, since they'd shape what a fix even looks like: does the same `AXPress`-does-nothing
-result hold for this exact same control type in an *ordinary tab* (not a popup surface, to tell
-apart "Chromium popups specifically" from "Chromium checkboxes in general"), and does `act_ui`
-already have anywhere it could safely fall back to a coordinate click when a press provably had no
-effect — or would that change behavior for controls where "no effect" is the *correct* outcome.
-Don't implement a fix without an answer to that second question; report what you find instead.
+**The checkbox never actually toggles through a semantic press — confirmed general, not a popup
+quirk, and not going to get a fallback-to-coordinates fix.** `scripts/diagnose-popup-checkbox.mjs`
+proved it on a plain page: `AXUIElementPerformAction(kAXPressAction)` returns success and changes
+*nothing* — before/after screenshots came back byte-identical, 0 pixels differ — while a coordinate
+click on the same spot filled the box immediately (65 pixels changed). Chromium simply never
+populates `AXValue` for a checkbox in *either* state, checked or not, which is also why `changed`
+can never be anything but absent for one: there is nothing to compare, ever, not just this once.
+
+This is not new behavior for this app to guess a workaround for — it is the same shape as the
+System Settings toggle finding that `changed`/`ui_changed` was built to report in the first place:
+an accessibility press that claims success without a real effect, on a *native* control that time.
+The established answer both times has been to report the truth rather than silently retry, so a
+caller stays the one deciding whether and how to recover — not to bolt an automatic
+coordinate-click fallback onto `act_ui`, which would risk double-toggling a control on the rarer
+occasion "no effect" is the correct outcome. **Practical guidance going forward: a checkbox or
+toggle inside a Chrome tab should be driven with the `browser` tool's `click_ref` instead of the
+native `computer`/`act_ui` path** — `click_ref` reaches Chromium content over the DevTools
+protocol with real `isTrusted` input, not through `AXUIElementPerformAction`, and every QA round
+that has exercised it against a page checkbox has it working. Reserve `act_ui` for native AppKit
+controls, where this class of failure has so far only ever been a false-negative *report*, not a
+false click.
+
+**One real follow-up, deferred rather than guessed at: `act_ui`'s result-hint text still can't
+tell the two cases apart.** When `changed`/`ui_changed` comes back `false`, the tool result already
+adds "try clicking the same coordinates instead" — genuinely useful, and still correct for a
+native control with a real comparable value. Now that `changed` is correctly *omitted* for a
+Chromium checkbox instead, that same caller-facing hint goes silent for exactly the case that most
+needs it. The reply from `find_ui`/`act_ui` doesn't currently carry the control's role, so the
+result-rendering code in `tools-desktop.ts` can't distinguish "an ordinary button, omitted and
+fine" from "a checkbox with nothing to compare, omitted and probably still unclicked" — threading
+`role` through `actUI`'s reply in `main.swift` and sharpening that hint is a real, well-scoped
+improvement, just not one to rush into the same round as everything else above. Left for a
+dedicated pass.
 
 ## 6. What to report
 
@@ -534,9 +547,15 @@ says to expect. Then, plainly:
 - **The Permissions card's scroll fade: does a row on the fold now read as "more below" rather
   than clipped? The one open UX opinion left — the missing last-checked timestamp: still true?
   Still worth fixing, in your judgement?**
-- **5e: is `changed`/`ui_changed` now omitted (not `false`) for the toolbar click and the
-  Timestamps toggle? And still separately: does a semantic press toggle the popup checkbox yet,
-  or does only a coordinate click still do it?**
+- **A driven tab's group survives the extension's service worker being killed mid-session — does
+  it still get cleaned up?** Attach the browser driver to a tab, then terminate the extension's
+  service worker directly (`chrome://extensions` → this extension → "service worker" → the
+  terminate/inspect control Chrome offers there) to simulate the MV3 recycle `sweepStaleDrivenGroups`
+  exists for, rather than waiting ~30s of idle for Chrome to do it on its own. The "Chat On
+  Steroids" tab group should still be there (nothing runs to remove it yet) but the tab is now
+  orphaned from this worker's perspective. Either attach to a *different* tab and confirm the old
+  group is gone rather than sitting beside a new one, or just wait up to a minute for the wake
+  alarm and confirm it disappears on its own with nothing else happening.
 
 Then anything that struck you as wrong, slow or dangerous that no part above covers. On the last
 five rounds that section has been the most valuable part of the report.

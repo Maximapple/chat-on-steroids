@@ -63,14 +63,27 @@ the app refuses the extension and asks you to reload the matching copy.
   before.
 - **`act_ui`'s `changed` field no longer reports `false` for a control it never actually read.**
   Chromium answers `AXValue` with an empty string for a control with nothing to say about its own
-  state — measured on both a toolbar `PopUpButton` and a real `<input type="checkbox">` in the
-  extension's own popup — rather than omitting the attribute the way AppKit controls do. Reading
-  an empty string before and after a press "isEqual"s itself, so both reported `changed: false`
-  ("nothing changed") when the field's own contract calls for omitting it ("nothing to compare").
-  An empty AXValue is now treated the same as no value at all. This does not fix the click itself:
-  `AXPress` on that same checkbox measurably does nothing — 0 pixels differ, no error is shown —
-  while a coordinate click on the identical control works immediately; that half stays open,
-  tracked in `docs/qa/claude-mac.md`.
+  state — checkboxes included, in every state, checked or not — rather than omitting the attribute
+  the way AppKit controls do. Reading an empty string before and after a press "isEqual"s itself,
+  so it always reported `changed: false` ("nothing changed") when the field's own contract calls
+  for omitting it ("nothing to compare"). An empty AXValue is now treated the same as no value at
+  all. This does not fix the click itself: `AXPress` measurably does not register a real click on
+  a Chromium checkbox at all — confirmed general to any Chromium checkbox, not specific to the
+  extension's own popup — while a coordinate click on the identical control works immediately.
+  That is not a bug to patch silently: it is the same shape as the System Settings toggle finding
+  `changed` was built to report in the first place, so the fix is the same one already in place —
+  tell the truth about what happened rather than guess a recovery. Practical guidance for a
+  checkbox inside a Chrome tab specifically: use the `browser` tool's `click_ref`, which reaches
+  Chromium content over the DevTools protocol rather than through this accessibility path.
+- **A driven tab's "Chat On Steroids" tab-group band no longer outlives the session that opened
+  it.** The extension's only record of which group belongs to a live session was plain in-memory
+  state, and Chrome recycles its MV3 service worker on its own after roughly 30 seconds of
+  inactivity — a restart mid-session, or between the last action and someone noticing, wiped that
+  record with no cleanup ever having run for it: the tab kept its blue band with nothing left
+  owning it, and driving a different tab afterward could show two bands at once instead of the
+  old one disappearing. A stale "Chat On Steroids" group is now swept — ungrouped, never closed —
+  before a new one is created, and on the extension's own periodic wake timer, so an abandoned one
+  is caught even if nothing ever attaches again.
 - The native scroll-settle wait now measures the real clock instead of counting requested sleep
   durations, which had let a documented 120 ms ceiling run past 300 ms on real hardware.
 
