@@ -35,7 +35,14 @@ import {
   type RetiredWorkersSnapshot,
   type SwarmSnapshot
 } from './agents.js';
-import { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
+import {
+  flushDurable,
+  initDurableStore,
+  readDurable,
+  writeDurableNow,
+  writeDurableSoon,
+  writeDurableSoonLazy
+} from './durable.js';
 import { restoreRequestCorrelations } from './session/correlation.js';
 import { restoreBlockedChats } from './session/blocked-chats.js';
 import { stopComputerHelper } from './computer/index.js';
@@ -346,7 +353,11 @@ void app.whenReady().then(async () => {
   // dependency. Multi-agent can be enabled from Settings without restarting the process;
   // keeping both sinks wired from startup guarantees the first spawn can cross its durable
   // acceptance barrier even when this launch began with multi-agent disabled.
-  onSwarmPersist(() => writeDurableSoon(SWARM_STATE, snapshotSwarm()));
+  // Lazy: a dormant-history-heavy snapshot is expensive to build, and changed() fires on
+  // every critical/telemetry mutation. writeDurableSoonLazy defers snapshotSwarm() to the
+  // moment a queued generation actually flushes, so a burst inside one 300ms debounce window
+  // builds it once instead of once per mutation that fired inside that window.
+  onSwarmPersist(() => writeDurableSoonLazy(SWARM_STATE, snapshotSwarm));
   onSwarmPersistNow((snapshot) => writeDurableNow(SWARM_STATE, snapshot));
 
   // A multi-agent run outlives this process. Restoring it before the bridge starts
