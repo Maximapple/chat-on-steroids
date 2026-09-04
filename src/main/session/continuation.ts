@@ -404,8 +404,11 @@ function sweep(): void {
     if (entry.state === 'committing') continue;
     if (entry.state === 'committed' || entry.state === 'aborted') {
       // Kept briefly so a repeated ack can be answered with "already done" rather than with
-      // a fresh transaction, then forgotten.
-      if (Date.now() - entry.openedAt > CONTINUATION_TTL_MS * 2) byToken.delete(entry.token);
+      // a fresh transaction, then forgotten. Measured from when it settled (touchedAt, which
+      // every transition including this terminal one renews), not from when it opened - a
+      // days-old automatic ticket that finally aborts must still get its own retention window,
+      // not inherit however little of one its age already used up.
+      if (Date.now() - entry.touchedAt > CONTINUATION_TTL_MS * 2) byToken.delete(entry.token);
       continue;
     }
     if (expired(entry)) {
@@ -1344,6 +1347,10 @@ export function abortContinuation(token: string, reason: string): boolean {
   if (entry.state === 'committed' || entry.state === 'aborted') return false;
   entry.state = 'aborted';
   entry.error = reason;
+  // Settling is forward progress like any other transition: sweep()'s own terminal-retention
+  // window is measured from here, not from when the transaction opened, so an automatic ticket
+  // that sat waiting for hours does not read as already-ancient the instant it finally expires.
+  entry.touchedAt = Date.now();
   endResumeClaim(entry.token);
   cancelPrimeTransfer(entry.from);
   changed();
@@ -1410,11 +1417,15 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
       raw.from.length === 0 || raw.from.length > 256 ||
       !validStates.has(raw.state) ||
       !Number.isFinite(raw.openedAt) ||
-      // Terminal records prune by openedAt, matching the live sweep()'s own terminal-retention
-      // window. A non-automatic open record prunes by touchedAt-if-known, same reasoning as
-      // expired() below. An automatic open record is deliberately exempt from age-pruning here —
-      // it survives page/retry clocks by design — and is judged instead by expired() once restored.
-      ((raw.state === 'committed' || raw.state === 'aborted') && now - raw.openedAt >= CONTINUATION_TTL_MS * 2) ||
+      // Terminal records prune by touchedAt-if-known, matching the live sweep()'s own
+      // terminal-retention window - measured from when the record settled, not from when it
+      // opened. A non-automatic open record prunes the same way, same reasoning as expired()
+      // below. An automatic open record is deliberately exempt from age-pruning here — it
+      // survives page/retry clocks by design — and is judged instead by expired() once restored.
+      ((raw.state === 'committed' || raw.state === 'aborted') &&
+        now -
+          (typeof raw.touchedAt === 'number' && Number.isFinite(raw.touchedAt) ? raw.touchedAt : raw.openedAt) >=
+          CONTINUATION_TTL_MS * 2) ||
       (raw.automatic !== true &&
         now -
           (typeof raw.touchedAt === 'number' && Number.isFinite(raw.touchedAt) ? raw.touchedAt : raw.openedAt) >=
@@ -1527,6 +1538,9 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
         if (!repaired) commitPrimeTransfer(entry.from, entry.to);
         entry.state = 'committed';
         entry.error = null;
+        // Same reasoning as abortContinuation(): this is the moment the record actually settled,
+        // even though the underlying durable commit happened before the crash this is repairing.
+        entry.touchedAt = Date.now();
         logInfo(`continuation ${entry.token.slice(0, 8)} recovered after durable commit`);
       } else if (entry.state === 'committing' && session && session.conversationId === entry.from) {
         if (waitingExpired) {
