@@ -117,6 +117,13 @@ the app refuses the extension and asks you to reload the matching copy.
   Every critical or telemetry mutation triggered a full clone of dormant worker histories and
   agent state before the 300 ms write-coalescing window got a chance to collapse a burst of them
   into one write. The snapshot is now deferred to the moment a queued write actually flushes.
+- **Deleting a recording no longer costs its chat browser recovery, permanently.** If a Compact
+  & Resume was still open on that row, nothing gave it up — and an automatic one has no clock
+  until something asks for it, so it never expired, was never swept, and survived every restart
+  by design. The app went on treating that ChatGPT chat as mid-compaction, and a chat that is
+  compacting is skipped by the silence sweep, so it never got another recovery reload for the
+  life of the install. Deleting a row now gives up the Compact & Resume it owned, the same way it
+  already released that row's block.
 - **Goal and Loop now refuse an irreversible action nobody asked for.** Nothing in the
   meta-prompts said what to do when ChatGPT asks permission to delete, overwrite, force-push,
   send, publish or spend — and the one answer that cannot be taken back is the one it could give
