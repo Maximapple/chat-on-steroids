@@ -33,11 +33,22 @@ async function installFakeNode(home: string, relativeBin: string): Promise<strin
 /**
  * Sources the helper the way a hook does, with a PATH that deliberately has no node on it, and
  * reports what it resolved to. `env -i` is not used because the helper needs a working shell.
+ *
+ * The two fixed non-$HOME candidates (Homebrew, /usr/local/bin) are pointed at a directory this
+ * temp $HOME provably does not contain node in, via the helper's own override seam - otherwise a
+ * machine or CI runner that genuinely has node at one of those real paths (common on Linux and
+ * Intel-Homebrew installs) would resolve to it before ever reaching the $HOME-relative layout a
+ * given test means to isolate, regardless of PATH.
  */
 async function findNode(home: string): Promise<{ ok: boolean; resolved: string; stderr: string }> {
   try {
     const { stdout, stderr } = await run('sh', ['-c', `. '${script}' && command -v node`], {
-      env: { HOME: home, PATH: '/usr/bin:/bin' }
+      env: {
+        HOME: home,
+        PATH: '/usr/bin:/bin',
+        CLF_HOOK_HOMEBREW_BIN: path.join(home, 'no-such-homebrew-bin'),
+        CLF_HOOK_USR_LOCAL_BIN: path.join(home, 'no-such-usr-local-bin')
+      }
     });
     return { ok: true, resolved: stdout.trim(), stderr };
   } catch (error) {
