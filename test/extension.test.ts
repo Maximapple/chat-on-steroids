@@ -1336,6 +1336,74 @@ describe('worker settings authority', () => {
   });
 
   /**
+   * The same drop, once for every checkpoint there is, driven from the worker's own list.
+   *
+   * Two fields were lost to this handler in silence — `sourceLost` on the day it was written and
+   * `destinationLost` from 2026-09-02 until 2026-09-04 — and the tests above did not catch
+   * either, because each names the fields somebody thought to name. So this one takes the list
+   * out of the worker and sends every entry in it, which makes the omission that caused both
+   * bugs impossible: a checkpoint the page can send with no route through here fails here.
+   *
+   * `destinationLost` is the one that had been dead longest. The replacement chat proves nothing
+   * left its composer — the user pressed Escape as the brief landed — and the app hands the brief
+   * straight back to a fresh chat instead of leaving it armed. That report never reached the app
+   * once, for two days, while the feature read as working at both ends.
+   */
+  it('forwards every compaction checkpoint it names, and nothing it does not', async () => {
+    const posted: Record<string, unknown>[] = [];
+    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/compact' && init.method === 'POST') {
+        posted.push(JSON.parse(String(init.body || '{}')));
+        return response(200, { ok: true });
+      }
+      return response(404, {});
+    });
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    await worker.registerTab(44);
+    await worker.send({ type: 'bind', conversationId: CHAT }, 44);
+    const token = '0123456789abcdef0123456789abcdef';
+
+    const source = await fs.readFile(path.join(process.cwd(), 'extension', 'background.js'), 'utf8');
+    const listed = (name: string): string[] => {
+      const block = new RegExp(`const ${name} = \\[([^\\]]*)\\]`).exec(source);
+      expect(block, `${name} is not a literal list any more; this test reads it from the source`).not.toBeNull();
+      return [...block![1]!.matchAll(/'([A-Za-z]+)'/g)].map((match) => match[1]!);
+    };
+    const flags = listed('COMPACT_CHECKPOINT_FLAGS');
+    const text = listed('COMPACT_CHECKPOINT_TEXT');
+    // The whole point is coverage of a list that grows, so a shrunken list is itself a failure.
+    expect(flags).toEqual(expect.arrayContaining(['sourceLost', 'destinationLost']));
+    expect(text).toEqual(expect.arrayContaining(['summary', 'sourceMessageId', 'destinationMessageId']));
+
+    for (const flag of flags) await worker.send({ type: 'compact', conversationId: CHAT, token, [flag]: true }, 44);
+    for (const name of text) {
+      await worker.send({ type: 'compact', conversationId: CHAT, token, [name]: `value-for-${name}` }, 44);
+    }
+
+    expect(posted).toHaveLength(flags.length + text.length);
+    flags.forEach((flag, at) => {
+      expect(posted[at], `${flag} never reached the app`).toMatchObject({ token, [flag]: true });
+    });
+    text.forEach((name, at) => {
+      expect(posted[flags.length + at], `${name} never reached the app`).toMatchObject({
+        token,
+        [name]: `value-for-${name}`
+      });
+    });
+
+    // And still an allowlist: a field the page invents does not ride along with a real one.
+    posted.length = 0;
+    await worker.send(
+      { type: 'compact', conversationId: CHAT, token, sourceLost: true, notACheckpoint: true },
+      44
+    );
+    expect(posted[0]).toMatchObject({ token, sourceLost: true });
+    expect(posted[0]).not.toHaveProperty('notACheckpoint');
+  });
+
+  /**
    * Which Chrome instance the replacement chat is created in.
    *
    * The user had two Chrome instances open. A chat finished in the background one, Compact &

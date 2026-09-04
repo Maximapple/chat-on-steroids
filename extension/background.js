@@ -1844,6 +1844,41 @@ function serializeTab(tab, operation) {
   return tracked;
 }
 
+/**
+ * The `/compact` checkpoints this worker will carry, and nothing else.
+ *
+ * Each one is a durable step in the Compact & Resume state machine that only the page can
+ * witness: it claimed the prompt, it armed the click, ChatGPT took it (and which message it
+ * became), or ChatGPT provably did not. The app acts on each, and none of them mean anything
+ * without the token naming the transaction, so the pair always travels together.
+ *
+ * Adding a checkpoint to the page means adding its name here. Everything else the page sends
+ * on this route is deliberately not forwarded.
+ */
+const COMPACT_CHECKPOINT_FLAGS = [
+  'sourceAttempt',
+  'sourceDispatch',
+  'sourceLost',
+  'destinationAttempt',
+  'destinationDispatch',
+  'destinationLost'
+];
+const COMPACT_CHECKPOINT_TEXT = ['summary', 'sourceMessageId', 'destinationMessageId'];
+
+function compactCheckpointFields(message) {
+  if (!message || typeof message.token !== 'string') return {};
+  const fields = {};
+  for (const flag of COMPACT_CHECKPOINT_FLAGS) {
+    if (message[flag] === true) fields[flag] = true;
+  }
+  for (const name of COMPACT_CHECKPOINT_TEXT) {
+    if (typeof message[name] === 'string') fields[name] = message[name];
+  }
+  // The token rides along only when it actually qualifies something, exactly as the
+  // field-by-field spreads it replaces did: a bare token names no step and is not a checkpoint.
+  return Object.keys(fields).length > 0 ? { token: message.token, ...fields } : {};
+}
+
 const HANDLERS = {
   async register_document(_message, sender) {
     const result = await registerDocument(sender, _message);
@@ -2154,40 +2189,20 @@ const HANDLERS = {
         cancel: message.cancel === true,
         ticket: message.ticket === true,
         automatic: message.automatic === true,
-        // The capture. `token` names the transaction the page was given when it marked the
-        // compaction turn, and `summary` is that turn's own answer. Both are forwarded
-        // verbatim and only together: the app refuses a brief whose token does not name an
-        // open continuation for this chat, which is what keeps some other tab's text from
-        // ever becoming this session's handoff.
-        ...(typeof message.token === 'string' && typeof message.summary === 'string'
-          ? { token: message.token, summary: message.summary }
-          : {}),
-        ...(typeof message.token === 'string' && message.sourceAttempt === true
-          ? { token: message.token, sourceAttempt: true }
-          : {}),
-        ...(typeof message.token === 'string' && message.sourceDispatch === true
-          ? { token: message.token, sourceDispatch: true }
-          : {}),
-        // The other end of that arming. The page proves ChatGPT never took the armed prompt —
-        // none of send()'s five acceptance signals fired — and the app ends the transaction on
-        // it. This body is rebuilt field by field, so a field missing here is dropped in
-        // silence: the page reported, the app was ready, and the continuation still sat armed
-        // for its six-hour TTL with the chat kept out of browser recovery.
-        ...(typeof message.token === 'string' && message.sourceLost === true
-          ? { token: message.token, sourceLost: true }
-          : {}),
-        ...(typeof message.token === 'string' && typeof message.sourceMessageId === 'string'
-          ? { token: message.token, sourceMessageId: message.sourceMessageId }
-          : {}),
-        ...(typeof message.token === 'string' && message.destinationAttempt === true
-          ? { token: message.token, destinationAttempt: true }
-          : {}),
-        ...(typeof message.token === 'string' && message.destinationDispatch === true
-          ? { token: message.token, destinationDispatch: true }
-          : {}),
-        ...(typeof message.token === 'string' && typeof message.destinationMessageId === 'string'
-          ? { token: message.token, destinationMessageId: message.destinationMessageId }
-          : {})
+        // Every checkpoint on this route is token-paired: the field only says anything about
+        // the transaction the token names, so neither is ever forwarded without the other. The
+        // app refuses a brief whose token does not name an open continuation for this chat,
+        // which is what keeps some other tab's text from becoming this session's handoff.
+        //
+        // Named in one list rather than eight hand-copied ternaries, because this body is
+        // rebuilt field by field and a field nobody remembered to list is dropped in silence
+        // with both ends of the feature looking correct. That happened twice: `sourceLost` on
+        // the day it was written, and `destinationLost` from 2026-09-02 until this was found —
+        // in both cases the page reported, the app was ready, and the continuation sat armed
+        // until its six-hour TTL with the chat kept out of browser recovery the whole time.
+        // Still an allowlist, not a passthrough: nothing reaches the app unless it is named
+        // in COMPACT_CHECKPOINT_FLAGS or COMPACT_CHECKPOINT_TEXT below.
+        ...compactCheckpointFields(message)
       })
     });
     // Chat B, for this window. The app produced it inside this very request precisely so that
