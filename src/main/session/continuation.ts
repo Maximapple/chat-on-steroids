@@ -355,6 +355,8 @@ export interface ContinuationView {
   error: string | null;
   openedAt: number;
   automatic: boolean;
+  /** When the brief request first went on its way, or null while it has not. */
+  askedAt: number | null;
   sourceSend: ContinuationSendCheckpoint;
   destinationSend: ContinuationDestinationCheckpoint;
 }
@@ -369,6 +371,7 @@ const view = (entry: Continuation): ContinuationView => ({
   error: entry.error,
   openedAt: entry.openedAt,
   automatic: entry.automatic,
+  askedAt: entry.askedAt,
   sourceSend: { ...entry.sourceSend },
   destinationSend: { ...entry.destinationSend }
 });

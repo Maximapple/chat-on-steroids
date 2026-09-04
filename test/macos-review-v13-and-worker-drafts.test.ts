@@ -37,7 +37,7 @@ describe('macOS review v16 plus retained worker-draft hardening', () => {
     expect(content).toContain("if (!CLF_DOM.insertPrompt(boot.text, replaceExistingDraft))");
     expect(content).toContain('waitForRevivalSubmitReady(openedConversation, attempt)');
     expect(content).toContain("the composer changed before bootstrap send; the draft was preserved");
-    expect(dom).toContain('function insertPrompt(value, replaceExisting = false)');
+    expect(dom).toContain('function insertPrompt(value, mode = false)');
     expect(dom).toContain('box.replaceChildren()');
   });
 });
