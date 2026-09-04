@@ -888,6 +888,13 @@ function clearRetryIfIdle() {
 
 async function hello(candidate) {
   try {
+    // The one path that waits for the digest, because this request is what the app's connect
+    // line is built from and that line has to be able to say which worker it came from — see
+    // workerStampReady. Bounded, and deliberately: reading and hashing one local file takes
+    // single-digit milliseconds, so this is normally not a wait at all, and a diagnostic that
+    // could delay discovery on a slow or broken read would be worse than one that occasionally
+    // goes unstamped.
+    await Promise.race([workerStampReady, new Promise((resolve) => setTimeout(resolve, 250))]);
     const response = await fetchBounded(`http://127.0.0.1:${candidate}/hello`, {
       cache: 'no-store',
       headers: versionHeaders()
@@ -915,20 +922,31 @@ async function hello(candidate) {
  * Six bytes of SHA-256 over background.js answers it in the app's own log. Same shape as the
  * driver's `stamp()`, which has told the same story about browser-driver.js for a while.
  *
- * Computed once here and never awaited by a request. Making `versionHeaders()` async to wait for
- * it put an extra turn in front of every call this worker makes, which is real cost for a
- * diagnostic and immediately broke a timing test that had been honest about the old shape. The
- * header is simply absent for the few milliseconds the hash takes and present for the rest of
- * the worker's life, which is all a value read from a connection log has to be.
+ * Computed once here rather than per request. Making `versionHeaders()` async put an extra turn
+ * in front of every call this worker makes, which is real cost for a diagnostic and broke a
+ * timing test that had been honest about the old shape, so ordinary requests still read whatever
+ * is ready and carry no header if that is nothing.
+ *
+ * `hello()` is the exception and awaits it, because the connect line is the whole point. This was
+ * first written to let that line go unstamped too, on the reasoning that the header is missing
+ * "for the few milliseconds the hash takes and present for the rest of the worker's life". That
+ * is wrong about an MV3 worker: the module re-runs on every wake, and the connect is among the
+ * first requests a freshly woken worker makes, so the connect landed inside its own hash window
+ * routinely — measured on macOS as three consecutive `(build unreported)` connects over half an
+ * hour. Unreported then meant "stale pre-feature worker *or* current worker that woke a moment
+ * ago", which is exactly the ambiguity the digest exists to remove. One await, on one path that
+ * is already asynchronous and happens once per discovery, buys back the only line that has to be
+ * conclusive.
  */
 let workerStampValue = '';
-void (async () => {
+const workerStampReady = (async () => {
   try {
     const source = await (await fetch(webext.runtime.getURL('background.js'))).arrayBuffer();
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', source)).slice(0, 6);
     workerStampValue = [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   } catch {
-    // A worker that cannot read itself still has a job to do; the header just stays absent.
+    // A worker that cannot read itself still has a job to do; the header says so rather than
+    // going quiet, because silence is the one answer this diagnostic must never give.
     workerStampValue = 'unreadable';
   }
 })();
