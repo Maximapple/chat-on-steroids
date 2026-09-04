@@ -825,6 +825,29 @@ describe('the swarm handover', () => {
     expect(swarmRunning()).toBe(true);
   });
 
+  it('retains a terminal record from when it settled, not from when it was opened', async () => {
+    vi.useFakeTimers();
+    const summary = await createSession({ title: 'late-aborting ticket', conversationId: CHAT_A });
+    const opened = await openContinuationNow(summary.id, CHAT_A);
+    const openedAt = Date.now();
+
+    // The transaction sits waiting far longer than its own deadline before anything sweeps it -
+    // a page that never opened, or a process that was asleep. By the time it finally aborts, the
+    // record is already old by openedAt's clock even though it only just settled.
+    vi.setSystemTime(openedAt + CONTINUATION_TTL_MS * 10);
+    expect(continuationByToken(opened.token)?.state).toBe('aborted');
+    expect(Date.now() - openedAt).toBeGreaterThan(CONTINUATION_TTL_MS * 2);
+
+    // Just past its own settle-time retention window, but still deep inside openedAt's: the old
+    // openedAt-measured prune would have deleted this on the very sweep that aborted it above.
+    vi.setSystemTime(Date.now() + 1_000);
+    expect(continuationByToken(opened.token)?.state).toBe('aborted');
+
+    // Now genuinely past two retention windows measured from settling, and it is finally let go.
+    vi.setSystemTime(Date.now() + CONTINUATION_TTL_MS * 2);
+    expect(continuationByToken(opened.token)).toBeNull();
+  });
+
   it('keeps an automatic ticket open past ordinary continuation deadlines and restart', async () => {
     vi.useFakeTimers();
     const summary = await createSession({ title: 'durable auto ticket', conversationId: CHAT_A });
