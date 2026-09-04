@@ -117,6 +117,13 @@ the app refuses the extension and asks you to reload the matching copy.
   Every critical or telemetry mutation triggered a full clone of dormant worker histories and
   agent state before the 300 ms write-coalescing window got a chance to collapse a burst of them
   into one write. The snapshot is now deferred to the moment a queued write actually flushes.
+- **A still-running workflow can no longer lose its proven owner to a full request registry.**
+  The registry that binds a ChatGPT request id to its conversation is bounded, and it treated
+  page sightings as the only sign an id was alive. That inverted the guarantee it exists for:
+  the case it was written for is a workflow whose calls keep arriving after the page that proved
+  it was reloaded, compacted or closed — a workflow that can never be sighted again, and so sat
+  first in line to be discarded, while ids nothing had used for hours stayed. A call arriving
+  under an id now counts as that id being alive, so only genuinely untouched ids are dropped.
 - **The prime agent has one working folder identity instead of two.** It used to answer to both
   its conversation and a reusable `agent:prime` key, with every read reconciling and mirroring
   between them — a design from before the exact ChatGPT conversation became the authority. No
