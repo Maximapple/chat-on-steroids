@@ -2043,20 +2043,30 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         origin
       );
     }
-    // Past every checkpoint branch with a token still in hand, which no caller means to do: a
-    // token qualifies a step in the transaction, so one arriving without its step is a step
-    // that went missing between the page and here. That is not hypothetical — the service
-    // worker rebuilds this body field by field, and twice it has silently dropped a field both
-    // ends implemented correctly (`sourceLost`, and `destinationLost` for two days before it).
-    // Both were invisible from the app, which simply fell through to "start a compaction" and
-    // answered 200, so the page saw a plausible reply and nothing looked wrong anywhere.
+    // Every request that reaches this line asked to *start* a compaction, and says which keys it
+    // arrived with. Keys only — never a value, so a brief or a conversation id is never written
+    // to the log by this.
     //
-    // Naming the keys that did arrive is what tells those apart on sight: the field missing
-    // from this list is the field the worker dropped.
+    // The line exists because a checkpoint lost in transit is invisible from here in exactly the
+    // way that matters: the app falls through to this branch, answers 200 with a plausible
+    // start-compaction reply, and neither end has anything to look at. That has now happened
+    // three times. Twice the service worker dropped a field both ends implemented correctly
+    // (`sourceLost`, and `destinationLost` for two days before it). The third is open as this is
+    // written: a give-up whose page-side call demonstrably held a token, arriving here with
+    // neither the token nor the flag, which is what `compactCheckpointFields` produces when it
+    // decides `message.token` is not a string.
+    //
+    // An earlier version of this logged only when a token survived, and could not see that third
+    // case at all — the shape with nothing left to notice is the one that needed reporting most.
+    // Unconditional is also what makes it useful: `sourceAttempt` and `sourceDispatch` reach this
+    // route with their token intact on every compaction, so their key lists sit in the same log
+    // as the give-up's, and diffing them is the whole diagnosis.
+    logInfo(
+      `bridge: /compact start request — body keys: ${Object.keys(body as Record<string, unknown>).sort().join(', ')}`
+    );
     if (checkpointToken) {
       logWarn(
-        `bridge: /compact carried token ${checkpointToken.slice(0, 8)} but matched no checkpoint — ` +
-          `body keys: ${Object.keys(body as Record<string, unknown>).sort().join(', ')}. ` +
+        `bridge: /compact carried token ${checkpointToken.slice(0, 8)} but matched no checkpoint. ` +
           'A checkpoint the page reported is not reaching the app; check the service worker forwards it.'
       );
     }
