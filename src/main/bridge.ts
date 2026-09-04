@@ -2043,6 +2043,23 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         origin
       );
     }
+    // Past every checkpoint branch with a token still in hand, which no caller means to do: a
+    // token qualifies a step in the transaction, so one arriving without its step is a step
+    // that went missing between the page and here. That is not hypothetical — the service
+    // worker rebuilds this body field by field, and twice it has silently dropped a field both
+    // ends implemented correctly (`sourceLost`, and `destinationLost` for two days before it).
+    // Both were invisible from the app, which simply fell through to "start a compaction" and
+    // answered 200, so the page saw a plausible reply and nothing looked wrong anywhere.
+    //
+    // Naming the keys that did arrive is what tells those apart on sight: the field missing
+    // from this list is the field the worker dropped.
+    if (checkpointToken) {
+      logWarn(
+        `bridge: /compact carried token ${checkpointToken.slice(0, 8)} but matched no checkpoint — ` +
+          `body keys: ${Object.keys(body as Record<string, unknown>).sort().join(', ')}. ` +
+          'A checkpoint the page reported is not reaching the app; check the service worker forwards it.'
+      );
+    }
     if (goalWorkerChat(id)) {
       return json(
         res,

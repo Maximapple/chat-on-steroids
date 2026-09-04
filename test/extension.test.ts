@@ -1404,6 +1404,57 @@ describe('worker settings authority', () => {
   });
 
   /**
+   * The invariant both silent drops actually broke: the page can send a checkpoint this worker
+   * has no route for, and nothing anywhere says so.
+   *
+   * `sourceLost` and `destinationLost` were each added to content.js and to bridge.ts, correctly,
+   * and never added to the list in between. Both ends had tests and both passed; the field simply
+   * never arrived, and the app answered 200 from its fall-through branch so even the page saw a
+   * plausible reply. `destinationLost` survived that way from 2026-09-02 to 2026-09-04.
+   *
+   * Neither file's own tests can see this, because the bug is the relationship between two files.
+   * So this reads both: every field content.js puts on a `type: 'compact'` message must either be
+   * one of the request's own always-present fields or be named in the worker's forwarding lists.
+   * Adding a checkpoint to the page and forgetting the worker fails here, by name, immediately.
+   */
+  it('forwards every compaction checkpoint the content script can send', async () => {
+    const page = await fs.readFile(path.join(process.cwd(), 'extension', 'content.js'), 'utf8');
+    const worker = await fs.readFile(path.join(process.cwd(), 'extension', 'background.js'), 'utf8');
+
+    const sent = new Set<string>();
+    for (const call of page.matchAll(/ask\(\{\s*type:\s*'compact'(.*?)\}\)/gs)) {
+      for (const field of call[1]!.matchAll(/(\w+)\s*:/g)) sent.add(field[1]!);
+    }
+    // If this ever comes back empty the regex has drifted and the test is proving nothing.
+    expect(sent.size, 'no compact fields were found in content.js; this test reads it as source').toBeGreaterThan(5);
+
+    const listed = (name: string): string[] => {
+      const block = new RegExp(`const ${name} = \\[([^\\]]*)\\]`).exec(worker);
+      expect(block, `${name} is not a literal list any more`).not.toBeNull();
+      return [...block![1]!.matchAll(/'(\w+)'/g)].map((match) => match[1]!);
+    };
+    const forwarded = new Set([...listed('COMPACT_CHECKPOINT_FLAGS'), ...listed('COMPACT_CHECKPOINT_TEXT')]);
+
+    // Carried unconditionally by the handler rather than as token-paired checkpoints, so they
+    // are routed without appearing in either list.
+    const always = new Set(['type', 'conversationId', 'resume', 'cancel', 'ticket', 'automatic', 'token']);
+
+    const unroutable = [...sent].filter((field) => !always.has(field) && !forwarded.has(field)).sort();
+    expect(
+      unroutable,
+      `content.js sends ${unroutable.join(', ')} on /compact, and background.js forwards none of it — ` +
+        'add each to COMPACT_CHECKPOINT_FLAGS or COMPACT_CHECKPOINT_TEXT'
+    ).toEqual([]);
+
+    // The reverse is not an error — the worker may route a field ahead of the page using it —
+    // but the two that went missing must stay covered from both sides.
+    for (const field of ['sourceLost', 'destinationLost']) {
+      expect(sent.has(field), `content.js no longer sends ${field}`).toBe(true);
+      expect(forwarded.has(field), `background.js no longer forwards ${field}`).toBe(true);
+    }
+  });
+
+  /**
    * Which Chrome instance the replacement chat is created in.
    *
    * The user had two Chrome instances open. A chat finished in the background one, Compact &
