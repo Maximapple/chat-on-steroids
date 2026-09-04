@@ -42,8 +42,21 @@ the app refuses the extension and asks you to reload the matching copy.
   window. The page now reports it — on the strength of the same five-signal acceptance check it
   already ran, against a turn this flow had stopped and settled before typing — and the app ends
   the attempt rather than leaving it armed. Nothing is re-sent, here or anywhere: the cost of
-  being wrong is one abandoned compaction that gets offered again on the next qualifying turn,
-  which is what the replacement chat's own half of this has done since 2026-09-02.
+  being wrong is one abandoned compaction that gets offered again on the next qualifying turn.
+- **The replacement chat's own version of that give-up had never once worked.** When a fresh chat
+  proves nothing left its message box — the documented case is pressing Escape as the brief lands
+  — it is meant to hand the brief straight back so another chat can take it, instead of leaving it
+  claimed for the quarter-hour the lease runs. That report was written, handled correctly at both
+  ends, and silently discarded in between: the extension's background worker rebuilds each
+  request field by field, and this one field was never added to the list, so nothing it said ever
+  reached the app. Two days of a feature that read as working everywhere anyone looked. It works
+  now, and the way a request is assembled changed so the same omission cannot happen quietly
+  again — the fields are named in one list, and a test reads that list against what the page can
+  actually send and fails naming anything with no route.
+- **A checkpoint that goes missing between the browser and the app now says so.** All three cases
+  above were invisible from the app's side: it simply fell through to "start a compaction",
+  answered normally, and left both ends looking correct. Requests on that route now record which
+  fields arrived, so a lost one is a single line in the log rather than a debugging session.
 - **Three desktop refusals told the model to call something that does not exist.**
   `UNKNOWN_UI_REF`, `STALE_REF` and `STALE_FRAME` all ended with "call `get_window_state` or
   `find_ui` again" — both internal helper operations, neither reachable from a tool. The one
