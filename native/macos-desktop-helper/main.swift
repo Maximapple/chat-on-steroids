@@ -693,6 +693,25 @@ private func frontWindowID(rows: [WindowRow], focusedWindow: CGWindowID? = nil) 
     return focused
 }
 
+/**
+ * A note for whoever next reads `INPUT_TARGET_LOST` against a browser and files it as a bug.
+ *
+ * It is usually not one, and it is not specific to this helper. The last clause below asks the
+ * application which control has keyboard focus. A browser answers that only when the *page* has
+ * a focused control it exposes to accessibility: measured on 2026-09-04, macOS Chrome on
+ * `chatgpt.com` with the composer focused resolved `AXFocusedUIElement` to an `AXTextArea` and
+ * input was delivered normally, while the same Chrome on a plain page with nothing focused could
+ * not be read at all (AppleScript saw `-1728`, "cannot be read") and every action was refused.
+ * Repeated deep AX walks of the window do not change it — it is a property of the page, not a
+ * lazily-activated process-wide tree.
+ *
+ * The consequence is a real corner and worth stating plainly: `computer` cannot click *into* a
+ * web page that has nothing focused yet, because the click that would create focus is itself
+ * fenced by the absence of focus. That is the fence failing closed on an honest ignorance of
+ * where input would land, which is what it is for — it must not be "fixed" by assuming the
+ * frontmost window will receive the keystroke. The `browser` tool is the way to drive a web
+ * page; it speaks CDP and needs none of this.
+ */
 private func inputTargetMatches(_ row: WindowRow) -> Bool {
     guard frontmostPID() == row.pid else { return false }
     let rows = allWindowRows(includeMinimized: false)
