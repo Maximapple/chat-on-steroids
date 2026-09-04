@@ -153,6 +153,16 @@ the app refuses the extension and asks you to reload the matching copy.
   previous run's folder without either conversation ever naming it. The prime is now
   conversation-only, and a call that cannot prove its conversation gets no working folder at all,
   exactly like any other unidentified caller.
+- **Compact & Resume could hand a chat straight back into another compaction, without end.** A
+  replacement chat starts carrying the handoff brief it was resumed with, and that brief is
+  deliberately large — the handoff rules ask for 10,000-30,000 tokens, at or above the lowest
+  automatic-compaction threshold the settings will accept. Automatic compaction measured the
+  chat's whole context, so the brief alone put the replacement over the line the instant it
+  landed: it was told to write another brief of about the same size, and the chat after it too.
+  Measured on a real machine at a 10,000 threshold: three chats inside two minutes, the second
+  asked to compact 1.6 seconds after it was created, having done no work of its own. The
+  threshold now measures what a chat has accumulated since it was resumed rather than what it
+  inherited, which is the same number for every chat nobody resumed.
 - **A user message could be dropped by both of the extension's two recorders at once.** A user
   turn is written either by the DOM transcript scan or, when that cannot see it, by the page-model
   scan — which defers to the DOM one by message id. But the set of "the DOM recorder owns these"
