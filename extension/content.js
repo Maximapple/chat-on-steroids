@@ -1440,6 +1440,23 @@
     return false;
   }
 
+  /**
+   * Whether the DOM transcript writer will actually journal this rendered row.
+   *
+   * Both that writer and Fiber's deferral gate ask this exact question, and they have to ask it
+   * the same way: Fiber may only stand down for a row this writer genuinely owns. The
+   * retirement and staleness clauses are the ones that never clear — a message id retired on
+   * the way out of a chat stays retired for the life of the tab — so a disagreement there costs
+   * the message permanently rather than for one observation tick.
+   */
+  function domWillJournal(message) {
+    if (!message || !message.id || !message.text) return false;
+    // Left over from a chat this tab has already navigated away from. Not "probably old" — the
+    // section it is in was one this script watched under the previous conversation, so filing
+    // it here would be filing chat A's transcript into chat B.
+    return !retiredMessages.has(message.id) && !isStale(message.node);
+  }
+
   function resetConversation() {
     seenMessages.clear();
     reportedConversationTitle = '';
@@ -1929,11 +1946,10 @@
       return false;
     };
     for (const message of rendered) {
-      if (!message.id || !message.text) continue;
-      // Left over from a chat this tab has already navigated away from. Not "probably
-      // old" — the section it is in was one this script watched under the previous
-      // conversation, so filing it here would be filing chat A's transcript into chat B.
-      if (retiredMessages.has(message.id) || isStale(message.node)) continue;
+      // The single condition under which this loop journals a row. Fiber's deferral gate reads
+      // the same predicate, so it stands down only for a row this writer really does take —
+      // see the comment on renderedUserMessageIds for what happened when the two disagreed.
+      if (!domWillJournal(message)) continue;
       if (message.role === 'user') {
         const key = occurrenceKey(message.id, message.text);
         // Dedupe answers "have we journalled this row?"; authoredNow answers "did this row
@@ -3409,9 +3425,27 @@
     // gated; the later DOM pass then quite correctly treated it as already recorded and
     // never emitted turn_start. Keep Fiber only for the narrow thing it adds: page-model
     // messages whose stable id is not rendered in the DOM yet.
+    //
+    // "Rendered" has to mean *the DOM recorder will actually journal this*, not merely "a node
+    // with this id exists". Those came apart: the set was built from role+id, while the loop
+    // above only journals a row that also has text and is neither retired nor stale. A row
+    // matching the weaker test but not the stronger one fell between the two writers — the DOM
+    // loop skipped it before it was ever classified as a user message, and Fiber saw its id
+    // here and deferred to a writer that had already declined. Nothing emitted it. A live
+    // macOS session lost two real user messages that way on 2026-09-04, keeping their
+    // assistant answers and tool calls, which is the worst shape for a handoff brief that
+    // treats user messages as its highest authority.
+    //
+    // Textlessness alone is usually survivable: `data-message-id` is published while
+    // `.whitespace-pre-wrap` is still empty on an ordinary send, and the next tick reads the
+    // prose. Retirement and staleness are not, because neither ever clears — so a row that is
+    // still textless when the tab leaves that chat is skipped by this writer for the rest of
+    // the tab's life, and deferring to it lost the message permanently.
+    //
+    // One predicate, written once, used by both readers.
     const renderedUserMessageIds = new Set(
       CLF_DOM.messages()
-        .filter((message) => message.role === 'user' && message.id)
+        .filter((message) => message.role === 'user' && domWillJournal(message))
         .map((message) => message.id)
     );
     for (const turn of answer.turns) {

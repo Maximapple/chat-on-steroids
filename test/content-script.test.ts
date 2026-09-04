@@ -1680,6 +1680,60 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
     expect(new Set(revisions.map((entry) => entry.messageId))).toEqual(new Set(['assistant-first-interim-raw-id']));
   });
 
+  /**
+   * The gap a live macOS QA session lost two real user messages to, on 2026-09-04.
+   *
+   * There are two independent writers for a user message, and the Fiber one defers to the DOM
+   * one by id: `renderedUserMessageIds` is meant to say "the DOM recorder owns these". But the
+   * set was built from `role === 'user' && message.id`, while the DOM loop only actually
+   * journals a row that also has text and is neither retired nor stale. Any row satisfying the
+   * weaker predicate but not the stronger one therefore fell between them: the DOM loop skipped
+   * it before it was ever classified, and Fiber — which had the text from the page model all
+   * along — saw its id in the set and deferred. Nothing emitted it, and nothing ever would.
+   *
+   * `data-message-id` is set on the container while `.whitespace-pre-wrap` is still empty, so
+   * this is a normal render window ChatGPT passes through on every send, not an exotic state.
+   */
+  it('records a user message the DOM exposed an id for but no text, instead of both writers deferring', async () => {
+    live = await harness();
+    const section = userTurn(live.document, 'page-turn-idless-text', 'the message the DOM cannot read yet');
+    // Exactly the render window: the id is published, the prose is not painted yet.
+    const body = section.querySelector('.whitespace-pre-wrap')!;
+    body.textContent = '';
+
+    live.hook.observe();
+    await settle();
+    // The DOM writer cannot journal a row it cannot read, and says so by emitting nothing.
+    expect(emitted(live.sent, 'user_message')).toHaveLength(0);
+
+    await replyFiber([], [{
+      turnId: 'page-turn-idless-text',
+      conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      calls: [],
+      messages: [{
+        messageId: 'm-page-turn-idless-text',
+        rawMessageId: 'm-page-turn-idless-text',
+        role: 'user',
+        stable: true,
+        createTime: 1_787_165_090_700,
+        rawText: 'the message the DOM cannot read yet',
+        renderedHtml: ''
+      }],
+      activities: []
+    }]);
+    await live.hook.flush();
+    await settle();
+
+    // Fiber must not defer to a writer that demonstrably did not write. The page model has the
+    // text; that is the whole reason this second path exists.
+    const users = emitted(live.sent, 'user_message').map((entry) => entry.event);
+    expect(users).toHaveLength(1);
+    expect(users[0]).toMatchObject({
+      messageId: 'm-page-turn-idless-text',
+      text: 'the message the DOM cannot read yet'
+    });
+  });
+
   it('records a page-model user message even when the DOM has not exposed data-message-id yet', async () => {
     live = await harness();
     assistantTurn(live.document, 'page-turn-model-user', []);
@@ -4150,6 +4204,69 @@ describe('navigating from one chat to another', () => {
       'the second chat’s question'
     ]);
     expect(messages[1]!.conversationId).toBe('bbbbbbbb-cccc-dddd-eeee-ffffffffffff');
+  });
+
+  /**
+   * The variant that loses a message for good, and the one the 2026-09-04 macOS session hit:
+   * a textless render window that is still open when the tab leaves the chat.
+   *
+   * Textlessness on its own is survivable — the next observation reads the prose. Retirement is
+   * not: `retiredMessages` and `staleNodes` are deliberately never cleared by
+   * resetConversation(), because a row retired on the way out of chat A must never be re-filed
+   * under chat B. So a row that was still textless when the tab left is skipped by the DOM
+   * writer for the rest of the tab's life, however completely it renders later.
+   *
+   * Fiber is the writer that covers exactly this: the page model for A carries the prose the
+   * DOM never gave up. It only covers it if its deferral gate agrees with what the DOM writer
+   * actually does. Deferring on the weaker role+id test meant nobody wrote the row, and no
+   * later pass could.
+   */
+  it('records a message left textless when the tab navigated away, which the DOM writer can never journal', async () => {
+    live = await harness();
+    const opening = userTurn(live.document, 'turn-a1', 'the question caught mid-render');
+    // The ordinary send window: the id is published, the prose is not painted yet.
+    opening.querySelector('.whitespace-pre-wrap')!.textContent = '';
+    live.hook.observe();
+    await settle();
+    expect(emitted(live.sent, 'user_message')).toHaveLength(0);
+
+    // Leaving retires everything this tab watched under A — including the row it could not read.
+    live.dom.reconfigure({ url: CHAT_B });
+    live.hook.observe();
+    await settle();
+    opening.remove();
+    live.hook.observe();
+    await settle();
+
+    // Back in A, fully rendered this time. The DOM writer still declines: the id is retired.
+    live.dom.reconfigure({ url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
+    live.hook.observe();
+    await settle();
+    userTurn(live.document, 'turn-a1', 'the question caught mid-render', { sent: false });
+    live.hook.observe();
+    await settle();
+    expect(emitted(live.sent, 'user_message')).toHaveLength(0);
+
+    await replyFiber([], [{
+      turnId: 'turn-a1',
+      conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      calls: [],
+      messages: [{
+        messageId: 'm-turn-a1',
+        rawMessageId: 'm-turn-a1',
+        role: 'user',
+        stable: true,
+        createTime: 1_787_165_090_900,
+        rawText: 'the question caught mid-render',
+        renderedHtml: ''
+      }],
+      activities: []
+    }]);
+    await live.hook.flush();
+    await settle();
+
+    const texts = emitted(live.sent, 'user_message').map((entry) => entry.event.text);
+    expect(texts).toEqual(['the question caught mid-render']);
   });
 
   /**

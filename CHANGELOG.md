@@ -153,6 +153,17 @@ the app refuses the extension and asks you to reload the matching copy.
   previous run's folder without either conversation ever naming it. The prime is now
   conversation-only, and a call that cannot prove its conversation gets no working folder at all,
   exactly like any other unidentified caller.
+- **A user message could be dropped by both of the extension's two recorders at once.** A user
+  turn is written either by the DOM transcript scan or, when that cannot see it, by the page-model
+  scan — which defers to the DOM one by message id. But the set of "the DOM recorder owns these"
+  was built from a weaker test than the DOM recorder's own: any row whose id was rendered while
+  its text was not, or whose id had been retired when the tab left that chat, was skipped by the
+  first writer before it was ever classified and deferred by the second. Neither wrote it. The
+  textless window is the one every message passes through on an ordinary send and normally heals
+  on the next observation; combined with navigating away it does not, because retirement is
+  permanent by design — a live session lost two real user messages this way, keeping their
+  assistant answers and tool calls, which is the worst possible shape for a handover brief that
+  treats user messages as its highest authority. Both readers now share one predicate.
 - **Watching a long recording no longer costs its whole history on every poll.** The session
   tool's update cursor answers one question — what was recorded since the last checkpoint — but
   it read and re-parsed the entire journal to do it, so P polls of an N-event recording cost
