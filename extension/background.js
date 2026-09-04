@@ -890,11 +890,16 @@ async function hello(candidate) {
   try {
     // The one path that waits for the digest, because this request is what the app's connect
     // line is built from and that line has to be able to say which worker it came from — see
-    // workerStampReady. Bounded, and deliberately: reading and hashing one local file takes
-    // single-digit milliseconds, so this is normally not a wait at all, and a diagnostic that
-    // could delay discovery on a slow or broken read would be worse than one that occasionally
-    // goes unstamped.
-    await Promise.race([workerStampReady, new Promise((resolve) => setTimeout(resolve, 250))]);
+    // workerStampReady.
+    //
+    // The race is a hang guard, not a latency budget, and the number says so. It resolves the
+    // instant the hash lands, which for one local file is milliseconds; the ceiling exists only
+    // so a read that never returns cannot wedge discovery. A first attempt used 250 ms, which
+    // reads like a budget and behaves like one — shrinking it makes the cold-worker regression
+    // fail, because the connect then goes out unstamped, which is the exact ambiguity this await
+    // exists to remove. Nothing has been measured hashing this slowly; the point is that a guard
+    // tight enough to fire on an unlucky machine is a guard that reintroduces the bug it guards.
+    await Promise.race([workerStampReady, new Promise((resolve) => setTimeout(resolve, 5000))]);
     const response = await fetchBounded(`http://127.0.0.1:${candidate}/hello`, {
       cache: 'no-store',
       headers: versionHeaders()
