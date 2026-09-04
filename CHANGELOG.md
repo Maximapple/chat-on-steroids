@@ -117,6 +117,14 @@ the app refuses the extension and asks you to reload the matching copy.
   Every critical or telemetry mutation triggered a full clone of dormant worker histories and
   agent state before the 300 ms write-coalescing window got a chance to collapse a burst of them
   into one write. The snapshot is now deferred to the moment a queued write actually flushes.
+- **The prime agent has one working folder identity instead of two.** It used to answer to both
+  its conversation and a reusable `agent:prime` key, with every read reconciling and mirroring
+  between them — a design from before the exact ChatGPT conversation became the authority. No
+  live path could write that mirror any more, and because friendly agent ids are reused by every
+  later run, leaving it in place kept open a shape where an unrelated prime could pick up a
+  previous run's folder without either conversation ever naming it. The prime is now
+  conversation-only, and a call that cannot prove its conversation gets no working folder at all,
+  exactly like any other unidentified caller.
 - **Watching a long recording no longer costs its whole history on every poll.** The session
   tool's update cursor answers one question — what was recorded since the last checkpoint — but
   it read and re-parsed the entire journal to do it, so P polls of an N-event recording cost
