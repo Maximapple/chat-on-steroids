@@ -95,6 +95,40 @@ the app refuses the extension and asks you to reload the matching copy.
   is caught even if nothing ever attaches again.
 - The native scroll-settle wait now measures the real clock instead of counting requested sleep
   durations, which had let a documented 120 ms ceiling run past 300 ms on real hardware.
+- **A stale older-session page could permanently strand a scrolled row.** Scrolling for
+  session history started a request against the current cursor; if a hot refresh replaced the
+  first page and its cursor before that older-page response returned, committing the stale
+  response's own cursor over the newer one left no cursor able to reach the rows between them.
+  The pagination loader now discards a response whose generation or cursor no longer matches by
+  the time it resolves, the same fencing the hot-refresh path already had.
+- **A recursive `read` glob touched the target of a directory symlink it was about to skip.**
+  `walk()` re-stat'd every child to classify it, even ones a directory listing had already
+  classified for free — and for an unfollowed symlink, that stat followed the link to its target
+  before then discarding it, reading metadata about a path outside the approved root that the
+  directory-listing boundary is meant to keep opaque. Ordinary entries are now classified from
+  the cheap listing data directly; an unfollowed symlink is skipped without ever touching its
+  target.
+- **Three correctness paths read a UI-capped session list as if it saw every retained session.**
+  Request-correlation crash recovery, deterministic Unattributed-bucket repair, and MCP session
+  search all read a 5,000-folder-capped list; search in particular could report
+  `search_complete: true` while sessions still existed beyond the cap. All three now use the same
+  uncapped catalog identity and retention already relied on.
+- **A multi-agent run's durable snapshot was built before the write it was debounced into.**
+  Every critical or telemetry mutation triggered a full clone of dormant worker histories and
+  agent state before the 300 ms write-coalescing window got a chance to collapse a burst of them
+  into one write. The snapshot is now deferred to the moment a queued write actually flushes.
+- **A pending Goal reply obligation was silently forgotten across a Compact & Resume handover.**
+  The chat that produced it is retired the instant its own replacement takes over, so an owed
+  Goal decision from just before a handoff was neither collected nor really lost in a way that
+  needed fixing — the loop resumes on the replacement chat's own next reply either way — but the
+  code comment claiming it "travels to the replacement with everything else" was wrong and now
+  says what actually happens and why that is fine.
+- **A continuation that finally settled long after it opened lost its "already done" window
+  instantly.** Retention for a committed or aborted transaction was measured from when it
+  opened, not from when it settled, so a transaction that sat waiting for hours before its own
+  deadline aborted it was already outside its retention window the moment it became terminal — a
+  replayed acknowledgment from the page would have started a fresh transaction instead of getting
+  "already done." Retention is now measured from the settle time every state transition renews.
 
 ### Security
 - macOS Screen Recording and Accessibility remain independent OS grants. The helper requests no
