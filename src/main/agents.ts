@@ -644,6 +644,18 @@ function dormantRunForPrime(conversationId: string | null | undefined): DormantR
  * Conversation ids are bound exactly once, so a duplicate across owners would indicate
  * corrupted state. Fail closed by returning null rather than choosing an arbitrary owner in
  * that impossible shape.
+ *
+ * The scan stays a scan on purpose. It reads as an unbounded loop on a hot path — a 2026-08-31
+ * audit finding said exactly that and proposed a conversation-keyed index maintained by the
+ * broker instead — but `dormantRuns` is hard-capped at MAX_DORMANT_RUNS and pruned on every
+ * park, so the walk is bounded by a small constant (a real install measured four entries) and
+ * costs microseconds against an MCP call measured in milliseconds. What an index would cost is
+ * the property in the paragraph above: a Map keyed by conversation cannot represent two owners
+ * claiming one conversation, so the second claim would quietly overwrite the first and this
+ * would confidently answer an identity question with a guess. It would also add invalidation
+ * duties to every park, reactivate, prune, rebind and restore path. Speed nobody can measure is
+ * not worth either. ('discards a restored history that claims a conversation another owner
+ * already holds' in test/agents.test.ts covers both lines of defence.)
  */
 function dormantAgentForConversation(
   conversationId: string | null | undefined
