@@ -2168,6 +2168,14 @@ const HANDLERS = {
         ...(typeof message.token === 'string' && message.sourceDispatch === true
           ? { token: message.token, sourceDispatch: true }
           : {}),
+        // The other end of that arming. The page proves ChatGPT never took the armed prompt —
+        // none of send()'s five acceptance signals fired — and the app ends the transaction on
+        // it. This body is rebuilt field by field, so a field missing here is dropped in
+        // silence: the page reported, the app was ready, and the continuation still sat armed
+        // for its six-hour TTL with the chat kept out of browser recovery.
+        ...(typeof message.token === 'string' && message.sourceLost === true
+          ? { token: message.token, sourceLost: true }
+          : {}),
         ...(typeof message.token === 'string' && typeof message.sourceMessageId === 'string'
           ? { token: message.token, sourceMessageId: message.sourceMessageId }
           : {}),

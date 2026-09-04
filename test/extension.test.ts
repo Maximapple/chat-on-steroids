@@ -1302,6 +1302,40 @@ describe('worker settings authority', () => {
   });
 
   /**
+   * The give-up report, which has to survive this worker to mean anything.
+   *
+   * The page can prove ChatGPT never took an armed handoff — send() watches five acceptance
+   * signals and none of them fired — and the app ends the transaction on that word alone. This
+   * handler does not forward the message it was given, it rebuilds the request body field by
+   * field, so a field nobody listed here is dropped in silence. `sourceLost` was: the page
+   * reported it, the app was ready for it, and the continuation stayed armed for its six-hour
+   * TTL exactly as before the fix, with the chat kept out of browser recovery the whole time.
+   *
+   * Measured live on 2026-09-04 against a forced send failure: the page reported, the app never
+   * received, `dispatched-unresolved` never became `aborted`. Both halves' own tests passed.
+   */
+  it('forwards the source give-up, so a handoff ChatGPT never took can be ended', async () => {
+    const posted: Record<string, unknown>[] = [];
+    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/compact' && init.method === 'POST') {
+        posted.push(JSON.parse(String(init.body || '{}')));
+        return response(200, { released: true });
+      }
+      return response(404, {});
+    });
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    await worker.registerTab(44);
+    await worker.send({ type: 'bind', conversationId: CHAT }, 44);
+    const token = '0123456789abcdef0123456789abcdef';
+
+    await worker.send({ type: 'compact', conversationId: CHAT, token, sourceLost: true }, 44);
+
+    expect(posted).toEqual([expect.objectContaining({ conversationId: CHAT, token, sourceLost: true })]);
+  });
+
+  /**
    * Which Chrome instance the replacement chat is created in.
    *
    * The user had two Chrome instances open. A chat finished in the background one, Compact &
