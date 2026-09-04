@@ -117,6 +117,20 @@ the app refuses the extension and asks you to reload the matching copy.
   Every critical or telemetry mutation triggered a full clone of dormant worker histories and
   agent state before the 300 ms write-coalescing window got a chance to collapse a burst of them
   into one write. The snapshot is now deferred to the moment a queued write actually flushes.
+- **Goal and Loop now refuse an irreversible action nobody asked for.** Nothing in the
+  meta-prompts said what to do when ChatGPT asks permission to delete, overwrite, force-push,
+  send, publish or spend — and the one answer that cannot be taken back is the one it could give
+  while the user is away. All three prompts now say it may only answer what the requirements
+  already decide, and must refuse anything irreversible they do not, pointing back at what was
+  actually asked. The Loop, which owes a message every turn and has no NO_REPLY, is told that
+  refusing is still a message. Installs that never edited their prompt migrate to the new text;
+  an edited prompt is left alone, as always.
+- **A resumed chat no longer talks like the handover brief.** After Compact & Resume the first
+  message labelled "user" in the new chat is the brief this app typed, so "write in the person's
+  own register" copied its formal tone into a chat whose owner writes in lowercase shorthand. The
+  prompts now name that message for what it is — the app's own writing, to be read for the work
+  but never for the voice — and fall back to writing plainly until the person has said something
+  themselves.
 - **A still-running workflow can no longer lose its proven owner to a full request registry.**
   The registry that binds a ChatGPT request id to its conversation is bounded, and it treated
   page sightings as the only sign an id was alive. That inverted the guarantee it exists for:
