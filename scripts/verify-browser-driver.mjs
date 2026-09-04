@@ -975,6 +975,16 @@ try {
         setTimeout(resolve, 3000);
       });
       await driver.attach(${tab.id});
+      // Make the driven tab its window's active one before minimizing. An earlier check in this
+      // suite deliberately opens a tab by clicking a target="_blank" link, and that new tab is
+      // the one the window is left showing — so without this the driven tab arrives here
+      // inactive, ensureTabActive's cheap chrome.tabs.update path runs, and Chrome restores
+      // enough of the minimized window for visibilityState to read 'visible' inside the 300 ms
+      // poll. The driver is then right to skip the escalation, and this check fails a correct
+      // product because its own precondition had quietly changed underneath it. What it exists
+      // to prove is the other case: the window is the only thing hidden, and tab activation
+      // cannot reach it.
+      await chrome.tabs.update(${tab.id}, { active: true });
       const t = await chrome.tabs.get(${tab.id});
       await chrome.windows.update(t.windowId, { state: 'minimized' });
       return JSON.stringify({ windowId: t.windowId });
@@ -990,6 +1000,14 @@ try {
         'const r = el.getBoundingClientRect(); ' +
         'return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()'
     ) ?? { x: -1, y: -1 };
+    // Read the state the escalation path actually depends on, immediately before acting, rather
+    // than inferring it from the setup. A precondition measured only at setup time is how this
+    // check came to report a false failure once already.
+    const minPre = await run(
+      `(async () => { const t = await chrome.tabs.get(${tab.id}); const w = await chrome.windows.get(t.windowId); ` +
+        `return JSON.stringify({ tabActive: t.active, windowState: w.state }); })()`
+    );
+    const minState = (() => { try { return JSON.parse(String(minPre.value ?? '{}')); } catch { return {}; } })();
     const minScroll = await run(`(async () => {
       try {
         const result = await globalThis.__driver.browserDriver.act({
@@ -999,7 +1017,12 @@ try {
       } catch (error) { return JSON.stringify({ ok: false, error: (error.code || '') + ': ' + error.message }); }
     })()`);
     const minResult = (() => { try { return JSON.parse(String(minScroll.value ?? '{}')); } catch { return {}; } })();
-    if (hiddenMinimized === 'hidden' && minResult.ok === true) {
+    if (
+      hiddenMinimized === 'hidden' &&
+      minResult.ok === true &&
+      minState.tabActive === true &&
+      minState.windowState === 'minimized'
+    ) {
       const wideAfterMin = Number(await readPage(`document.getElementById('wide').scrollLeft`));
       check('a minimized driven window escalates and correctly reports broughtToFront',
         minResult.result?.broughtToFront === true && wideAfterMin > wideBeforeMin,
@@ -1013,7 +1036,8 @@ try {
       // skipped, and not reported as a defect this fix introduced.
       console.log(
         `SKIP  a minimized driven window escalates and correctly reports broughtToFront — ` +
-          `hiddenMinimized="${hiddenMinimized}" result=${minScroll.value ?? minScroll.error}; ` +
+          `hiddenMinimized="${hiddenMinimized}" pre=${minPre.value ?? minPre.error} ` +
+          `result=${minScroll.value ?? minScroll.error}; ` +
           'only proven on real macOS Chrome so far.'
       );
     }
