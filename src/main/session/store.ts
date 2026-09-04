@@ -1139,6 +1139,70 @@ export async function readEvents(sessionId: string, options: ReadOptions = {}): 
 }
 
 /**
+ * Walks a session's journal backwards, newest line first, inside a byte budget.
+ *
+ * The one place that knows how to read part of an `events.jsonl` instead of all of it. Both
+ * bounded readers below are the same walk with a different stopping rule — a row cap for the
+ * presentation tail, a sequence checkpoint for the update cursors — so the buffer arithmetic
+ * that makes a reverse line scan correct across 64 KiB block boundaries lives here once.
+ *
+ * `done()` is asked between lines and ends the walk early. The return says why the walk
+ * stopped: `exhaustedBudget` means the budget ran out with the file neither finished nor
+ * `done()`, which is the only outcome where the caller has been handed an incomplete answer
+ * and has to decide what to do about it.
+ */
+async function scanJournalBackwards(
+  sessionId: string,
+  accept: (line: Buffer) => void,
+  options: { done: () => boolean; maxBytes: number; onDamaged: () => void }
+): Promise<{ exhaustedBudget: boolean }> {
+  const file = path.join(sessionDir(sessionId), 'events.jsonl');
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  let cursor = 0;
+  let bytes = 0;
+  try {
+    handle = await fs.open(file, 'r');
+    cursor = (await handle.stat()).size;
+    let carry = Buffer.alloc(0);
+    while (cursor > 0 && !options.done() && bytes < options.maxBytes) {
+      const wanted = Math.min(64 * 1024, cursor, options.maxBytes - bytes);
+      if (wanted <= 0) break;
+      cursor -= wanted;
+      const buffer = Buffer.allocUnsafe(wanted);
+      const { bytesRead } = await handle.read(buffer, 0, wanted, cursor);
+      const joined = Buffer.concat([buffer.subarray(0, bytesRead), carry]);
+      bytes += bytesRead;
+      const firstNewline = joined.indexOf(0x0a);
+      if (firstNewline < 0) {
+        // A corrupt/no-newline tail used to repeatedly copy the complete 8 MiB budget:
+        // 64 KiB + 128 KiB + ... . Retain only one maximum event while seeking a boundary.
+        if (joined.length > MAX_LINE_BYTES + 1) options.onDamaged();
+        carry = joined.subarray(0, Math.min(joined.length, MAX_LINE_BYTES + 1));
+        continue;
+      }
+      carry = joined.subarray(0, firstNewline);
+      const complete = joined.subarray(firstNewline + 1);
+      let endAt = complete.length;
+      for (let at = complete.length - 1; at >= 0 && !options.done(); at--) {
+        if (complete[at] !== 0x0a) continue;
+        const line = complete.subarray(at + 1, endAt);
+        if (line.length > 0) accept(line);
+        endAt = at;
+      }
+      if (!options.done() && endAt > 0) accept(complete.subarray(0, endAt));
+    }
+    if (cursor === 0 && !options.done() && carry.length > 0) accept(carry);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    // A session with no journal file yet is complete at zero rows, not truncated.
+    return { exhaustedBudget: false };
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+  return { exhaustedBudget: cursor > 0 && !options.done() };
+}
+
+/**
  * Reads only the newest matching presentation window without materialising the whole JSONL journal.
  *
  * This exists for UI/default-history tails. Full-text search, call expansion and explicit old
@@ -1198,46 +1262,13 @@ export async function readRecentEvents(
     rawTail.push(parsed);
   };
 
-  const file = path.join(sessionDir(sessionId), 'events.jsonl');
-  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
-  try {
-    handle = await fs.open(file, 'r');
-    let cursor = (await handle.stat()).size;
-    let bytes = 0;
-    let carry = Buffer.alloc(0);
-    while (cursor > 0 && rawTail.length < cap && bytes < readBudget) {
-      const wanted = Math.min(64 * 1024, cursor, readBudget - bytes);
-      if (wanted <= 0) break;
-      cursor -= wanted;
-      const buffer = Buffer.allocUnsafe(wanted);
-      const { bytesRead } = await handle.read(buffer, 0, wanted, cursor);
-      const joined = Buffer.concat([buffer.subarray(0, bytesRead), carry]);
-      bytes += bytesRead;
-      const firstNewline = joined.indexOf(0x0a);
-      if (firstNewline < 0) {
-        // A corrupt/no-newline tail used to repeatedly copy the complete 8 MiB budget:
-        // 64 KiB + 128 KiB + ... . Retain only one maximum event while seeking a boundary.
-        if (joined.length > MAX_LINE_BYTES + 1) damaged += 1;
-        carry = joined.subarray(0, Math.min(joined.length, MAX_LINE_BYTES + 1));
-        continue;
-      }
-      carry = joined.subarray(0, firstNewline);
-      const complete = joined.subarray(firstNewline + 1);
-      let endAt = complete.length;
-      for (let at = complete.length - 1; at >= 0 && rawTail.length < cap; at--) {
-        if (complete[at] !== 0x0a) continue;
-        const line = complete.subarray(at + 1, endAt);
-        if (line.length > 0) accept(line);
-        endAt = at;
-      }
-      if (rawTail.length < cap && endAt > 0) accept(complete.subarray(0, endAt));
+  await scanJournalBackwards(sessionId, accept, {
+    done: () => rawTail.length >= cap,
+    maxBytes: readBudget,
+    onDamaged: () => {
+      damaged += 1;
     }
-    if (cursor === 0 && rawTail.length < cap && carry.length > 0) accept(carry);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
+  });
 
   const candidates: SessionEvent[] = [...rawTail];
   for (const message of messages.values()) {
@@ -1249,6 +1280,105 @@ export async function readRecentEvents(
   const selected = candidates.slice(Math.max(0, candidates.length - cap));
   if (damaged > 0) logWarn(`session ${sessionId}: skipped ${damaged} unreadable recent event line(s)`);
   return chronological(selected);
+}
+
+/**
+ * Reads only what a session recorded *after* a sequence checkpoint.
+ *
+ * The session tool's update cursors poll one session over and over, and every poll wants the
+ * same narrow thing: the rows appended since the last poll said it was caught up. Answering
+ * that with `readEvents()` re-read and re-parsed the entire journal each time, so P polls of an
+ * N-event session cost O(P x N) to deliver O(P x new) worth of answer — a long-lived session
+ * being watched all day paid for its whole history on every tick. Sequence numbers only ever
+ * increase down the journal, so a backwards walk can stop at the first row at or below the
+ * checkpoint and never touch anything older.
+ *
+ * The rows are exactly the rows `readEvents()` would have returned after the same filter, and
+ * deliberately so: a canonical message still suppresses the legacy journal snapshot of itself,
+ * but the repeated pre-canonical revisions of one message are *not* collapsed the way
+ * `readRecentEvents()` collapses them. That reader builds a presentation tail, where a long
+ * answer's revisions crowding out earlier turns is a real problem. This one answers a sequence
+ * cursor, where every revision has its own seq the cursor is about to advance past — dropping
+ * them here would make a caught-up cursor mean something different than it did before.
+ *
+ * The budget is a safety valve, not a limit on the answer. If the walk runs out of bytes before
+ * it reaches the checkpoint, this falls back to the full read rather than returning a page with
+ * a silent hole in it: an update cursor that quietly skipped rows would lose recorded events
+ * for good, and no amount of saved I/O is worth that.
+ */
+export async function readEventsAfter(
+  sessionId: string,
+  afterSeq: number,
+  options: Pick<ReadOptions, 'kinds' | 'agent'> & { maxBytes?: number } = {}
+): Promise<SessionEvent[]> {
+  assertSessionId(sessionId);
+  await flushSession(sessionId);
+  const active = open.get(sessionId);
+  const needsMessages =
+    !options.kinds || options.kinds.includes('user_message') || options.kinds.includes('assistant_message');
+  const messages = needsMessages ? active?.messages ?? (await readCanonicalMessages(sessionId)) : new Map<string, MessageEvent>();
+  const canonicalKeys = new Set(messages.keys());
+  const rows: SessionEvent[] = [];
+  let damaged = 0;
+  let reachedCheckpoint = false;
+  const readBudget = Math.max(64 * 1024, Math.min(MAX_RECENT_READ_BYTES, options.maxBytes ?? MAX_RECENT_READ_BYTES));
+
+  const accept = (line: Buffer): void => {
+    if (reachedCheckpoint || line.length === 0) return;
+    if (line.length > MAX_LINE_BYTES) {
+      damaged += 1;
+      return;
+    }
+    let parsed: SessionEvent;
+    try {
+      parsed = JSON.parse(line.toString('utf8')) as SessionEvent;
+    } catch {
+      damaged += 1;
+      return;
+    }
+    if (typeof parsed?.seq !== 'number' || typeof parsed?.kind !== 'string') {
+      damaged += 1;
+      return;
+    }
+    // The stopping rule. Journal order is append order, so the first row at or below the
+    // checkpoint proves every remaining row is older than the caller asked for.
+    if (parsed.seq <= afterSeq) {
+      reachedCheckpoint = true;
+      return;
+    }
+    if (options.kinds && !options.kinds.includes(parsed.kind)) return;
+    if (options.agent && parsed.agent !== options.agent) return;
+    if (parsed.kind === 'user_message' || parsed.kind === 'assistant_message') {
+      const key = messageKey(parsed);
+      if (key && canonicalKeys.has(key)) return;
+    }
+    rows.push(parsed);
+  };
+
+  const { exhaustedBudget } = await scanJournalBackwards(sessionId, accept, {
+    done: () => reachedCheckpoint,
+    maxBytes: readBudget,
+    onDamaged: () => {
+      damaged += 1;
+    }
+  });
+  if (exhaustedBudget && !reachedCheckpoint) {
+    return (await readEvents(sessionId, { from: afterSeq + 1, kinds: options.kinds, agent: options.agent })).filter(
+      (event) => event.seq > afterSeq
+    );
+  }
+
+  for (const message of messages.values()) {
+    if (message.seq <= afterSeq) continue;
+    if (options.kinds && !options.kinds.includes(message.kind)) continue;
+    if (options.agent && message.agent !== options.agent) continue;
+    rows.push(message);
+  }
+  if (damaged > 0) logWarn(`session ${sessionId}: skipped ${damaged} unreadable event line(s) after #${afterSeq}`);
+  // Sequence order, not presentation chronology: this answers a sequence cursor, and its
+  // callers re-derive whatever ordering they present from the page they get back.
+  rows.sort((left, right) => left.seq - right.seq);
+  return rows;
 }
 
 /**
