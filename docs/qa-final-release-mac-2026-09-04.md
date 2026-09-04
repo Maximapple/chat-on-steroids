@@ -50,6 +50,21 @@ make that a log read rather than a session:
    exactly this way, losing both token and flag and leaving the app to answer from its
    start-compaction branch, which is precisely what you measured.
 
+   Both halves of this were verified live on Windows against real Chrome before it shipped, not
+   only in the harness: the extension was loaded over the CDP pipe, driven to chatgpt.com, and
+   the app logged
+
+       bridge: browser extension 2.0.5 connected (build 174e00e33b5b)
+
+   against a `shasum` of the same file reading `174e00e33b5b`. So a mismatch on your machine is
+   evidence about your machine, not about the mechanism.
+
+   One trap worth knowing, because it cost a false negative here first: the app holds a
+   single-instance lock, so a `npm run dev` started while an older app is still running exits
+   immediately and leaves the *old* build serving port 8765 — which logs no digest at all and
+   looks exactly like the feature not working. If the connect line has no `(build …)` on it,
+   check for a stale instance before concluding anything.
+
 **The run.** Install, confirm the build digest matches, force a send failure, read the log.
 Report the two key lists verbatim. If the digest does *not* match, that is the finding — say so
 and stop; the fix is a packaging or load-path question, not a code one.
