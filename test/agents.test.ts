@@ -88,13 +88,13 @@ const {
   workerRevivalClaimed
 } = await import('../src/main/agents.js');
 const { startMcpServer } = await import('../src/main/mcp/server.js');
-const { runningToolCalls } = await import('../src/main/mcp/call-context.js');
+const { emptyEvidence, runInCallContext, runningToolCalls } = await import('../src/main/mcp/call-context.js');
 const { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } = await import('../src/main/durable.js');
 const { findSessionByConversation, initSessionStore, readRecentEvents, resetSessionStoreForTests } = await import(
   '../src/main/session/store.js'
 );
 const { recordChatObservations, resetRecorderForTests } = await import('../src/main/session/recorder.js');
-const { resetWorkspaces, setWorkspaceFor, workspaceForChat } = await import('../src/main/workspace.js');
+const { resetWorkspaces, setCurrentWorkspace, setWorkspaceFor, workspaceForChat } = await import('../src/main/workspace.js');
 const { DEFAULT_CAPABILITIES } = await import('../src/shared/types.js');
 const { makeTempDir, removeTempDir } = await import('./helpers.js');
 
@@ -458,10 +458,23 @@ describe('at-least-once delivery', () => {
     startSwarm(1);
     const worker = startWorker('worker-1');
 
-    // Spawn mirrored project A into `agent:prime`. During the live run the prime is resolved
-    // under that agent identity, so an explicit absolute-path call now moves only that key to B.
-    setWorkspaceFor('agent:prime', { virtual: '/root/project-b', real: 'C:\\root\\project-b' });
-    expect(workspaceForChat(PRIME_CHAT)?.virtual).toBe('/root/project-a');
+    // The prime moves to project B mid-run, through a real call context rather than by poking a
+    // key: `agent` is `prime` and the conversation is proven, which is the only shape a prime's
+    // call can have — every path that sets agent=prime resolves the conversation first. The
+    // point of the assertion below is that such a call writes the conversation key, so there is
+    // no second prime identity for the run's end to collapse back.
+    runInCallContext(
+      {
+        startedAt: Date.now(),
+        transportKey: null,
+        agent: PRIME_ID,
+        caller: { transportKey: null, secret: null, requestId: null, conversationId: PRIME_CHAT },
+        outcome: null,
+        evidence: emptyEvidence()
+      } as never,
+      () => setCurrentWorkspace({ virtual: '/root/project-b', real: 'C:\\root\\project-b' })
+    );
+    expect(workspaceForChat(PRIME_CHAT)?.virtual).toBe('/root/project-b');
 
     fillContext('c-worker-1');
     finishAgent(worker.caller, 'done');
@@ -469,8 +482,8 @@ describe('at-least-once delivery', () => {
     expect(acknowledgeOffers(PRIME_ID)).toHaveLength(1);
     expect(releaseQuiescentRun()).toBe(true);
 
-    // After endRun the kernel stops assigning `agent:prime`; the conversation key therefore
-    // has to carry forward the newest workspace rather than reviving the pre-swarm project.
+    // Still project B after the run ends: the move was never held anywhere it had to be
+    // rescued from, so nothing here can revive the pre-swarm project.
     expect(workspaceForChat(PRIME_CHAT)?.virtual).toBe('/root/project-b');
   });
 

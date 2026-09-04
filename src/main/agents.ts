@@ -86,7 +86,7 @@ import { randomUUID } from 'node:crypto';
 import type { AgentInfo, AgentMessage, AgentState, SwarmState } from '../shared/session.js';
 import { getConfig } from './config.js';
 import { logInfo, logWarn } from './logger.js';
-import { inheritWorkspace, releasePrimeWorkspace } from './workspace.js';
+import { inheritWorkspace } from './workspace.js';
 
 export const PRIME_ID = 'prime';
 
@@ -982,10 +982,6 @@ function primeAgent(): Agent {
  */
 function endRun(reason: string): void {
   if (!run) return;
-  // The prime's tool calls switch from `agent:prime` back to its conversation identity the
-  // instant this run disappears. Collapse that temporary workspace identity first so the next
-  // relative path cannot revive the project the chat was using before it spawned workers.
-  releasePrimeWorkspace(run.primeConversationId);
   const retired: RetiredChat[] = [...run.agents.values()]
     // Keep the conversation fence after the active-run tombstone disappears. A terminal
     // worker is still a worker chat: `finish` stops its broker role, not the ChatGPT turn or
@@ -1017,7 +1013,6 @@ function endRun(reason: string): void {
 function parkRun(reason: string): boolean {
   if (!run || workingWorkers().length > 0) return false;
   const current = run;
-  releasePrimeWorkspace(current.primeConversationId);
   dormantRuns.set(current.primeConversationId, {
     primeConversationId: current.primeConversationId,
     startedAt: current.startedAt,
@@ -1160,7 +1155,6 @@ function settleSpawnStage(stage: SpawnStageState, accepted: boolean): void {
       run = null;
     } else if (stage.resumedDormant) {
       const current = run;
-      releasePrimeWorkspace(current.primeConversationId);
       dormantRuns.set(stage.resumedDormant.primeConversationId, {
         ...stage.resumedDormant,
         agents: current.agents,
