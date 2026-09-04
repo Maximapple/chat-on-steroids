@@ -1472,6 +1472,43 @@ describe('worker settings authority', () => {
   });
 
   /**
+   * The connect line is the one that has to be conclusive, so discovery waits for the digest.
+   *
+   * An MV3 worker re-runs its module on every wake and reaches the app almost immediately after,
+   * so a connect racing its own hash was not a rare edge: macOS measured three consecutive
+   * `(build unreported)` connects across half an hour on a perfectly current worker. Unreported
+   * then means "stale pre-feature worker *or* one that woke a moment ago", which is precisely the
+   * ambiguity the digest was added to remove — the diagnostic silently failing in the only
+   * direction anyone consults it for.
+   *
+   * Ordinary requests still take whatever is ready and send no header if that is nothing; only
+   * `hello()` waits, because it is already asynchronous and runs once per discovery. This asserts
+   * the very first request a cold worker makes carries the digest — the exact case that failed.
+   */
+  it('stamps the discovery request even when the worker has only just woken', async () => {
+    const seen: Array<Record<string, string>> = [];
+    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
+      seen.push((init.headers ?? {}) as Record<string, string>);
+      return new URL(input).pathname === '/hello'
+        ? response(200, { app: 'chat-on-steroids', paired: true })
+        : response(200, { ok: true });
+    });
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    // Nothing is awaited between construction and the first call: this is the cold worker.
+    await worker.registerTab(44);
+    await worker.send({ type: 'compact', conversationId: CHAT, ticket: true }, 44);
+
+    const source = await fs.readFile(path.join(process.cwd(), 'extension', 'background.js'));
+    const digest = createHash('sha256').update(source).digest('hex').slice(0, 12);
+
+    expect(seen.length, 'the worker made no request at all').toBeGreaterThan(0);
+    expect(
+      seen[0]?.['x-extension-build'],
+      'the first request of a cold worker went out unstamped, so the connect line cannot identify it'
+    ).toBe(digest);
+  });
+
+  /**
    * The invariant both silent drops actually broke: the page can send a checkpoint this worker
    * has no route for, and nothing anywhere says so.
    *
