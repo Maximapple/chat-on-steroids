@@ -368,6 +368,11 @@ async function harness(
  * back the brief the watched generation produced, and withdrawing an abandoned one. Only the
  * first is a compaction being started, so counting the raw messages counts a page that did
  * its job twice.
+ *
+ * The exclusions are a list rather than a positive test for "opening", so every new checkpoint
+ * on this route has to be added here or it silently reads as a second start. `sourceLost` and
+ * `destinationLost` are the give-ups: the page telling the app ChatGPT took nothing, which is
+ * the opposite of starting anything.
  */
 const startedCompactions = (harness: Harness): any[] =>
   harness.sent.filter(
@@ -378,9 +383,11 @@ const startedCompactions = (harness: Harness): any[] =>
       !message.summary &&
       !message.sourceAttempt &&
       !message.sourceDispatch &&
+      !message.sourceLost &&
       !message.sourceMessageId &&
       !message.destinationAttempt &&
       !message.destinationDispatch &&
+      !message.destinationLost &&
       !message.destinationMessageId
   );
 
@@ -9030,7 +9037,12 @@ describe('the Compact & resume control', () => {
     await settle();
     const compacts = live.sent.filter((message) => message.type === 'compact');
     expect(startedCompactions(live)).toHaveLength(1);
-    expect(compacts.at(-1)).toMatchObject({ cancel: true });
+    // The cancel happened, and by position among the presses rather than by being the last
+    // message on the wire: this harness never simulates ChatGPT accepting the first send, so the
+    // page also reports that give-up, and that report is deliberately fire-and-forget (as the
+    // destination half's has always been) and can land either side of the cancel. What this test
+    // is about is that the second press cancelled instead of starting a second compaction.
+    expect(compacts.some((message) => message.cancel === true)).toBe(true);
     expect(live.window.sessionStorage.getItem('clf-compact-capture')).toBeNull();
   });
 
@@ -9109,6 +9121,62 @@ describe('the Compact & resume control', () => {
     await settle();
 
     expect(order).toEqual(['claim', 'arm', 'send']);
+  });
+
+  /**
+   * The armed click that ChatGPT did not take, reported instead of left sitting.
+   *
+   * `dispatched-unresolved` is written before the click and is deliberately never replayed, so
+   * for a long time the page's only answer to a failed send was a local error asking the user to
+   * cancel by hand. A 2026-09-04 QA run measured what that costs unattended: the ticket sat
+   * armed against its six-hour TTL while three phase pickups fired and expired, and because the
+   * chat stayed in the app's pending-automatic set it lost browser recovery for the whole window
+   * too. The destination half had reported exactly this since 2026-09-02; only the source half
+   * stayed quiet.
+   *
+   * `send()` is not a bare timeout — it watches the composer clearing, a new conversation id,
+   * generation starting, the Stop control appearing and a matching rendered user message — and
+   * this harness deliberately simulates none of them, which is the same evidence the live page
+   * has when nothing was taken. What must *not* happen is a second submit: the report ends the
+   * transaction, it does not re-offer the prompt.
+   */
+  it('tells the app when ChatGPT took nothing, rather than leaving the click armed', async () => {
+    live = await harness(undefined, {
+      activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null } }),
+      compact: (message) => {
+        if (message.sourceAttempt) return { ok: true, data: { allowed: true } };
+        if (message.sourceDispatch) return { ok: true, data: { armed: true } };
+        if (message.sourceLost) return { ok: true, data: { released: true } };
+        return {
+          ok: true,
+          data: {
+            started: true,
+            token: 'tok-lost',
+            prompt: 'write the brief and call save_handoff',
+            job: { sessionId: 's1', stage: 'handoff-pending', busy: true, handoffId: null, error: null }
+          }
+        };
+      }
+    });
+    live.hook.injectControl();
+    // Nothing wires acceptance to the click here, so send() gets none of its five signals.
+    const sends = watchSend(live.document);
+
+    await live.hook.startCompact();
+    await settle();
+
+    // It did click once — the arming fence is upstream of this and is not what is under test.
+    expect(sends()).toBe(1);
+    expect(live.sent).toContainEqual(expect.objectContaining({
+      type: 'compact',
+      token: 'tok-lost',
+      sourceLost: true
+    }));
+    // And exactly once: a give-up that repeats would be its own kind of noise.
+    expect(live.sent.filter((message) => message.type === 'compact' && message.sourceLost === true)).toHaveLength(1);
+    // Never a second submit. This is the whole reason the report ends the transaction rather
+    // than handing the prompt back to a page.
+    expect(sends()).toBe(1);
   });
 
   it('re-presses a handoff left holding the claim, and never one that armed the click', async () => {

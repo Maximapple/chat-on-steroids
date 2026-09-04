@@ -8451,7 +8451,15 @@
         nativeBusy = false;
         nativePhase = 'waiting';
         pressedAt = 0;
-        localError = 'The send result was ambiguous. Nothing will be sent twice; cancel explicitly if ChatGPT never accepted it.';
+        // Tell the app, the way the destination half already tells it. send() does not merely
+        // time out: it watches the composer clearing, a new conversation id, generation
+        // starting, the Stop control appearing and a matching rendered user message, and this
+        // flow stopped and settled the turn before typing, so a landed click would have flipped
+        // one of them at once. Left unreported, this exact state sat armed for the six-hour TTL
+        // with no pickup able to re-ask — and kept the chat out of browser recovery the whole
+        // time. The app ends the transaction; nothing is re-sent, here or anywhere.
+        void ask({ type: 'compact', conversationId: forId, token, sourceLost: true }).catch(() => undefined);
+        localError = 'ChatGPT did not take the handoff instruction. Nothing was sent twice, and this attempt has been given up; compaction will be offered again.';
         renderControl();
         return;
       }
