@@ -29,8 +29,10 @@ import { SURFACE_LIST, surfaceDefinition, type SurfaceId } from '../src/main/mcp
 import {
   appendEvent,
   createSession,
+  flushSessions,
   initSessionStore,
   rebindSession,
+  sessionsRoot,
   upsertMessageEvent,
   writeOverflowText
 } from '../src/main/session/store.js';
@@ -1227,6 +1229,77 @@ describe('capability gating', () => {
     expect(searchText).toContain('matches: tools 1');
     expect(searchText).toMatch(/read_cursor: [A-Za-z0-9_-]+/);
     expect(searchText.length).toBeLessThanOrEqual(12_000);
+  });
+
+  it('polls an update cursor without re-reading the whole recording each time', async () => {
+    // Finding 5 from the 2026-08-31 audit: every cursor path read the entire journal, so P polls
+    // of an N-event session cost O(P x N). Watching one long session was the case that hurt —
+    // the poll that finds nothing new used to be the most expensive thing the tool did.
+    ctx.sessionTools = true;
+    const recorded = await createSession({ title: 'long-running watched session', conversationId: null });
+    const bulk = 'z'.repeat(4_000);
+    for (let index = 0; index < 300; index++) {
+      await appendEvent(recorded.id, {
+        time: 9_000 + index,
+        source: 'app',
+        kind: 'note',
+        message: { text: `${bulk} ${index}`, truncated: false, chars: bulk.length }
+      });
+    }
+    await flushSessions();
+    const journal = path.join(sessionsRoot(), recorded.id, 'events.jsonl');
+    const journalBytes = (await fs.stat(journal)).size;
+    expect(journalBytes).toBeGreaterThan(1_000_000);
+
+    const first = await core('tools/call', {
+      name: 'session',
+      arguments: { action: 'read', session_id: recorded.id, include: ['tools'] }
+    });
+    const cursor = /update_cursor: ([A-Za-z0-9_-]+)/.exec(textOf(first))?.[1];
+    expect(cursor, textOf(first)).toBeTruthy();
+
+    let journalBytesRead = 0;
+    const realReadFile = fs.readFile.bind(fs);
+    const realOpen = fs.open.bind(fs);
+    const readFile = vi.spyOn(fs, 'readFile').mockImplementation((async (target: string, ...rest: unknown[]) => {
+      const out = await (realReadFile as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+      if (String(target) === journal) journalBytesRead += Buffer.byteLength(out as string);
+      return out;
+    }) as never);
+    const open = vi.spyOn(fs, 'open').mockImplementation((async (target: string, ...rest: unknown[]) => {
+      const handle = (await (realOpen as (...args: unknown[]) => Promise<unknown>)(target, ...rest)) as {
+        read: (...args: unknown[]) => Promise<{ bytesRead: number }>;
+      };
+      if (String(target) !== journal) return handle;
+      const realRead = handle.read.bind(handle);
+      handle.read = async (...args: unknown[]) => {
+        const result = await realRead(...args);
+        journalBytesRead += result.bytesRead;
+        return result;
+      };
+      return handle;
+    }) as never);
+
+    try {
+      for (let poll = 0; poll < 5; poll++) {
+        const caughtUp = await core('tools/call', {
+          name: 'session',
+          arguments: { action: 'read', session_id: recorded.id, cursor }
+        });
+        expect(failed(caughtUp), textOf(caughtUp)).toBe(false);
+        expect(textOf(caughtUp)).toContain('caught_up: true');
+      }
+    } finally {
+      readFile.mockRestore();
+      open.mockRestore();
+    }
+
+    // Five polls that each found nothing. Before the bounded walk this measured 6,163,910 bytes
+    // — the 1.2 MB journal read once per poll, exactly the O(P x N) the finding described. It now
+    // measures 327,680: one 64 KiB block per poll, independent of how long the recording is. The
+    // bound is deliberately "five polls together cost less than one full read", which is the
+    // claim itself rather than a number that has to be re-tuned whenever the block size moves.
+    expect(journalBytesRead).toBeLessThan(journalBytes);
   });
 
   it('reads exact user and assistant prose, filters headlines, and expands a short session-local tool ref', async () => {

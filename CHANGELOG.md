@@ -117,6 +117,16 @@ the app refuses the extension and asks you to reload the matching copy.
   Every critical or telemetry mutation triggered a full clone of dormant worker histories and
   agent state before the 300 ms write-coalescing window got a chance to collapse a burst of them
   into one write. The snapshot is now deferred to the moment a queued write actually flushes.
+- **Watching a long recording no longer costs its whole history on every poll.** The session
+  tool's update cursor answers one question — what was recorded since the last checkpoint — but
+  it read and re-parsed the entire journal to do it, so P polls of an N-event recording cost
+  O(P x N) and the poll that found nothing new was the most expensive thing the tool did. A new
+  bounded reader walks the journal backwards from the end and stops at the checkpoint, reading a
+  single block instead of the whole file: five consecutive no-op polls of a 1.2 MB recording went
+  from 6,163,910 bytes read to 327,680, and that cost no longer grows with the recording. If the
+  checkpoint is further back than the read budget can reach, it falls back to the full read
+  rather than return a page with a hole in it — an update cursor that skipped rows would lose
+  recorded history for good.
 - **A pending Goal reply obligation was silently forgotten across a Compact & Resume handover.**
   The chat that produced it is retired the instant its own replacement takes over, so an owed
   Goal decision from just before a handoff was neither collected nor really lost in a way that

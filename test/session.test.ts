@@ -42,6 +42,7 @@ import {
   pruneSessions,
   readAsset,
   readEvents,
+  readEventsAfter,
   readRecentEvents,
   readHandoff,
   rebindSession,
@@ -209,6 +210,130 @@ describe('session store', () => {
     expect(recent).toHaveLength(2);
     expect(recent.map((event) => event.kind)).toEqual(['user_message', 'assistant_message']);
     expect(recent[1]?.kind === 'assistant_message' ? recent[1].message.text : '').toBe('answer revision 7');
+  });
+
+  it('answers a sequence checkpoint with exactly what a full read would have left after it', async () => {
+    const summary = await createSession({ title: 'ranged update equivalence' });
+    for (let index = 0; index < 20; index++) {
+      await appendEvent(summary.id, {
+        time: 5_000 + index,
+        source: 'app',
+        kind: 'note',
+        message: { text: `row ${index}`, truncated: false, chars: 5 }
+      });
+    }
+    // Pre-canonical history: one stable ChatGPT message appended once per streaming revision.
+    // Each revision owns a seq an update cursor advances past, so this reader must hand back
+    // every one of them — unlike the presentation tail, which collapses them into one row.
+    for (let index = 0; index < 4; index++) {
+      await appendEvent(summary.id, {
+        time: 5_100 + index,
+        source: 'extension',
+        kind: 'assistant_message',
+        messageId: 'legacy-answer-1',
+        message: { text: `answer revision ${index}`, truncated: false, chars: 17 },
+        final: index === 3
+      } as never);
+    }
+    await flushSessions();
+
+    const all = await readEvents(summary.id);
+    const bySeq = (events: readonly { seq: number }[]): number[] => events.map((event) => event.seq).sort((a, b) => a - b);
+    for (const checkpoint of [0, 1, 17, all.length - 1, all.length]) {
+      const expected = bySeq(all.filter((event) => event.seq > checkpoint));
+      const ranged = await readEventsAfter(summary.id, checkpoint);
+      expect(bySeq(ranged), `checkpoint ${checkpoint}`).toEqual(expected);
+      // A sequence cursor's page is in sequence order, so a caller can advance past its last row.
+      expect(ranged.map((event) => event.seq), `checkpoint ${checkpoint} order`).toEqual(bySeq(ranged));
+    }
+    expect(all.filter((event) => event.kind === 'assistant_message')).toHaveLength(4);
+  });
+
+  it('stops at the checkpoint instead of walking the whole journal behind it', async () => {
+    // The finding this guards: an update cursor used to re-read and re-parse every byte of the
+    // journal on every poll, so P polls of an N-event session cost O(P x N). Returned sequence
+    // numbers cannot tell the two implementations apart — a full read then filtered gives
+    // exactly the same rows — so this measures the bytes actually taken off disk instead.
+    const summary = await createSession({ title: 'ranged update boundedness' });
+    const bulk = 'x'.repeat(4_000);
+    for (let index = 0; index < 300; index++) {
+      await appendEvent(summary.id, {
+        time: 6_000 + index,
+        source: 'app',
+        kind: 'note',
+        message: { text: `${bulk} ${index}`, truncated: false, chars: bulk.length }
+      });
+    }
+    await flushSessions();
+    const journal = path.join(sessionsRoot(), summary.id, 'events.jsonl');
+    const journalBytes = (await fs.stat(journal)).size;
+    expect(journalBytes).toBeGreaterThan(1_000_000);
+
+    const checkpoint = (await readEvents(summary.id)).length;
+    for (let index = 0; index < 3; index++) {
+      await appendEvent(summary.id, {
+        time: 7_000 + index,
+        source: 'app',
+        kind: 'note',
+        message: { text: `after ${index}`, truncated: false, chars: 7 }
+      });
+    }
+    await flushSessions();
+
+    let journalBytesRead = 0;
+    const realReadFile = fs.readFile.bind(fs);
+    const realOpen = fs.open.bind(fs);
+    const readFile = vi.spyOn(fs, 'readFile').mockImplementation((async (target: string, ...rest: unknown[]) => {
+      const out = await (realReadFile as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+      if (String(target) === journal) journalBytesRead += Buffer.byteLength(out as string);
+      return out;
+    }) as never);
+    const open = vi.spyOn(fs, 'open').mockImplementation((async (target: string, ...rest: unknown[]) => {
+      const handle = (await (realOpen as (...args: unknown[]) => Promise<unknown>)(target, ...rest)) as {
+        read: (...args: unknown[]) => Promise<{ bytesRead: number }>;
+      };
+      if (String(target) !== journal) return handle;
+      const realRead = handle.read.bind(handle);
+      handle.read = async (...args: unknown[]) => {
+        const result = await realRead(...args);
+        journalBytesRead += result.bytesRead;
+        return result;
+      };
+      return handle;
+    }) as never);
+
+    try {
+      const page = await readEventsAfter(summary.id, checkpoint, { maxBytes: 64 * 1024 });
+      expect(page.map((event) => event.seq)).toEqual([checkpoint + 1, checkpoint + 2, checkpoint + 3]);
+    } finally {
+      readFile.mockRestore();
+      open.mockRestore();
+    }
+
+    // Three short rows off the end of a 1 MB journal. A full read would have moved all of it.
+    expect(journalBytesRead).toBeGreaterThan(0);
+    expect(journalBytesRead).toBeLessThan(journalBytes / 4);
+  });
+
+  it('falls back to the full read rather than hand back a page with a hole in it', async () => {
+    // The budget is a safety valve, not a cap on the answer. A checkpoint further back than the
+    // budget can reach must still return every row after it: an update cursor that silently
+    // skipped rows would lose recorded events permanently.
+    const summary = await createSession({ title: 'ranged update fallback' });
+    const bulk = 'y'.repeat(4_000);
+    for (let index = 0; index < 300; index++) {
+      await appendEvent(summary.id, {
+        time: 8_000 + index,
+        source: 'app',
+        kind: 'note',
+        message: { text: `${bulk} ${index}`, truncated: false, chars: bulk.length }
+      });
+    }
+    await flushSessions();
+
+    const all = await readEvents(summary.id);
+    const page = await readEventsAfter(summary.id, 1, { maxBytes: 64 * 1024 });
+    expect(page.map((event) => event.seq)).toEqual(all.filter((event) => event.seq > 1).map((event) => event.seq));
   });
 
   it('negative-caches unknown current conversation lookups until that exact attachment can be created', async () => {
