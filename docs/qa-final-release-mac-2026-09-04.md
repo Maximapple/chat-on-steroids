@@ -65,6 +65,15 @@ make that a log read rather than a session:
    looks exactly like the feature not working. If the connect line has no `(build …)` on it,
    check for a stale instance before concluding anything.
 
+   **Do not try to identify the worker by reading its variables.** An earlier version of this
+   brief said to evaluate `COMPACT_CHECKPOINT_FLAGS` in the service worker console and treat
+   `undefined` as proof of a stale worker. That instruction was wrong and would have produced a
+   confident false positive: `background.js` is an ES module, so none of its top-level bindings
+   reach `globalThis`, and the name is `undefined` on a perfectly current worker. Measured over
+   CDP against the real extension — `1+1` evaluates to `2` and `typeof chrome` is `"object"` in
+   the same session where `typeof COMPACT_CHECKPOINT_FLAGS` is `"undefined"`. The digest above
+   is the mechanism precisely because it does not depend on scope.
+
 **The run.** Install, confirm the build digest matches, force a send failure, read the log.
 Report the two key lists verbatim. If the digest does *not* match, that is the finding — say so
 and stop; the fix is a packaging or load-path question, not a code one.
