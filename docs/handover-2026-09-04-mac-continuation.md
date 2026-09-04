@@ -9,6 +9,38 @@ typecheck and full vitest suite (2,318 tests) green.
 **Do not re-derive this from git log.** This doc exists so the next session doesn't have to
 re-read a week of history to know what's real, what's fixed, and what's actually still open.
 
+## Status — everything below was completed in the Mac session that followed
+
+Read this section first; the rest of the document is kept as the reasoning that led here, not as
+a to-do list. Nothing in "Open work" below is still open.
+
+- **Test 13 (blocked chats + Goal/Loop fencing): done, passed.** Run against the installed
+  `2.0.3+215e97e` build — the DMG was from `215e97e`, not `f8dccb6` as guessed below, and a diff
+  proved no Test-13-relevant code changed between it and `c39ceb9`. Driven through CDP against
+  the real Block button plus the loopback bridge rather than AX, which is where the earlier
+  attempt stalled. UI treatment, durable state, all six fences, the exact-identity MCP refusal,
+  restart durability and release all verified; a synthetic conversation was used so no real chat
+  was blocked.
+- **Findings 1, 5, 7 and 8: all closed.** 5 and 8 fixed; 1 fixed in the half that mattered
+  (eviction followed page sightings, so the still-running workflow the contract exists for was
+  the first to be discarded — a lookup now counts as liveness); 7 measured and deliberately not
+  implemented, because `MAX_DORMANT_RUNS` already bounds the scan at 16 and the proposed index
+  cannot represent the two-owner conflict the function exists to refuse. Each has its reasoning
+  in its own commit message and, where it belongs, in the source.
+- **Both product decisions: decided by the user and shipped.** Goal/Loop now refuse irreversible
+  actions the requirements never asked for, and the prompts name the handover brief as
+  app-authored so a resumed chat stops copying its formal register. Migrated through the
+  superseded-prompt lists.
+- **Three further defects found and fixed along the way**, none of them on any list: the git
+  hooks' node lookup still could not find this machine's node; the `verify:browser`
+  minimized-window check failed a correct driver because an earlier check left a different tab
+  active; and deleting a session left its Compact & Resume open forever, which permanently
+  removed browser recovery from a live chat.
+- **Item 4 (orphaned legacy state files) does not apply on macOS** — this machine's state
+  directory has none of them. It was a Windows-only artefact.
+- Gates at the tip: `npm run verify:ci` green, `npm run verify:browser` 47/47, full suite 2257
+  passing.
+
 ## Do you need to reinstall?
 
 - **Continuing backend bug fixing** (anything below except Test 13): no. `git pull`, `npm
@@ -47,7 +79,7 @@ re-read a week of history to know what's real, what's fixed, and what's actually
    left four deliberately open (below). Full detail in commits `d5dd34b`, `a52678a`, `26f625b`,
    `3aa1afe`, `5081d11`, `8f02e91`.
 
-## Open work, in priority order
+## Open work, in priority order (all closed — kept for the reasoning)
 
 ### 1. Test 13 on Mac (blocked-chats + goal fencing) — the actual next task
 
