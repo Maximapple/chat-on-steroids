@@ -993,12 +993,21 @@ private var nextSnapshotID = 1
 private var snapshots: [Int: UISnapshot] = [:]
 private var snapshotOrder: [Int] = []
 
+/// One helper serves every chat, so this cap is shared across a whole swarm: with sixteen,
+/// thirteen workers taking turns evicted each other's newest snapshot before its owner could
+/// act on a ref from it — forty `STALE_UI_SNAPSHOT` refusals in one run on 2026-09-01. The
+/// Windows helper was raised to 96 for that measured failure the same day; this side kept the
+/// sixteen that was measured as broken, which is a difference in the number and not in the
+/// reasoning. A snapshot holds AX element handles, not screenshots, so keeping a few per
+/// worker is cheap.
+private let maxUISnapshots = 96
+
 private func rememberSnapshot(window: CGWindowID, windowBounds: CGRect, elements: [String: AXUIElement]) -> Int {
     let id = nextSnapshotID
     nextSnapshotID += 1
     snapshots[id] = UISnapshot(window: window, windowBounds: windowBounds, elements: elements)
     snapshotOrder.append(id)
-    while snapshotOrder.count > 16 {
+    while snapshotOrder.count > maxUISnapshots {
         let removed = snapshotOrder.removeFirst()
         snapshots.removeValue(forKey: removed)
     }
@@ -1577,7 +1586,20 @@ private func resolveKey(_ name: String, in snapshot: KeyboardLayoutSnapshot?) th
         }
         return resolved
     }
-    guard let code = keyCodes[name] else { throw fail("BAD_KEY", "unknown key \(name)") }
+    // Name what is accepted, not just what was refused. The Windows helper's own BAD_KEY has
+    // said this since 2026-09-04; a QA run met the terser macOS wording and had nothing to
+    // correct itself from, which is the whole job of this refusal. The list is written from
+    // `keyCodes` and `normalizedKeyName` above rather than copied from Windows: this helper
+    // takes the macOS modifier names, and forwarddelete/help/volume keys are its own.
+    guard let code = keyCodes[name] else {
+        throw fail(
+            "BAD_KEY",
+            "unknown key \(name). Use one character, or a key name: return, enter, tab, space, "
+                + "escape, backspace, delete, forwarddelete, home, end, pageup, pagedown, up, down, "
+                + "left, right, f1-f20, help, volumeup, volumedown, mute, capslock, or a modifier "
+                + "command, option, control, shift"
+        )
+    }
     return ResolvedKey(code: code, requiredFlags: [])
 }
 

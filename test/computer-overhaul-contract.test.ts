@@ -116,12 +116,38 @@ describe('desktop helper overhaul contract', () => {
     expect(swift).toContain('case "arrowup": return "up"');
     expect(swift).toContain('case "arrowdown": return "down"');
     expect(swift).toContain('case "cmd", "meta", "super", "win": return "command"');
+    // Both helpers name what is accepted, not only what was refused: a 2026-09-04 QA run met
+    // the macOS side's terser "unknown key <name>" and had nothing to correct itself from,
+    // while the Windows side had listed valid names since that morning. Asserted per platform
+    // because the two key vocabularies genuinely differ - macOS has no win/printscreen, and
+    // Windows has no forwarddelete/volume keys - so a shared literal would be wrong on both.
+    expect(swift).toContain('Use one character, or a key name: return, enter, tab, space,');
+    expect(swift).toContain('command, option, control, shift');
 
     const kernel = readFileSync(path.join(process.cwd(), 'src/main/mcp/kernel.ts'), 'utf8');
     expect(kernel).toContain("z.enum(['left', 'right', 'middle', 'wheel', 'back', 'forward'])");
     // Both native layers already routed wheel to the middle button; only the schema refused.
     expect(HELPER_SCRIPT).toContain('case "middle": case "wheel":');
     expect(swift).toContain('case "middle", "wheel": return .center');
+  });
+
+  /**
+   * One helper serves a whole swarm, so its snapshot cap is shared across every chat using it.
+   *
+   * Sixteen was measured as too few on 2026-09-01: thirteen workers taking turns evicted each
+   * other's newest snapshot before its owner could act on a ref from it, forty STALE_UI_SNAPSHOT
+   * refusals in one run. Windows was raised to 96 that day; macOS kept the sixteen that had just
+   * been measured as broken, and a 2026-09-04 QA round on macOS was what surfaced the gap. The
+   * number is asserted on both sides because the failure it prevents is a property of the shared
+   * helper, not of either platform's UI layer.
+   */
+  it('retains the same number of UI snapshots on both platforms', () => {
+    const swift = readFileSync(path.join(process.cwd(), 'native/macos-desktop-helper/main.swift'), 'utf8');
+    expect(HELPER_SCRIPT).toContain('$script:MaxUiSnapshots = 96');
+    expect(swift).toContain('private let maxUISnapshots = 96');
+    // Read through the named constant on both sides, so raising one cannot leave a literal behind.
+    expect(HELPER_SCRIPT).toContain('$script:UiSnapshots.Count -gt $script:MaxUiSnapshots');
+    expect(swift).toContain('while snapshotOrder.count > maxUISnapshots');
   });
 
   /** And the same guarantee on the macOS side, where the capture API does it for us. */

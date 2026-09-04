@@ -869,7 +869,7 @@ function uiTarget(ref: string): { window: number; runtimeKey: string; snapshotId
   const target = uiRefs.get(ref);
   if (!target) {
     throw new ComputerError(
-      `UNKNOWN_UI_REF: ${ref}. Call get_window_state or find_ui again and use a ref from that reply.`
+      `UNKNOWN_UI_REF: ${ref}. Call observe on the window again and use a ref from that reply.`
     );
   }
   const helperAlive = useMacOSDesktopAddon()
@@ -877,7 +877,7 @@ function uiTarget(ref: string): { window: number; runtimeKey: string; snapshotId
     : helperRuntime !== null && helperRuntime.child.exitCode === null;
   if (!helperAlive || target.generation !== helperGeneration) {
     throw new ComputerError(
-      `STALE_REF: ${ref} was issued by a desktop helper that is no longer active, so it no longer identifies anything. Call get_window_state again and use a ref from that reply.`
+      `STALE_REF: ${ref} was issued by a desktop helper that is no longer active, so it no longer identifies anything. Call observe on the window again and use a ref from that reply.`
     );
   }
   return target;
@@ -1553,7 +1553,7 @@ async function actLocked(
   // immediately before input, so retaining it does not turn old pixels into blind clicks.
   if (needsFrame && !requestedFrame) {
     throw new ComputerError(
-      `STALE_FRAME: frame ${opts.frameId} is no longer retained. Take a screenshot or call get_window_state again and point at the new frame.`
+      `STALE_FRAME: frame ${opts.frameId} is no longer retained. Call observe again and point at the frameId from that reply's screenshot.`
     );
   }
   const frame =
