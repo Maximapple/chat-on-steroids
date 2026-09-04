@@ -13,7 +13,37 @@ the full suite green before every commit, no Claude attribution.
 artifact from the newest green *Release candidate* run rather than dev mode: this is the final
 pass, and it should measure the thing that ships.
 
-## Part 1 — the open defect, now instrumented
+## Part 1 — the open defect, answered on Windows; confirm it on yours
+
+**Run this first — it is now one command.**
+
+    npm run verify:compact-chain
+
+It launches its own Chrome, loads `extension/` unpacked, and drives all seven compact
+checkpoints from inside the content script's own isolated world, through the real service worker,
+to the real app. That is the join no unit test can see and the one no session had reached: the
+bug was never in `content.js`, `background.js` or `bridge.ts` alone, only in the seams.
+
+**On Windows, against this build, all seven reach their own branch** — `sourceLost` and
+`destinationLost` included, the latter working for the first time since it was written. The app
+logged no fall-through, and the worker under test was confirmed to be the file on disk by the
+digest. So the chain drops nothing on this code, and the give-up you saw answered from the
+start-compaction branch does not reproduce against it.
+
+**Which leaves one likely explanation, and the tool found it by accident.** The first version of
+that script reused a single Chrome profile, and it *certified a build with `destinationLost`
+deliberately deleted* — every check passed, because Chrome served the extension already
+registered in that profile rather than re-reading the folder. The manifest bump forces a reload;
+it does not guarantee Chrome re-reads every file, and nothing in the app's log distinguishes the
+two. That is a stale-code path that survives a version bump, which is exactly the shape of what
+you measured.
+
+So: run the command, and compare the digest it prints with the app's connect line. If they agree
+and all seven pass, the defect was environmental on the earlier run and Part 1 is closed. If
+`sourceLost` fails there with `session_not_recorded`, you have reproduced it against a known-good
+tool and the next step is which of the three files the loaded extension actually differs in.
+
+### Background, if the run above does not settle it
 
 **What is broken.** A page reports `sourceLost` when `send()` proves ChatGPT never took an armed
 handoff. The app is meant to end the transaction. It does not: the continuation stays in
