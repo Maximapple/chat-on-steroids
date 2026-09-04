@@ -108,7 +108,7 @@ describe('desktop helper overhaul contract', () => {
     expect(HELPER_SCRIPT).toContain("'WIN'=0x5B; 'SUPER'=0x5B; 'CMD'=0x5B; 'META'=0x5B;");
     expect(HELPER_SCRIPT).toContain("'CTRL'=0x11; 'CONTROL'=0x11; 'ALT'=0x12; 'OPTION'=0x12; 'SHIFT'=0x10;");
     // An unrecognised name must still fail rather than resolving to something arbitrary.
-    expect(HELPER_SCRIPT).toContain('throw "BAD_KEY: Unknown key: $name"');
+    expect(HELPER_SCRIPT).toContain('throw "BAD_KEY: Unknown key: $name.');
 
     const swift = readFileSync(path.join(process.cwd(), 'native/macos-desktop-helper/main.swift'), 'utf8');
     expect(swift).toContain('case "arrowleft": return "left"');
