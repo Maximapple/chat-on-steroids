@@ -5323,9 +5323,21 @@ async function inspectOwedGoals(now: number): Promise<boolean> {
     // it is one where the loop is not entitled to act, and reloading it would be this app
     // restarting work the user stopped.
     if (!goalActiveFor(reply.conversationId)) continue;
-    // Compact & Resume owns the chat while it runs: the handoff is being written, the
-    // conversation is about to be replaced, and the obligation travels to the replacement with
-    // everything else. Reloading mid-transaction is the one thing that could lose it.
+    // Compact & Resume owns the chat while it runs: the handoff is being written and the
+    // conversation is about to be replaced. Reloading mid-transaction is the one thing that
+    // could lose an in-flight commit, so this waits it out like every other mid-transaction
+    // caller here.
+    //
+    // Unlike a Goal objective or switch, this exact obligation is deliberately *not* carried to
+    // the replacement once the handoff lands: the reply text it names exists only in the retired
+    // chat's own now-gone document, so a reload of the replacement chat trying to collect it
+    // would find nothing there — a disruptive no-op reload of the chat the user just moved to,
+    // for content that page can never produce. Once the session's conversationId moves past
+    // this row's, the ordinary superseded-session check above forgets it (see forgetGoalWatch).
+    // The cost is one lost nudge; the loop resumes normally on the replacement chat's own next
+    // final reply, which arms its own fresh, genuinely collectible obligation the ordinary way.
+    // ('retires a handoff source from Goal and Loop, including the app watchdog' in
+    // test/bridge.test.ts is the regression that keeps this true.)
     if (continuationForSession(reply.sessionId)) continue;
     let watch = goalWatch.get(reply.conversationId);
     if (!watch) {
