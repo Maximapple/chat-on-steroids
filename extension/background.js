@@ -900,6 +900,39 @@ async function hello(candidate) {
   }
 }
 
+/**
+ * A digest of this worker's own source, so "which code is actually running" is answerable
+ * from outside the browser.
+ *
+ * The manifest version says which *manifest* Chrome loaded, which is not the same question and
+ * was measured not to be: a QA session on 2026-09-04 bumped the version to force a reload, saw
+ * the app log the new version, and spent the session on a checkpoint that the worker was
+ * dropping — a behaviour only explicable by code older than the file on disk. Nothing available
+ * at the time could tell the two apart, because an unpacked reload can pick up a manifest while
+ * the page keeps talking to a worker built from something else, and the browser-side probes that
+ * would settle it live behind chrome:// UI that synthetic clicks cannot reach.
+ *
+ * Six bytes of SHA-256 over background.js answers it in the app's own log. Same shape as the
+ * driver's `stamp()`, which has told the same story about browser-driver.js for a while.
+ *
+ * Computed once here and never awaited by a request. Making `versionHeaders()` async to wait for
+ * it put an extra turn in front of every call this worker makes, which is real cost for a
+ * diagnostic and immediately broke a timing test that had been honest about the old shape. The
+ * header is simply absent for the few milliseconds the hash takes and present for the rest of
+ * the worker's life, which is all a value read from a connection log has to be.
+ */
+let workerStampValue = '';
+void (async () => {
+  try {
+    const source = await (await fetch(webext.runtime.getURL('background.js'))).arrayBuffer();
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', source)).slice(0, 6);
+    workerStampValue = [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  } catch {
+    // A worker that cannot read itself still has a job to do; the header just stays absent.
+    workerStampValue = 'unreadable';
+  }
+})();
+
 /** Lets the app say plainly when the two halves are out of step. */
 function versionHeaders() {
   let version = '0';
@@ -908,7 +941,11 @@ function versionHeaders() {
   } catch {
     // Not worth failing a request over.
   }
-  return { 'x-extension-version': version, 'x-extension-protocol': String(BRIDGE_PROTOCOL) };
+  return {
+    'x-extension-version': version,
+    'x-extension-protocol': String(BRIDGE_PROTOCOL),
+    ...(workerStampValue ? { 'x-extension-build': workerStampValue } : {})
+  };
 }
 
 /**

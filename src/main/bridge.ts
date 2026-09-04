@@ -501,6 +501,8 @@ const commandRedeems = new Map<string, Promise<void>>();
 let requestWindow = { start: Date.now(), count: 0 };
 const listeners = new Set<() => void>();
 let extensionVersion: string | null = null;
+/** Six bytes of SHA-256 over the running background.js — see noteExtensionVersion. */
+let extensionBuild: string | null = null;
 let versionWarned = false;
 
 export function onBridgeChange(listener: () => void): () => void {
@@ -636,9 +638,18 @@ function protocolCompatible(req: http.IncomingMessage): boolean {
 function noteExtensionVersion(req: http.IncomingMessage): void {
   const version = req.headers['x-extension-version'];
   const protocol = extensionProtocol(req);
-  if (typeof version === 'string' && version !== extensionVersion) {
+  const build = req.headers['x-extension-build'];
+  // The manifest version answers "which manifest did Chrome load", which is a different question
+  // from "which code is running" — and on 2026-09-04 a QA session lost most of a day to the gap
+  // between them, bumping the version to force a reload, seeing the app confirm the new version,
+  // and then measuring behaviour only explicable by a worker older than the file on disk. The
+  // build digest is six bytes of SHA-256 over background.js, so `shasum` on the repo's copy
+  // settles it from the app's own log rather than from browser UI nothing can reliably click.
+  const stamp = typeof build === 'string' ? build.slice(0, 16) : null;
+  if (typeof version === 'string' && (version !== extensionVersion || stamp !== extensionBuild)) {
     extensionVersion = version.slice(0, 32);
-    logInfo(`bridge: browser extension ${extensionVersion} connected`);
+    extensionBuild = stamp;
+    logInfo(`bridge: browser extension ${extensionVersion} connected (build ${extensionBuild ?? 'unreported'})`);
   }
   if (!versionWarned && protocol !== null && protocol !== BRIDGE_PROTOCOL) {
     versionWarned = true;

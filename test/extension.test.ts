@@ -7,6 +7,7 @@
  * restart/durability rules are exercised without needing a Chrome process in CI.
  */
 
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -643,6 +644,11 @@ function loadWorker(options: {
     storage: { local: options.local, session: options.session },
     runtime: {
       getManifest: () => ({ version: '1.6.0' }),
+      // Real enough for the build digest to be a real digest: the worker fetches its own source
+      // through this and hashes it, so the header the app reads is the one a `shasum` of the
+      // same file reproduces. Serving a fixed marker instead would make the test agree with
+      // itself and prove nothing about the value that actually ships.
+      getURL: (file: string) => `chrome-extension://test-extension-id/${file}`,
       onMessage: {
         addListener(fn: typeof listener) {
           listener = fn;
@@ -696,7 +702,18 @@ function loadWorker(options: {
       }
     }
   };
-  const fetch = options.fetch ?? (async () => response(503, {}));
+  const appFetch = options.fetch ?? (async () => response(503, {}));
+  // The worker fetches its own source through runtime.getURL to hash it. Serve that from the
+  // real file so the digest a test sees is the digest that ships, and hand everything else to
+  // the test's own stub untouched.
+  const fetch = async (input: string, init?: Record<string, unknown>) => {
+    if (typeof input === 'string' && input.startsWith('chrome-extension://')) {
+      const file = input.slice(input.lastIndexOf('/') + 1);
+      const bytes = await fs.readFile(path.join(process.cwd(), 'extension', file));
+      return { ok: true, status: 200, arrayBuffer: async () => bytes } as unknown as ReturnType<typeof response>;
+    }
+    return appFetch(input, init);
+  };
   /*
    * The worker is a module and imports the browser driver at the top, because a service worker
    * may not import dynamically — the specification forbids it and Chrome refuses at runtime.
@@ -725,6 +742,9 @@ function loadWorker(options: {
     clearTimeout,
     URL,
     TextEncoder,
+    // The worker hashes its own source for the build header the app logs. Node's WebCrypto is
+    // the same SubtleCrypto the browser gives it, so the digest here is the shipping digest.
+    crypto: globalThis.crypto,
     console,
     // Stubbed: these tests exercise the worker's messaging, never a debugger session. A test
     // that needs the real driver has the real browser to run in — see verify:browser.
@@ -1401,6 +1421,54 @@ describe('worker settings authority', () => {
     );
     expect(posted[0]).toMatchObject({ token, sourceLost: true });
     expect(posted[0]).not.toHaveProperty('notACheckpoint');
+  });
+
+  /**
+   * Which code is running, answerable from the app's log rather than from browser UI.
+   *
+   * The manifest version answers a different question, and on 2026-09-04 the difference cost a
+   * QA session most of a day: the version was bumped to force a reload, the app confirmed the
+   * new version, and the behaviour measured afterwards was only explicable by a worker older
+   * than the file on disk. Nothing could tell those apart — the probes that would have live
+   * behind chrome:// pages that synthetic clicks cannot reach.
+   *
+   * So the worker hashes its own source and sends it on every request. This asserts the header
+   * is the digest of the real file, computed independently here, because a header that merely
+   * exists would answer the question wrongly and just as confidently.
+   */
+  it('reports a build digest of its own source, matching the file on disk', async () => {
+    const seen: Array<Record<string, string>> = [];
+    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
+      const url = new URL(input);
+      seen.push((init.headers ?? {}) as Record<string, string>);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      return response(200, { ok: true });
+    });
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
+    await worker.registerTab(44);
+
+    const source = await fs.readFile(path.join(process.cwd(), 'extension', 'background.js'));
+    const digest = createHash('sha256').update(source).digest('hex').slice(0, 12);
+
+    // The digest is computed once at worker start and deliberately not awaited by requests, so a
+    // call issued in the same tick legitimately predates it. Retry until it lands rather than
+    // sleeping a guessed interval — the absence of the header is a real, brief, correct state.
+    //
+    // Driven with a message that actually reaches the app: `bind` is settled inside the worker
+    // and posts nothing, so waiting on it would wait forever for a request never made.
+    await vi.waitFor(async () => {
+      seen.length = 0;
+      await worker.send({ type: 'compact', conversationId: CHAT, ticket: true }, 44);
+      expect(seen.some((headers) => typeof headers['x-extension-build'] === 'string')).toBe(true);
+    });
+
+    const stamped = seen.filter((headers) => typeof headers['x-extension-build'] === 'string');
+    expect(stamped.length, 'no request carried x-extension-build').toBeGreaterThan(0);
+    for (const headers of stamped) {
+      expect(headers['x-extension-build'], 'the digest does not match background.js on disk').toBe(digest);
+      // Sent together or the pair cannot be read against each other, which is the entire point.
+      expect(headers['x-extension-version']).toBe('1.6.0');
+    }
   });
 
   /**
