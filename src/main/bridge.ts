@@ -2601,7 +2601,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         409,
         {
           error: 'chat_blocked',
-          message: 'This chat is blocked in the app. Release it there before turning Goal, Loop or auto-compaction on.'
+          // Goal and Loop are genuinely this chat's own setting, so releasing it here really is
+          // what turns them back on. auto-compaction is app-wide - this refusal still applies to
+          // it from a blocked chat's own composer, but releasing this one chat isn't what's
+          // needed; any other, unblocked chat's composer reaches the same global switch.
+          message: 'This chat is blocked in the app. Release it here to turn Goal or Loop back on for it; ' +
+            'auto-compaction is an app-wide setting and can be changed from any other chat\'s composer.'
         },
         origin
       );
