@@ -31,6 +31,33 @@ the app refuses the extension and asks you to reload the matching copy.
   executable and exercised over its real newline-delimited JSON protocol.
 
 ### Fixed
+- **An automatic compaction whose prompt ChatGPT never took could wedge a chat for six hours.**
+  The instruction is armed in durable state immediately *before* the click, because a page that
+  dies at that moment may or may not have left the prompt with ChatGPT, and re-sending it would
+  be the double-send that fence exists to prevent. What was missing was the other half: when the
+  click demonstrably landed nothing, the page said so only in its own error text and never told
+  the app, so the ticket sat armed until its six-hour deadline. Three scheduled pickups fired and
+  expired against a chat whose message box had never received the prompt, and because the app
+  still counted that chat as mid-compaction, it also skipped it for browser recovery for the whole
+  window. The page now reports it — on the strength of the same five-signal acceptance check it
+  already ran, against a turn this flow had stopped and settled before typing — and the app ends
+  the attempt rather than leaving it armed. Nothing is re-sent, here or anywhere: the cost of
+  being wrong is one abandoned compaction that gets offered again on the next qualifying turn,
+  which is what the replacement chat's own half of this has done since 2026-09-02.
+- **Three desktop refusals told the model to call something that does not exist.**
+  `UNKNOWN_UI_REF`, `STALE_REF` and `STALE_FRAME` all ended with "call `get_window_state` or
+  `find_ui` again" — both internal helper operations, neither reachable from a tool. The one
+  instruction each refusal existed to give named nothing the caller could act on. They now name
+  `observe`, which is what actually issues refs and frames.
+- **macOS said only "unknown key" where Windows listed the keys it takes.** The Windows helper
+  has named valid key names in its `BAD_KEY` refusal since this line began; the macOS helper's
+  terser wording left a model with nothing to correct itself from. Both now list them, each from
+  its own key table — the two platforms genuinely differ, so neither list is a copy of the other.
+- **macOS kept a UI-snapshot history a quarter the size of the one Windows was measured to need.**
+  Sixteen was raised to 96 on Windows after thirteen workers sharing one helper evicted each
+  other's newest snapshot and produced forty stale-snapshot refusals in a single run; the macOS
+  side kept the sixteen that had just been measured as too few. Both are 96 now, and a test pins
+  them together so raising one cannot quietly leave the other behind.
 - **Compact & Resume could loop, undoing its own fresh-chat reset within seconds.** A tool call
   still in flight when a rebind landed — a slow browser screenshot was the common case — could
   pass its own attribution check, then only reach the recorder after the session had already
