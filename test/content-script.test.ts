@@ -415,6 +415,53 @@ describe('one synchronous page snapshot per observer turn', () => {
   });
 });
 
+/**
+ * What insertPrompt() does with text somebody has already left in the composer.
+ *
+ * The three modes are a safety decision, not a convenience: the composer is the user's own
+ * editing host, and this app types into it. `false` refuses rather than clobber a draft; `true`
+ * is for the callers that own the box outright; `'append'` exists because refusing was itself a
+ * bug — on 2026-09-03 a single stray letter left in the composer held a *finished* Goal reply at
+ * "sending" forever, because the reply could never be written and never be given up on either.
+ *
+ * Appending has to leave the person's own characters intact and put the app's text after them,
+ * or the cure is worse than the bug it fixed.
+ */
+describe('writing into a composer that is not empty', () => {
+  it('refuses by default, replaces on request, and appends after the stray text', async () => {
+    live = await harness();
+    const dom = (live.window as any).CLF_DOM;
+    const box = live.document.querySelector('#prompt-textarea')!;
+    const text = () => (box.textContent || '');
+
+    // Default: a draft in the box is the user's, and this app does not overwrite it.
+    box.replaceChildren();
+    box.append(Object.assign(live.document.createElement('p'), { textContent: 'x' }));
+    expect(dom.insertPrompt('app-written reply', false)).toBe(false);
+    expect(text()).toBe('x');
+
+    // Replace: for the callers that own the composer outright.
+    expect(dom.insertPrompt('app-written reply', true)).toBe(true);
+    expect(text()).toContain('app-written reply');
+    expect(text()).not.toContain('x');
+
+    // Append: the stray character survives and the reply goes after it, which is the whole
+    // point — the reply is finished and must be sendable without destroying what was there.
+    box.replaceChildren();
+    box.append(Object.assign(live.document.createElement('p'), { textContent: 'x' }));
+    expect(dom.insertPrompt('app-written reply', 'append')).toBe(true);
+    const after = text();
+    expect(after).toContain('x');
+    expect(after).toContain('app-written reply');
+    expect(after.indexOf('x')).toBeLessThan(after.indexOf('app-written reply'));
+
+    // An empty composer is not the interesting case, but it must still work in every mode.
+    box.replaceChildren();
+    expect(dom.insertPrompt('into an empty box', 'append')).toBe(true);
+    expect(text()).toContain('into an empty box');
+  });
+});
+
 describe('activity feed cadence', () => {
   it('follows work state instead of treating every hidden tab as idle', async () => {
     live = await harness();
