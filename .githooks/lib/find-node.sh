@@ -13,11 +13,20 @@
 # `node-v22.23.2/bin`, and nvm and fnm both key a directory on the version. The first widening
 # of this list named `~/.local/bin` for the machine that reported the problem and still did not
 # find that machine's node, which was one directory further down all along.
+#
+# The two fixed (non-$HOME) candidates are overridable so a test can point them at a directory
+# that provably does not exist instead of the real system paths. Left unset, both default to
+# the real locations for every actual hook invocation - this is not a behavior switch, only a
+# seam test/git-hooks.test.ts needs: a machine that genuinely has node at /usr/local/bin (common
+# on Linux and Intel-Homebrew installs) would otherwise make every candidate below it
+# unreachable from a test's synthetic $HOME, regardless of which layout the test means to check.
+: "${CLF_HOOK_HOMEBREW_BIN:=/opt/homebrew/bin}"
+: "${CLF_HOOK_USR_LOCAL_BIN:=/usr/local/bin}"
 if ! command -v node >/dev/null 2>&1; then
   for candidate in \
     "$HOME/.local/bin" \
-    /opt/homebrew/bin \
-    /usr/local/bin \
+    "$CLF_HOOK_HOMEBREW_BIN" \
+    "$CLF_HOOK_USR_LOCAL_BIN" \
     "$HOME/.volta/bin" \
     "$HOME"/.local/node-*/bin \
     "$HOME"/.nvm/versions/node/*/bin \
