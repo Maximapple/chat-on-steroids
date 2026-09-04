@@ -827,7 +827,10 @@ function applyToSummary(summary: SessionSummary, event: SessionEvent, options: {
 export function autoCompactionReady(summary: SessionSummary | null | undefined): boolean {
   if (!summary) return false;
   const config = getConfig().compaction;
-  return config.auto && config.autoTokens > 0 && summary.contextTokens >= config.autoTokens;
+  // Growth, not total. A resumed chat is already carrying its inherited brief; compacting that
+  // again produces an equivalent brief and moves nothing forward. See resumeBaselineTokens.
+  const own = Math.max(0, summary.contextTokens - (summary.resumeBaselineTokens ?? 0));
+  return config.auto && config.autoTokens > 0 && own >= config.autoTokens;
 }
 
 /**
@@ -1537,6 +1540,11 @@ function normalizeSummary(id: string, raw: string): MetaCheckpoint | null {
             : [],
         contextTokens:
           typeof publicSummary.contextTokens === 'number' ? publicSummary.contextTokens : publicSummary.estimatedTokens,
+        // Absent on summaries written before the baseline existed, and on chats nobody resumed.
+        resumeBaselineTokens:
+          typeof publicSummary.resumeBaselineTokens === 'number' && Number.isFinite(publicSummary.resumeBaselineTokens)
+            ? Math.max(0, Math.floor(publicSummary.resumeBaselineTokens))
+            : 0,
         // Older summaries predate successful-resume provenance. Missing means unknown, never
         // "use lastHandoffId": capture publication happens before the continuation rebind.
         lastCommittedResumeHandoffId:
@@ -2043,7 +2051,8 @@ export async function rebindSession(
   id: string,
   fromConversationId: string,
   toConversationId: string,
-  committedResumeHandoffId?: string
+  committedResumeHandoffId?: string,
+  resumeBaselineTokens?: number
 ): Promise<boolean> {
   if (!toConversationId || fromConversationId === toConversationId) return false;
   if (committedResumeHandoffId !== undefined && !/^[0-9a-z-]{8,64}$/i.test(committedResumeHandoffId)) return false;
@@ -2070,6 +2079,13 @@ export async function rebindSession(
         ? [...entry.summary.chatIds]
         : [...entry.summary.chatIds, toConversationId],
       contextTokens: 0,
+      // What B is about to be handed, so the threshold can tell it apart from what B earns.
+      // Absent when the caller cannot say — an unknown baseline is zero, which is exactly the
+      // pre-existing behaviour rather than a guess in either direction.
+      resumeBaselineTokens:
+        typeof resumeBaselineTokens === 'number' && Number.isFinite(resumeBaselineTokens)
+          ? Math.max(0, Math.floor(resumeBaselineTokens))
+          : 0,
       activeTurnId: null,
       ...(committedResumeHandoffId !== undefined
         ? { lastCommittedResumeHandoffId: committedResumeHandoffId }

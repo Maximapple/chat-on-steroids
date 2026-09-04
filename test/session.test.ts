@@ -1446,6 +1446,67 @@ describe('session store', () => {
     }
   });
 
+  /**
+   * The handoff loop, measured live on 2026-09-04: chat A compacted into B, and B was told to
+   * write its own handoff 1.6 seconds later, having done no work of its own. Three chats in the
+   * chain inside two minutes, each replacement already over the line from the brief alone.
+   *
+   * A resumed chat starts carrying the handoff it was handed, and HANDOFF_BRIEF_RULES targets
+   * 10,000-30,000 tokens for that brief — at or above `autoTokens`' own 10,000 floor. So the
+   * rebind resets contextTokens to 0, the brief lands, and the chat is instantly over the
+   * threshold again through no activity of its own. Compacting it produces another brief of
+   * about the same size, so the next chat is over the line too: a fixpoint that never makes
+   * progress, only new chats.
+   *
+   * The threshold has to measure what this chat accumulated, not what it inherited.
+   */
+  it('does not re-compact a resumed chat that is only carrying the handoff it inherited', async () => {
+    const base = defaultConfig();
+    await saveConfig({ ...base, compaction: { ...base.compaction, auto: true, autoTokens: 10_000 } });
+    try {
+      const summary = await createSession({ title: 'resumed', conversationId: 'conv-loop-a' });
+      // A crosses the line on its own work and compacts.
+      await appendEvent(summary.id, {
+        time: 1,
+        source: 'extension',
+        kind: 'user_message',
+        messageId: 'u1',
+        message: { text: 'a'.repeat(48_000), truncated: false, chars: 48_000 }
+      });
+      expect(autoCompactionReady(await getSession(summary.id))).toBe(true);
+
+      // The move into B, carrying a brief of its own. 12,000 tokens is inside the range the
+      // brief rules actually ask for, and above the floor the threshold is allowed to take.
+      const inherited = 'b'.repeat(48_000);
+      expect(await rebindSession(summary.id, 'conv-loop-a', 'conv-loop-b', undefined, estimateTokens(inherited))).toBe(true);
+      // The brief itself is what B is carrying, exactly as the bootstrap lands it there.
+      await appendEvent(summary.id, {
+        time: 2,
+        source: 'extension',
+        kind: 'user_message',
+        messageId: 'u2',
+        message: { text: inherited, truncated: false, chars: inherited.length }
+      });
+
+      const resumed = await getSession(summary.id);
+      expect(resumed?.contextTokens).toBeGreaterThanOrEqual(10_000);
+      // …and it must still not compact: none of that is B's own work.
+      expect(autoCompactionReady(resumed)).toBe(false);
+
+      // Once B has genuinely accumulated a threshold's worth of its own, it compacts normally.
+      await appendEvent(summary.id, {
+        time: 3,
+        source: 'extension',
+        kind: 'user_message',
+        messageId: 'u3',
+        message: { text: 'c'.repeat(48_000), truncated: false, chars: 48_000 }
+      });
+      expect(autoCompactionReady(await getSession(summary.id))).toBe(true);
+    } finally {
+      await saveConfig(base);
+    }
+  });
+
   it('offers nothing while the switch is off or below the line', async () => {
     const base = defaultConfig();
     await saveConfig({ ...base, compaction: { ...base.compaction, auto: false, autoTokens: 10_000 } });

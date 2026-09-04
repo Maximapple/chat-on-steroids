@@ -52,6 +52,7 @@
 
 import { randomBytes } from 'node:crypto';
 import type { Handoff } from '../../shared/session.js';
+import { estimateTokens } from '../../shared/session.js';
 import { logInfo, logWarn } from '../logger.js';
 import {
   PRIME_ID,
@@ -1190,7 +1191,15 @@ async function reconcileCommitting(entry: Continuation, toConversationId: string
 
   let moved = false;
   try {
-    moved = await rebindSession(entry.sessionId, entry.from, toConversationId, entry.handoffId ?? undefined);
+    moved = await rebindSession(
+      entry.sessionId,
+      entry.from,
+      toConversationId,
+      entry.handoffId ?? undefined,
+      // The brief B is opened on. It is B's starting context and none of it is B's own work,
+      // so the compaction threshold has to discount it — see resumeBaselineTokens.
+      estimateTokens(entry.summary)
+    );
   } catch (err) {
     logWarn(`continuation ${entry.token.slice(0, 8)} rebind threw: ${err instanceof Error ? err.message : String(err)}`);
   }
