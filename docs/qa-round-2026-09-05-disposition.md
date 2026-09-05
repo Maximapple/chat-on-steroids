@@ -15,7 +15,7 @@ this branch, not asserted from a test.
 | **`/hovers` exposed no refs** (ChatGPT 47) | `observe` collected only interactive elements. The wrapper is a plain `div` and the caption is `display:none` until hovered, so `move_ref` had nothing to aim at on its own headline case. | Live on `/hovers`: all three targets exposed, `move_ref` reveals the caption. |
 | **Logout did not actuate** (ChatGPT 44) | Not a click defect. A Chrome-native password dialog over the tab swallows input; `elementFromPoint` cannot see browser UI, so `covered` is honestly false and the click reports success. | The real button was driven from a clean profile and **worked** — `hit=i covered=false navigated=true` → `/login`, carrying the exact signature the failing runs reported. A link click that reaches nothing now says so. |
 | **Chrome error page returned as the site** (ChatGPT 76) | `chrome.tabs` and `Page.getNavigationHistory` both report the *requested* address for a failed load. Only the frame tree reports `chrome-error://chromewebdata/`. Every guard was asking a lying surface. | Measured against a dead port; `verify:browser` covers refuse → stay detached → and still be able to leave. |
-| **A stalled compaction took browser recovery with it** (Finding 1, recovery half) | `inspectSilentChats` skipped a chat for the whole life of a continuation, not just while it was being chased. | Two tests, each confirmed failing without the fix. |
+| **A stalled compaction took browser recovery with it** (Finding 1, recovery half) | `inspectSilentChats` skipped a chat for the whole life of a continuation, not just while it was being chased. | Two tests, each confirmed failing without the fix, and **confirmed live** — see below. |
 | **A handoff open across a restart, same shape** | A continuation restored from disk never gets a watch, and "no watch yet" was read as "about to be armed". | Test confirmed failing without the fix. |
 | **The `exec_command` path contract was half-stated** (Finding 2) | `workdir` accepts virtual paths and always did; `cmd` is not translated. The description said neither. | Confirmed live both ways in the reporting round. |
 | **A stale "Waiting for N tool calls" panel** (Finding 3) | The count describes another process's memory and nothing expired it, so a failed poll froze the last number forever. | Confirmed live: cleared at 61 s where it had survived ten minutes. |
@@ -45,25 +45,38 @@ count cannot see the ambiguity.
 - **Test and check counts differing from the brief.** Both suites are platform-gated. The briefs no
   longer quote totals, because a Windows figure reads as a regression on macOS.
 
-## Open, and why
+## Closed since, by later rounds and by measurement
 
-- **Finding 1, live.** Forcing it needs an automatic compaction at `dispatched-unresolved` and then
-  fifteen minutes of ChatGPT's own transport failing, which cannot be induced on demand. Both the
-  recovery half and the restart half are covered by tests confirmed to fail without their fixes.
-  This is a gap in evidence, not a defect being carried, and both the reporting round and this one
-  reached that conclusion independently.
-- **The connector path.** Local probes drive the driver directly; they cannot cover attribution
-  through ChatGPT itself. The layer between — the MCP renderer — is covered, and one real defect
-  was found there: a note long enough to be truncated past its own remedy.
-- **A mid-generation block, driven fresh.** The last round carried it from an earlier build on a
-  byte-identical code path rather than re-driving it.
+- **Finding 1, live — confirmed.** The wall was thought to be fifteen minutes of ChatGPT transport
+  failing. The cheaper door is a restart: a continuation opened before `compactionWatchFloor` is
+  permanently "not chased", which is the same state the fix releases. `verify:compaction-release`
+  drives it, and the run is decisive both ways — with the fix, the app handed out
+  `{"reason":"silence"}` for a chat holding an open automatic continuation; with the floor check
+  removed, nothing for four minutes. Fixed twice across three rounds and confirmed zero times; it
+  is confirmed now.
+- **The connector path.** The second ChatGPT round ran fully attributed and passed all ten steps,
+  including quoting back the render truncation before it was reported to them. One real defect was
+  found at that layer beforehand: a note long enough to be truncated past its own remedy.
+- **A mid-generation block, driven fresh.** Driven on this build in the second macOS round: blocked
+  one second after the command started, the turn closed itself, `CHAT_BLOCKED` was quoted verbatim,
+  and tools returned three seconds after release.
+- **A worker blocked mid-run.** Slot freed, run parked, zero `AGENTS_BUSY`. Also pinned by a test
+  confirmed to fail against a simulated deadlock.
+
+## Open
+
+Nothing from either report. The remaining risk is the shape the third round named rather than a
+defect: this app's hardest behaviour lives in recovery paths, and recovery paths are the ones
+nobody drives by accident. Two of them — the compaction chain and this release — now have scripts
+instead of judgement calls.
 
 ## Gates at the time of writing
 
-    npx tsc --noEmit          clean
-    npx vitest run            2389 passed, 27 skipped
-    npm run verify:browser    73/73 against real Chrome
+    npx tsc --noEmit               clean
+    npx vitest run                 2411 passed, 27 skipped
+    npm run verify:browser         73/73 against real Chrome
     npm run verify:compact-chain   7 checkpoints + control, app running
-    npm run verify:privacy    passed
+    npm run verify:compaction-release   open → restart → check, confirmed both ways
+    npm run verify:privacy         passed
 
 Upstream: 0 behind, v2.0.5 still upstream's newest tag.
