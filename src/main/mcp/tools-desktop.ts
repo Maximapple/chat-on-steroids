@@ -64,6 +64,76 @@ function newBrowserWindowHint(): string {
     : "Start-Process chrome.exe -ArgumentList '--new-window', $url";
 }
 
+/**
+ * The sentence a caller fenced out of a browser window most needs, and never saw.
+ *
+ * `computer` cannot click *into* a web page that has nothing focused yet: the fence asks the
+ * application which control has keyboard focus, a browser answers only when the page exposes one,
+ * and the click that would create that focus is itself what is being fenced. That is the fence
+ * failing closed on honest ignorance of where input would land, which is what it is for — the
+ * macOS helper carries a long note saying so and warning the next reader not to file it as a bug.
+ *
+ * The note is right and the refusal is correct. What neither said is the way out, which exists
+ * and is one tool away: `browser` speaks CDP and needs none of this. A QA run met these refusals
+ * five times in a row against a browser window, re-observing and retrying between each, and the
+ * report's closing judgement was that the app's failures are loud, correct, and read as a pattern
+ * of not working. A refusal that names its own remedy is the cheapest answer to that, and it
+ * costs no fence — this only appends a sentence to a refusal that has already happened.
+ *
+ * Best effort by construction: it runs only on the failure path, and any error looking up the
+ * window is swallowed, because failing to enrich a message is no reason to replace the real
+ * refusal with a worse one.
+ */
+async function browserInputHint(actions: Action[], targetWindow: number | undefined): Promise<string> {
+  try {
+    let focused: number | null = targetWindow ?? null;
+    for (const action of actions) if (action.type === 'focus') focused = action.window;
+    const target =
+      focused === null
+        ? (await activeWindow()).window
+        : ((await listWindows()).windows.find((window) => window.id === focused) ?? null);
+    if (!target || !isBrowserProcess(target.process)) return '';
+    return (
+      ` The window is a browser ("${target.title}"), and desktop input cannot reach a web page ` +
+      'that has no focused control yet — the click that would give it one is the click being ' +
+      'refused. Use the browser tool for the page itself: it drives Chrome directly and needs ' +
+      'no desktop focus.'
+    );
+  } catch {
+    return '';
+  }
+}
+
+/** Refusals that mean "desktop input could not be aimed", which is the browser case above. */
+const INPUT_FENCE_CODES = ['INPUT_TARGET_LOST', 'STALE_UI_SNAPSHOT', 'FOCUS_FAILED'];
+
+/**
+ * Runs the batch, and on an input-fence refusal against a browser adds the way out.
+ *
+ * A rethrow rather than a mutation, because `ComputerError` carries the partial-batch accounting
+ * a caller needs to know how far it got — losing `completedCount` to improve a sentence would
+ * trade a fact for a nicety. Anything that is not one of those refusals is rethrown untouched.
+ */
+async function withBrowserInputHint<T>(
+  actions: Action[],
+  targetWindow: number | undefined,
+  run: () => Promise<T>
+): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (!(err instanceof ComputerError)) throw err;
+    if (!INPUT_FENCE_CODES.some((code) => err.message.includes(code))) throw err;
+    const hint = await browserInputHint(actions, targetWindow);
+    if (!hint) throw err;
+    throw new ComputerError(`${err.message}${hint}`, {
+      ...(typeof err.completedCount === 'number' ? { completedCount: err.completedCount } : {}),
+      ...(typeof err.failedIndex === 'number' ? { failedIndex: err.failedIndex } : {}),
+      ...(Array.isArray(err.completedRoutes) ? { completedRoutes: err.completedRoutes } : {})
+    });
+  }
+}
+
 async function browserChordRefusal(actions: Action[]): Promise<string | null> {
   let focused: number | null = null;
   for (const action of actions) {
@@ -638,7 +708,7 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
             : undefined;
           // One lock, one operation: the picture that verifies these actions must be taken
           // before anyone else can touch the desktop.
-          const result = await actAndCapture(parsed, {
+          const result = await withBrowserInputHint(parsed, targetWindow, () => actAndCapture(parsed, {
             frameId,
             targetWindow,
             verify: parsedVerify,
@@ -654,7 +724,7 @@ export function registerDesktopTools(reg: SurfaceRegistrar): void {
                       (autoCapture && captureWindow === undefined && targetWindow === undefined && captureFull !== true && captureCrop === undefined)
                   }
                 : undefined
-          });
+          }));
           const cursor = result.cursor;
           const pointer = cursor
             ? cursor.image
