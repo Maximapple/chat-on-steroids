@@ -31,6 +31,27 @@ the app refuses the extension and asks you to reload the matching copy.
   executable and exercised over its real newline-delimited JSON protocol.
 
 ### Fixed
+- **"Waiting for 2 tool calls" no longer outlives the calls, or the app that was running them.**
+  That count describes work inside the app's own process, and only `/activity` can confirm it. A
+  failed poll deliberately leaves the last number alone — one dropped poll is no evidence the work
+  stopped — but nothing ever expired it, so an app that stopped answering froze the last count it
+  had reported and the page went on asserting it. Restarting the app under a live turn left the
+  panel reading "Waiting for 2 tool calls" for over ten minutes, across a turn that had since
+  completed: the calls died with the old process and nothing local said so. An app restart is an
+  ordinary event — the updater performs one. The count now expires if the app has not confirmed it
+  for a minute (thirty consecutive misses at the busy poll rate), and every reader goes through
+  that check rather than the raw number: the stage panel, which was asserting it at the user; the
+  revival gate, which refused to submit while a stale count sat above zero; and the poll cadence,
+  which stayed at the busy rate forever. It expires on a clock rather than zeroing on the first
+  failure, because a count that blinked off at every blip would be a worse claim than a briefly
+  stale one.
+- **The `exec_command` path contract is now advertised, both halves of it.** `read.paths` names the
+  approved root, and `workdir` said only "Working directory for the command", leaving a model to
+  guess whether `exec_command` speaks the same path language. It half does: `workdir` resolves
+  through the same resolver the read tools use, so the virtual path works there, while the command
+  text is deliberately not translated, so the same spelling inside `cmd` is refused. Both rules
+  were already enforced; only the description was silent, and one QA round met both sides of the
+  gap in a single session.
 - **A stalled compaction no longer takes browser recovery down with it.** A chat named by an open
   automatic continuation was skipped by the silence check for the life of that continuation. The
   skip is there so nothing reloads a page out from under a handoff still being worked — but once

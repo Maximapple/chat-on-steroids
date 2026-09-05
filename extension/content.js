@@ -102,6 +102,15 @@
   const HIDDEN_ACTIVITY_MS = 30_000;
   /** Do not flicker a wait panel for ordinary sub-second/short model pauses. */
   const WAIT_STATUS_MS = 2500;
+  /**
+   * How long a pending-tool count is worth without fresh confirmation from the app.
+   *
+   * A chat with calls in the air polls every ACTIVITY_MS, so this is thirty consecutive failures:
+   * comfortably past a dropped poll or a worker restart, and nowhere near the ten minutes an app
+   * restart left "Waiting for 2 tool calls" on screen — across a turn that had since completed —
+   * because the process holding those calls had exited and nothing local ever expired the claim.
+   */
+  const PENDING_TOOLS_TRUST_MS = 60_000;
   /** A completed hidden turn gets a short live-cadence window to converge app-owned prose. */
   const TERMINAL_ACTIVITY_CONVERGENCE_MS = 10_000;
   /** Hidden is an idle throttle, not permission to starve live/finalizing work. */
@@ -698,6 +707,15 @@
   let swarm = null;
   /** Local tool calls the app still has running. Only ever a hint from /activity. */
   let pendingTools = 0;
+  /**
+   * When the app last confirmed that count. Zero means never, this chat.
+   *
+   * The count is a claim about another process's live memory, and `/activity` is the only thing
+   * that can make it. A failed pull leaves it untouched — correctly, because one dropped poll is
+   * not evidence the work stopped — but nothing ever expired it, so an app that stopped answering
+   * froze the last number it had said and the page went on asserting it. See livePendingTools().
+   */
+  let pendingToolsAt = 0;
   /** Returned async exec sessions are not in-flight tools; they have their own lifecycle. */
   let backgroundExec = { running: 0, exitedUnread: 0, lastTransitionAt: null };
   let lastBackgroundExecTransitionAt = 0;
@@ -1510,6 +1528,7 @@
     terminalActivityConvergeUntil = 0;
     terminalActivityExpected = null;
     pendingTools = 0;
+    pendingToolsAt = 0;
     backgroundExec = { running: 0, exitedUnread: 0, lastTransitionAt: null };
     lastBackgroundExecTransitionAt = 0;
     autoCompactReady = false;
@@ -5965,6 +5984,7 @@
       job = data.job || null;
       swarm = data.swarm && typeof data.swarm === 'object' ? data.swarm : null;
       pendingTools = Number.isFinite(Number(data.pendingTools)) ? Number(data.pendingTools) : 0;
+      pendingToolsAt = Date.now();
       const rawBackgroundExec =
         data.backgroundExec && typeof data.backgroundExec === 'object' ? data.backgroundExec : {};
       const nextBackgroundExec = {
@@ -8063,7 +8083,7 @@
     const view = stageView({
       job,
       swarm,
-      pendingTools,
+      pendingTools: livePendingTools(),
       backgroundExec,
       generating,
       quietMs: Math.max(0, Date.now() - lastChangeAt),
@@ -8351,6 +8371,7 @@
       }
       unanswered = 0;
       pendingTools = count;
+      pendingToolsAt = Date.now();
       return count === 0;
     }, TOOL_SETTLE_MS);
     if (!current()) return 'This chat changed while compaction was waiting for local tools.';
@@ -9908,10 +9929,30 @@
    * worker may be revived; it does not say ChatGPT has finished rendering the assistant turn
    * that contains that tool call. The recorder's conservative generation state is the latter.
    */
+  /**
+   * The pending-tool count, but only while the app is still vouching for it.
+   *
+   * `pendingTools` describes work inside the app's process, which this page cannot see for itself.
+   * When the app stops answering, the honest answer is "unknown" — and an unknown must not be
+   * rendered, or acted on, as a fact. Every consumer reads through here rather than the variable:
+   * the stage panel, which otherwise asserts a stale count at the user; the revival gate, which
+   * otherwise refuses to submit for as long as the stale count sits above zero; and the poll
+   * cadence, which otherwise stays at the busy rate forever.
+   *
+   * Deliberately not zeroed on the failed pull itself. One dropped poll says nothing about
+   * whether the work stopped, and a count that flickered off and back on every blip would be a
+   * worse claim than the stale one. It expires on a clock instead.
+   */
+  function livePendingTools() {
+    if (pendingTools <= 0) return 0;
+    if (!pendingToolsAt) return 0;
+    return Date.now() - pendingToolsAt <= PENDING_TOOLS_TRUST_MS ? pendingTools : 0;
+  }
+
   function revivalSubmitReady(target) {
     if (!commandReadinessInitialized || !alive || CLF_DOM.conversationId() !== target) return false;
     if (generating || CLF_DOM.generating()) return false;
-    if (pendingTools > 0 || nativeBusy || goalBusy || (job && job.busy)) return false;
+    if (livePendingTools() > 0 || nativeBusy || goalBusy || (job && job.busy)) return false;
     return Boolean(CLF_DOM.composerSubmitReady && CLF_DOM.composerSubmitReady());
   }
 
@@ -10424,7 +10465,7 @@
 
   function currentActivityPullDelay() {
     const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
-    const active = nativeBusy || Boolean(job && job.busy) || pendingTools > 0;
+    const active = nativeBusy || Boolean(job && job.busy) || livePendingTools() > 0;
     // A goal draft lives entirely on this feed — its streamed text is what the stage panel
     // shows, and the finished message only arrives here — so it polls at the live cadence
     // even in a hidden tab, which is exactly the tab this feature runs in.
@@ -10456,7 +10497,7 @@
         nativeBusy ||
         Boolean(compactCapture) ||
         Boolean(job && job.busy) ||
-        pendingTools > 0 ||
+        livePendingTools() > 0 ||
         finalizing ||
         (!hidden && Boolean(swarm && swarm.running)) ||
         (!hidden && Number(backgroundExec && backgroundExec.running) > 0) ||
@@ -10781,6 +10822,8 @@
       visibleStream,
       /** So a test settles a turn by the real window rather than a copy of the number. */
       TURN_SETTLE_MS,
+      WAIT_STATUS_MS,
+      PENDING_TOOLS_TRUST_MS,
       STALL_MS,
       GOAL_RETRY_MS,
       PRESENTATION_SCROLL_IDLE_MS,
