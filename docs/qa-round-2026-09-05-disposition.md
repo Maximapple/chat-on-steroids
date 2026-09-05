@@ -13,7 +13,7 @@ this branch, not asserted from a test.
 | --- | --- | --- |
 | **Dropdown never changed** (ChatGPT 41) | `set_value` was click + select-all + insertText. Chrome paints a native `<select>` popup in the browser process, so no synthetic event reaches an option — the call succeeded and did nothing. | Live on `/dropdown`: `{"set":"g1_e0","value":"1","selected":"Option 1"}`. Unmatched option refused by name with the options listed, control untouched. |
 | **`/hovers` exposed no refs** (ChatGPT 47) | `observe` collected only interactive elements. The wrapper is a plain `div` and the caption is `display:none` until hovered, so `move_ref` had nothing to aim at on its own headline case. | Live on `/hovers`: all three targets exposed, `move_ref` reveals the caption. |
-| **Logout did not actuate** (ChatGPT 44) | Not a click defect. A Chrome-native password dialog over the tab swallows input; `elementFromPoint` cannot see browser UI, so `covered` is honestly false and the click reports success. | The real button was driven from a clean profile and **worked** — `hit=i covered=false navigated=true` → `/login`, carrying the exact signature the failing runs reported. A link click that reaches nothing now says so. |
+| **Logout did not actuate** (ChatGPT 44) | Not a click defect. A Chrome-native password dialog over the tab swallows input; `elementFromPoint` cannot see browser UI, so `covered` is honestly false and the click reports success. | Both halves measured. From a clean profile the real button **worked** — `hit=i covered=false navigated=true` → `/login` — carrying the exact signature the failing runs reported, so that signature was never the cause. With the dialog present, the click now reports `navigated=false` with the address and the remedy. See the final round below. |
 | **Chrome error page returned as the site** (ChatGPT 76) | `chrome.tabs` and `Page.getNavigationHistory` both report the *requested* address for a failed load. Only the frame tree reports `chrome-error://chromewebdata/`. Every guard was asking a lying surface. | Measured against a dead port; `verify:browser` covers refuse → stay detached → and still be able to leave. |
 | **A stalled compaction took browser recovery with it** (Finding 1, recovery half) | `inspectSilentChats` skipped a chat for the whole life of a continuation, not just while it was being chased. | Two tests, each confirmed failing without the fix, and **confirmed live** — see below. |
 | **A handoff open across a restart, same shape** | A continuation restored from disk never gets a watch, and "no watch yet" was read as "about to be armed". | Test confirmed failing without the fix. |
@@ -63,12 +63,51 @@ count cannot see the ambiguity.
 - **A worker blocked mid-run.** Slot freed, run parked, zero `AGENTS_BUSY`. Also pinned by a test
   confirmed to fail against a simulated deadlock.
 
+## The final delta round
+
+Run against `1a26155`, after upstream's three PRs were merged in. Zero FAILs, no code changes
+needed. The two results worth keeping:
+
+**The merge conflict was resolved correctly, and the reason is not the one I argued.** Both sides
+had changed the pointer-report line; I kept both halves on the reasoning that "is this the right
+frame" and "is the point inside it" are separate questions. On the test hardware the frame was
+*current* — so upstream's generation gate was never what stood between the caller and a bad
+coordinate. The bounds check was:
+
+    Pointer desktop: 540,701. It is outside frame 3, so it has no position in that image.
+
+Verified independently of the app, with an OS-level `screencapture` putting the pointer at desktop
+`539,300` against a reported `540,300`. Had upstream's line been taken alone, that exact case would
+have regressed to the `875,754` shape QA originally found. The round's own summary: keeping both
+"was not belt-and-braces, it was the difference between correct and regressed".
+
+**The truncated note is confirmed live**, which the macOS round could not do — the `browser` tool is
+attribution-fenced, so a swallowed click needs a real ChatGPT turn. The parallel ChatGPT round
+produced one, dialog and all:
+
+    click_ref: clicked={"x":431,"y":230,…} hit=i covered=false navigated=false
+    expected=https://the-internet.herokuapp.com/logout
+    note=delivered, but the page did not go there. A Chrome password or permission dialog in front
+    of the tab can swallow a click invisibly. Check the screen, or use navigate to reach the
+    address directly.
+
+Full sentence, ending in the remedy, no ellipsis — through the real MCP render path. And the cause
+was on screen: a Chrome-native "Passwort ändern" dialog warning the password was found in a breach.
+That closes the loop opened when the same button failed twice with no explanation.
+
 ## Open
 
-Nothing from either report. The remaining risk is the shape the third round named rather than a
+Nothing from any report. The remaining risk is the shape the third round named rather than a
 defect: this app's hardest behaviour lives in recovery paths, and recovery paths are the ones
-nobody drives by accident. Two of them — the compaction chain and this release — now have scripts
-instead of judgement calls.
+nobody drives by accident. Two of them — the compaction chain and the compaction release — now have
+scripts instead of judgement calls.
+
+One caveat the final round raised about itself, kept because it is fair: its evidence is a mix of
+driven and read. It drove the bounds half of the merge and read the generation half — the macOS
+helper is an in-process addon, so there is no separate process to kill and no way to induce a stale
+generation from outside. Upstream's own test covers that half and the merged form passes it. The
+distinction between "confirmed on hardware" and "confirmed by reading the code plus its test" is
+worth carrying into the PR rather than flattening.
 
 ## Gates at the time of writing
 
