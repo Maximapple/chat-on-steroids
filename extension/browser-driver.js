@@ -100,6 +100,15 @@ const SCROLL_TIMEOUT_MS = 5_000;
 const SCROLL_ONSET_TIMEOUT_MS = 1_000;
 /** Upper bound on elements one observation returns, so a huge page cannot flood the model. */
 const MAX_ELEMENTS = 200;
+
+/**
+ * How long a link click is given to move the page before the answer says it did not.
+ *
+ * Long enough for an ordinary same-origin navigation to commit — the check is on the address
+ * changing, not on the load finishing — and short enough that it is not felt on a click that was
+ * never going to navigate. Only spent on a click that resolved to a real destination.
+ */
+const CLICK_NAVIGATION_MS = 1500;
 /**
  * How long a drag holds the button down before moving, and hovers before letting go.
  *
@@ -1380,7 +1389,19 @@ export const browserDriver = {
           ? at.tagName.toLowerCase() + (at.id ? '#' + at.id : '')
           : null;
         const covered = Boolean(at) && at !== el && !el.contains(at) && !at.contains(el);
-        return JSON.stringify({ found: true, usable, x, y, hit, covered, tag: el.tagName.toLowerCase() });
+        // The destination this click is expected to reach, when there is one to be sure of.
+        //
+        // Only a link that opens in this tab, addresses an ordinary page, and points somewhere
+        // other than where we already are. Anything else — a fragment, a new tab, a script
+        // handler — has no outcome that can be checked by watching the address, and guessing at
+        // one would file a "nothing happened" report against a click that worked perfectly.
+        const anchor = el.closest ? el.closest('a[href]') : null;
+        let expect = '';
+        if (anchor && !anchor.target) {
+          const href = anchor.href;
+          if (/^https?:/i.test(href) && href.split('#')[0] !== location.href.split('#')[0]) expect = href;
+        }
+        return JSON.stringify({ found: true, usable, x, y, hit, covered, tag: el.tagName.toLowerCase(), expect });
       })()`,
       contextId,
       returnByValue: true
@@ -1400,6 +1421,7 @@ export const browserDriver = {
       hit: found.hit ?? null,
       covered: Boolean(found.covered),
       tag: String(found.tag ?? ''),
+      expect: String(found.expect ?? ''),
       path,
       contextId
     };
@@ -1516,6 +1538,24 @@ export const browserDriver = {
     }
   },
 
+  /**
+   * Whether the address left `from` within the budget.
+   *
+   * Polled rather than driven off `Page.frameNavigated`, because the answer is wanted for a click
+   * that may well produce no navigation at all — that is the case being measured — and an event
+   * that never arrives cannot be distinguished from one that is merely late without a timer
+   * anyway. Polling the frame tree says both things with one instrument.
+   */
+  async waitForUrlChange(from, budgetMs) {
+    const until = Date.now() + budgetMs;
+    for (;;) {
+      const { url } = await this.currentPageUrl();
+      if (url && url !== from) return true;
+      if (Date.now() >= until) return false;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  },
+
   async assertPageStillAllowed() {
     if (!session) return;
     const { url: address, unreachable } = await this.currentPageUrl();
@@ -1605,8 +1645,39 @@ export const browserDriver = {
          * says plainly when something else is covering it.
          */
         const at = await this.resolveRef(action.ref);
+        const before = at.expect ? (await this.currentPageUrl()).url : '';
         const clicked = await this.act({ ...action, type: 'click', x: at.x, y: at.y });
-        return { ...clicked, hit: at.hit, covered: at.covered };
+        const answer = { ...clicked, hit: at.hit, covered: at.covered };
+        /*
+         * A link click is checked against the one thing it promised to do.
+         *
+         * `hit` and `covered` were the previous answer to "the click succeeded and the page did
+         * not move", and both are blind to the case that keeps producing it. They are computed by
+         * the renderer, so they can only see what the *page* draws. A browser-native dialog — the
+         * password-manager leak prompt, a permission bubble — is painted by the browser process
+         * over the web contents and suspends input to it. `elementFromPoint` cannot see it, so
+         * `covered` is honestly false, the click is dispatched and reported trusted, and it
+         * reaches nothing.
+         *
+         * Measured twice by QA on the-internet's Logout button, the second time with the cause
+         * visible: `hit=i covered=false`, the URL unchanged, and a foreground Chrome dialog
+         * headed "Passwort ändern" over the page. No CDP event announces such a dialog, so it
+         * cannot be detected — but its effect can. The click still happened and is still reported
+         * as such; what is added is whether the page went where the link pointed.
+         */
+        if (at.expect) {
+          const settled = await this.waitForUrlChange(before, CLICK_NAVIGATION_MS);
+          answer.navigated = settled;
+          if (!settled) {
+            answer.expected = at.expect;
+            answer.note =
+              'the click was delivered but the page did not go to the link’s address. Something ' +
+              'outside the page can swallow a click without the page seeing it — a Chrome password ' +
+              'or permission dialog in front of the tab is the usual cause, and it is invisible to ' +
+              'this tool. Check the screen, or use navigate to go there directly.';
+          }
+        }
+        return answer;
       }
       case 'move_ref': {
         /*
