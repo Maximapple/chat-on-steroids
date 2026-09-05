@@ -888,7 +888,14 @@ describe('surface boundaries', () => {
                 // is quoted verbatim from Codex's own shell spec — it is not ours to trim to fit a
                 // budget. The non-Windows number is the one that says whether *our* additions have
                 // grown, so both are asserted rather than one loose bound covering both.
-                ? (process.platform === 'win32' ? 3_800 : 3_500)
+                //
+                // Raised from 3,800/3,500 for the path contract on `workdir`, which said neither
+                // half of it: that `workdir` takes the same virtual path `read.paths` advertises,
+                // and that `cmd` is not translated so the same spelling inside it is refused. Both
+                // rules were already enforced and tested; only the description was silent, and one
+                // QA round walked into both sides. Both budgets move by the same amount so each
+                // keeps the headroom it had, and the test still measures growth rather than slack.
+                ? (process.platform === 'win32' ? 3_950 : 3_650)
                 : tool.name === 'browser'
                   // Raised from 4,900 for detach and status. The tool could take a page and had
                   // no way to give it back, so a QA run resorted to clicking the extension popup
@@ -2875,6 +2882,27 @@ describe('exec_command and write_stdin', () => {
   beforeEach(() => {
     ctx.readOnly = false;
     ctx.caps = withCaps({ command: true });
+  });
+
+  /**
+   * The advertised contract has to match the enforced one, in both directions.
+   *
+   * `workdir` resolves through the same `resolveIn()` the read tools use, so the virtual path a
+   * model learned from `read.paths` works there; the command text is deliberately not translated,
+   * so the same spelling inside `cmd` is refused. Both behaviours are pinned by the tests around
+   * this one. What this pins is that the *description* still says so — it said neither for a long
+   * time, and QA walked into both sides of the gap in a single round.
+   */
+  it('advertises both halves of the exec path contract on workdir itself', async () => {
+    const listed = await core('tools/list', {});
+    const exec = (listed.body.result?.tools ?? []).find((tool: { name: string }) => tool.name === 'exec_command');
+    const workdir = exec?.inputSchema?.properties?.workdir?.description as string | undefined;
+    expect(workdir, 'exec_command must expose a workdir description').toBeTruthy();
+    // Half one: workdir speaks the same path language read.paths does.
+    expect(workdir).toMatch(/read\.paths/);
+    // Half two: the command text does not, which is the refusal below.
+    expect(workdir).toMatch(/inside cmd are not translated/i);
+    expect(workdir).toMatch(/Defaults to the turn cwd/);
   });
 
   it('refuses an approved virtual path in opaque shell text instead of running against the drive root', async () => {
