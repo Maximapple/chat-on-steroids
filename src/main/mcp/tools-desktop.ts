@@ -146,7 +146,9 @@ const browserActionArg = z.discriminatedUnion('type', [
   // stale one from an earlier observation never coincidentally matches a live one after a later
   // observation recycles the same short index.
   z.object({ type: z.literal('click_ref'), ref: z.string().min(1).max(32), button: mouseButtonArg.optional() }).strict().describe('Click a ref.'),
-  z.object({ type: z.literal('set_value'), ref: z.string().min(1).max(32), text: z.string().max(20_000) }).strict().describe('Replace a field by ref.'),
+  // The select half is worth its bytes: a native dropdown cannot be driven by clicking, because
+  // Chrome paints it outside the page, and a QA run burned a step discovering that the hard way.
+  z.object({ type: z.literal('set_value'), ref: z.string().min(1).max(32), text: z.string().max(20_000) }).strict().describe('Replace a field by ref. On a select, picks the option with that label or value.'),
   z.object({ type: z.literal('click'), x: imageCoordinateArg, y: imageCoordinateArg, button: mouseButtonArg.optional() }).strict().describe('Click at pixels.'),
   z.object({ type: z.literal('double_click'), x: imageCoordinateArg, y: imageCoordinateArg }).strict().describe('Double-click at pixels.'),
   z.object({ type: z.literal('move'), x: imageCoordinateArg, y: imageCoordinateArg }).strict().describe('Move the pointer.'),

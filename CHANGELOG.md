@@ -31,6 +31,26 @@ the app refuses the extension and asks you to reload the matching copy.
   executable and exercised over its real newline-delimited JSON protocol.
 
 ### Fixed
+- **A dropdown can now actually be set.** `set_value` was click, select-all, insert — which is
+  right for a text field and cannot work on a native `<select>`, because Chrome paints that
+  dropdown in the browser process, outside the page, where no synthetic event of any kind reaches
+  it. The click opened a popup the driver could not see, the insert went nowhere, and every call
+  still reported success: a QA run tried `click_ref`, keyboard, `set_value` and typing in turn, got
+  no error from any of them, and watched every read-back still say "Please select an option".
+  `set_value` on a select now picks the option by label or by value and fires `input` and `change`,
+  which is what the page would see from a real selection, and an unmatched option is refused by
+  name with the available choices listed instead of silently doing nothing. One honest limit: the
+  option can only be chosen from inside the page, so this is the single action in the browser tool
+  that is not `isTrusted` input — every click, key and drag still is.
+- **Things that reveal themselves on hover can now be hovered.** `move_ref` exists for menus and
+  captions that only appear under the pointer, and on the page that is the canonical example of
+  exactly that it had nothing to aim at: the wrapper is a plain `div` with no role and no link, the
+  caption inside it is hidden until hovered and so counts as unreachable, and the only ref on the
+  whole page was an unrelated footer link. `observe` now also reports elements the page's own
+  stylesheets style on `:hover`. That is the page declaring the element reacts to a pointer, so
+  nothing is exposed that no author asked for — and reading the rule rather than guessing at tag
+  names is what keeps an image-heavy page from flooding the ref list and pushing its real controls
+  out of the budget.
 - **"Waiting for 2 tool calls" no longer outlives the calls, or the app that was running them.**
   That count describes work inside the app's own process, and only `/activity` can confirm it. A
   failed poll deliberately leaves the last number alone — one dropped poll is no evidence the work

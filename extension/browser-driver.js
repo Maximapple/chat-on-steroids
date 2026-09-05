@@ -632,7 +632,77 @@ export const COLLECT_SOURCE = `(() => {
     }
     return 'generic';
   };
-  for (const el of document.querySelectorAll(SELECTOR)) {
+  /**
+   * Elements the page itself styles on :hover, which SELECTOR cannot describe.
+   *
+   * move_ref exists for menus and captions that appear under the pointer, and on the page that
+   * is the canonical example of exactly that — three avatars whose captions are revealed by
+   * ".figure:hover .figcaption" — it had nothing to aim at. The wrapper is a plain div with no
+   * role and no href, the caption inside it is display:none until hovered and so is skipped as
+   * unreachable, and the only ref on the whole page was an unrelated footer link. The feature
+   * was unusable on its own headline case.
+   *
+   * Read from the page's own stylesheets rather than by guessing at tag names. Adding, say,
+   * every img would flood the ref list on an image-heavy page and push real controls past
+   * MAX_ELEMENTS, which breaks pages that work today to fix one that does not. A :hover rule is
+   * the page declaring the element reacts to a pointer, so this only ever exposes what some
+   * author deliberately made hoverable, and pages with no such rule gain nothing.
+   *
+   * Cross-origin sheets throw on .cssRules and are skipped; that is a real gap, not a silent
+   * one — such a page simply keeps the refs it has today. Both the rule walk and the number of
+   * targets are bounded, because a stylesheet is page-controlled input.
+   */
+  const HOVER_TARGET_LIMIT = 100;
+  const hoverTargets = () => {
+    const found = new Set();
+    let sheets = [];
+    try { sheets = Array.from(document.styleSheets); } catch (e) { return found; }
+    let budget = 8000;
+    const walk = (rules) => {
+      for (const rule of rules) {
+        if (budget-- <= 0 || found.size >= HOVER_TARGET_LIMIT) return;
+        const sel = rule.selectorText;
+        if (sel && sel.indexOf(':hover') !== -1) {
+          for (const one of sel.split(',')) {
+            const idx = one.indexOf(':hover');
+            if (idx === -1) continue;
+            // The element the rule hangs off, not what it reveals: ".figure:hover .figcaption"
+            // is a statement about .figure. What it reveals is display:none until then, so it
+            // cannot be the thing a pointer is sent to.
+            const base = one.slice(0, idx).trim();
+            if (!base || base === '*') continue;
+            try {
+              for (const el of document.querySelectorAll(base)) {
+                found.add(el);
+                if (found.size >= HOVER_TARGET_LIMIT) return;
+              }
+            } catch (e) { /* a selector this browser will not parse is not a target */ }
+          }
+        }
+        // After selectorText, never instead of it: a nested style rule carries both.
+        if (rule.cssRules) walk(rule.cssRules);
+      }
+    };
+    for (const sheet of sheets) {
+      let rules = null;
+      try { rules = sheet.cssRules; } catch (e) { continue; }
+      if (rules) walk(rules);
+    }
+    return found;
+  };
+  const hovers = hoverTargets();
+  const candidates = Array.from(document.querySelectorAll(SELECTOR));
+  const already = new Set(candidates);
+  for (const el of hovers) if (!already.has(el)) candidates.push(el);
+  // Document order, so the MAX_ELEMENTS cut keeps taking the page from the top rather than
+  // reporting every interactive element and then a separate tail of hover targets.
+  candidates.sort((a, b) => {
+    const rel = a.compareDocumentPosition(b);
+    if (rel & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (rel & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  });
+  for (const el of candidates) {
     if (seen.length >= ${MAX_ELEMENTS}) break;
     const rect = el.getBoundingClientRect();
     // Off-screen and zero-area elements are not things a pointer can reach, and reporting
@@ -643,10 +713,19 @@ export const COLLECT_SOURCE = `(() => {
     const style = getComputedStyle(el);
     if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) continue;
     if (el.getAttribute('aria-hidden') === 'true') continue;
+    // A hover wrapper's whole point is that its text is hidden until hovered, so name(), which
+    // reads innerText, finds nothing on exactly the elements this exists for. textContent sees
+    // through display:none and gives "name: user1 View profile" — the caption the hover is about,
+    // which is the most useful thing this ref could be called. Only as a fallback, and only for
+    // these: for anything else an empty name is the honest answer.
+    let label = name(el).slice(0, 160);
+    if (!label && hovers.has(el)) {
+      label = (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 160);
+    }
     seen.push({
       path: pathOf(el),
       role: role(el),
-      name: name(el).slice(0, 160),
+      name: label,
       value: 'value' in el && typeof el.value === 'string' ? String(el.value).slice(0, 160) : '',
       disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
       // Only for controls that have a checked state at all.
@@ -1301,7 +1380,7 @@ export const browserDriver = {
           ? at.tagName.toLowerCase() + (at.id ? '#' + at.id : '')
           : null;
         const covered = Boolean(at) && at !== el && !el.contains(at) && !at.contains(el);
-        return JSON.stringify({ found: true, usable, x, y, hit, covered });
+        return JSON.stringify({ found: true, usable, x, y, hit, covered, tag: el.tagName.toLowerCase() });
       })()`,
       contextId,
       returnByValue: true
@@ -1311,11 +1390,18 @@ export const browserDriver = {
     if (!found.found) throw fail('BROWSER_BAD_REF', `${ref} is no longer on this page`);
     if (!found.usable) throw fail('BROWSER_BAD_REF', `${ref} is on the page but not visible or reachable`);
     // Back into the top-level page's coordinates, which is the space input events use.
+    //
+    // `tag`, `path` and `contextId` come back too, for the actions that cannot be expressed as a
+    // point. A native <select> is the case that forced it: its dropdown is painted by the browser
+    // process, so no synthetic event aimed at any coordinate can pick an option. See set_value.
     return {
       x: Math.round(found.x + offset.x),
       y: Math.round(found.y + offset.y),
       hit: found.hit ?? null,
-      covered: Boolean(found.covered)
+      covered: Boolean(found.covered),
+      tag: String(found.tag ?? ''),
+      path,
+      contextId
     };
   },
 
@@ -1500,6 +1586,73 @@ export const browserDriver = {
       }
       case 'set_value': {
         const at = await this.resolveRef(action.ref);
+        /**
+         * A native <select> is not a text field and cannot be driven as one.
+         *
+         * Chrome paints its dropdown in the browser process, above the page and outside the
+         * renderer entirely, so no CDP input event aimed at any coordinate reaches an option.
+         * The typing path below is therefore not merely wrong here, it is unobservable: the click
+         * opens a popup the driver cannot see, insertText goes nowhere, and every call still
+         * reports success. QA spent a step on exactly that — click_ref, keyboard, set_value and
+         * typing in turn, no tool error from any of them, and every read-back still showing
+         * "Please select an option".
+         *
+         * Selecting the option and firing input+change is what the page would observe from a real
+         * selection, and is the only route that exists from out here.
+         */
+        if (at.tag === 'select') {
+          const { result: picked, exceptionDetails: pickFailed } = await send('Runtime.evaluate', {
+            expression: `(() => {
+              const el = document.querySelector(${JSON.stringify(at.path)});
+              if (!el || el.tagName !== 'SELECT') return JSON.stringify({ ok: false, reason: 'gone' });
+              if (el.disabled) return JSON.stringify({ ok: false, reason: 'disabled' });
+              const want = ${JSON.stringify(String(action.text ?? ''))};
+              const norm = (s) => String(s == null ? '' : s).trim().toLowerCase();
+              const options = Array.from(el.options);
+              const label = (o) => (o.label || o.textContent || '');
+              // Exact value first, so a page whose values differ from its labels stays drivable
+              // by the value it actually submits; then either spelling, case and space forgiven.
+              const pick =
+                options.find((o) => o.value === want) ||
+                options.find((o) => norm(o.value) === norm(want)) ||
+                options.find((o) => norm(label(o)) === norm(want));
+              if (!pick) {
+                return JSON.stringify({
+                  ok: false, reason: 'no-option',
+                  options: options.filter((o) => !o.disabled).map((o) => label(o).trim()).slice(0, 20)
+                });
+              }
+              if (pick.disabled) return JSON.stringify({ ok: false, reason: 'option-disabled' });
+              el.focus();
+              el.selectedIndex = pick.index;
+              // Both, in this order, and bubbling: 'input' is what a framework binding listens
+              // for and 'change' is what plain pages listen for. A selection that fired neither
+              // would leave the page's own state behind the control the user can see.
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              return JSON.stringify({ ok: true, value: el.value, label: label(pick).trim() });
+            })()`,
+            contextId: at.contextId,
+            returnByValue: true
+          });
+          if (pickFailed) throw fail('BROWSER_BAD_REF', `${action.ref} could not be set on this page`);
+          const outcome = JSON.parse(String(picked?.value ?? '{}'));
+          if (outcome.reason === 'gone') throw fail('BROWSER_BAD_REF', `${action.ref} is no longer on this page`);
+          if (outcome.reason === 'disabled') throw fail('BROWSER_ACTION_REFUSED', `${action.ref} is disabled`);
+          if (outcome.reason === 'option-disabled') {
+            throw fail('BROWSER_ACTION_REFUSED', `that option of ${action.ref} is disabled`);
+          }
+          if (outcome.reason === 'no-option') {
+            // Naming the choices costs one line and saves the round trip that guessing would take.
+            const offered = (outcome.options ?? []).filter(Boolean).join(', ');
+            throw fail(
+              'BROWSER_ACTION_REFUSED',
+              `${action.ref} has no option matching that text${offered ? `. Options: ${offered}` : ''}`
+            );
+          }
+          if (outcome.ok !== true) throw fail('BROWSER_BAD_REF', `${action.ref} could not be set on this page`);
+          return { set: action.ref, value: outcome.value, selected: outcome.label };
+        }
         // Focus by clicking where the control actually is, select everything, then insert.
         // Writing `value` directly through the DOM skips the input events a page listens for,
         // so a framework-backed field would look changed and behave as if it never was.
