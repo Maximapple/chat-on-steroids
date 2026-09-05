@@ -22,13 +22,9 @@ the app refuses the extension and asks you to reload the matching copy.
   debugger banner Chrome itself shows, and draws a pointer overlay so what the model does is
   never invisible to the person watching. Verified against a real Chromium build, not only unit
   tests, in `npm run verify:browser`.
-- **macOS now publishes the optional Desktop connector.** A thin architecture-specific Swift
-  helper implements window/display capture through ScreenCaptureKit, snapshot-scoped semantic
-  controls through AXUIElement, and physical mouse/keyboard input through CGEvent while preserving
-  the existing `observe` / `computer` schemas, frame identity and partial-batch contract.
-- **macOS packaging and smoke checks include the Desktop helper and screen-capture purpose string.**
-  The helper is compiled natively for each x64/arm64 package, kept outside asar, audited as a thin
-  executable and exercised over its real newline-delimited JSON protocol.
+  <!-- The two macOS Desktop connector entries that stood here were removed: they describe work
+       that shipped upstream in 2.0.3, not work on this branch. The macOS changes that *are* this
+       branch's — the three refusal and parity fixes — are in Fixed below, where they belong. -->
 
 ### Fixed
 - **A link click that reaches nothing now says so, instead of reporting plain success.** Clicking a
