@@ -31,6 +31,25 @@ the app refuses the extension and asks you to reload the matching copy.
   executable and exercised over its real newline-delimited JSON protocol.
 
 ### Fixed
+- **A link click that reaches nothing now says so, instead of reporting plain success.** Clicking a
+  link could return `ok` with the page exactly where it was, and nothing in the answer could tell
+  that apart from a link that simply does not navigate. `hit` and `covered` were the previous
+  answer to this and they are blind to the cause: both are computed inside the page, and the thing
+  swallowing the click is outside it. A Chrome-native dialog — the password-manager leak prompt, a
+  permission bubble — is painted by the browser process over the tab and suspends input to it, so
+  `elementFromPoint` cannot see it, `covered` is honestly `false`, and the click is dispatched,
+  reported trusted, and lands nowhere. QA met this twice on a logout button, the second time with
+  the dialog visible on screen. No protocol event announces such a dialog, so it cannot be
+  detected — but its effect can: when a click resolves to a link that should move the page in this
+  tab, the answer now reports whether it did, names the address it did not reach, and says what
+  kind of thing swallows a click invisibly. Nothing is refused and no click behaves differently.
+- **Refusals that ask for a folder now name the folders.** `WORKSPACE_REQUIRED` told a caller to
+  supply "an explicit approved workdir" without saying which ones exist, and a worker meets it on
+  its very first command — the second thing that ever happens in its chat. It now lists the
+  approved roots, turning a guess into a choice. The fence itself is unchanged and deliberately so:
+  it looks like it could be skipped when only one root is approved, but the failure it was written
+  for — a run that meant a nested project and rebuilt its parent instead — happened inside a single
+  root, so a root count cannot see that ambiguity.
 - **Chrome's error page is no longer mistaken for the site.** Ask three parts of Chrome what a tab
   that failed to load is showing and two of them name the site: measured against a dead port,
   `chrome.tabs` reported the requested address and so did the navigation history, while only the

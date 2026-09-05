@@ -927,9 +927,22 @@ export async function resolveCwd(ctx: ToolContext, virtualPath: string | undefin
   // resolved once per call, before any handler runs, from this exact conversation's identity
   // (`agentForCaller`/`resolve()` in agents.ts) — non-null only when *this* call is genuinely a
   // member of the active run, which is the one case defaulting could reach the wrong project.
+  // Not narrowed to "more than one approved root", though that looks tempting and was tried.
+  //
+  // The reasoning would be that with a single root there is nothing to get wrong, so `roots[0]`
+  // is the only thing the call could mean. The measured failure says otherwise: the run that
+  // meant `…/minecraft-web-demo` and rebuilt the parent Electron app instead was inside one root.
+  // The ambiguity is *which project within* the approved folder, so a root count cannot see it.
   if (!provided && !workspace && currentCall()?.agent) {
+    // Name the folders. A caller told only that it needs "an explicit approved workdir" has to
+    // guess what one looks like, and a worker meets this on its very first command — the second
+    // thing that ever happens in its chat. Saying which folders exist turns the guess into a
+    // choice, the same way naming a select's options did.
+    const approved = ctx.roots.map((root) => `/${root.name}`).join(', ');
     throw new SandboxError(
-      'WORKSPACE_REQUIRED: this multi-agent chat has no proven workspace. Supply an explicit approved workdir before running a command.'
+      'WORKSPACE_REQUIRED: this multi-agent chat has no proven workspace. Supply an explicit ' +
+        'approved workdir before running a command' +
+        (approved ? `. Approved roots: ${approved}` : '.')
     );
   }
   const target = provided ? virtualPath : (workspace?.virtual ?? (ctx.roots[0] ? `/${ctx.roots[0].name}` : ''));

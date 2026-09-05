@@ -20,12 +20,17 @@ candidate* run, fresh. Then baseline:
     npm run verify:browser
     npm run verify:compact-chain
 
-Expected: 2383 tests green, `verify:browser` **60/60**, `verify:compact-chain` verified.
+Expected: everything green, nothing failing. **Do not expect a particular count.** Both suites are
+platform-gated — `it.runIf(process.platform === 'win32')` in the test suite, and one
+`verify:browser` check that only runs on macOS — so the totals differ by platform and a figure
+quoted from a Windows run reads as a regression here. It is not one. Judge by failures, not by
+totals.
 
-Two notes so you do not chase ghosts. `verify:browser` grew from 52 to 60 checks and now covers a
-native select, a hover-revealed caption, a link click, and a tab holding Chrome's error page.
-`verify:compact-chain` needs the app running — start it first (`npm run dev` or the installed
-build); it now says so in one line rather than failing seven checkpoints if you forget.
+Two notes so you do not chase ghosts. `verify:browser` grew from 52 checks and now covers a native
+select, a hover-revealed caption, a link click that works, a link click that reaches nothing, and a
+tab holding Chrome's error page. `verify:compact-chain` needs the app running — start it first
+(`npm run dev` or the installed build); it says so in one line rather than failing seven
+checkpoints if you forget.
 
 Confirm the digest `verify:compact-chain` prints matches the app's connect line.
 
