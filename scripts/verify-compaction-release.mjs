@@ -3,11 +3,12 @@
  *
  * ## Why this exists
  *
- * This is the release the app has now been fixed for twice and confirmed live zero times, across
- * three QA rounds. Every round reached the same wall: reproducing it was thought to need an
- * automatic compaction stalled at `dispatched-unresolved` and then fifteen minutes of ChatGPT's
- * own transport failing, which nobody can induce on demand. Each round made a judgement call
- * instead, and the third one asked, correctly, for this to stop being a judgement call.
+ * This is the release the app was fixed for twice and confirmed live zero times, across three QA
+ * rounds. Every round reached the same wall: reproducing it was thought to need an automatic
+ * compaction stalled at `dispatched-unresolved` and then fifteen minutes of ChatGPT's own
+ * transport failing, which nobody can induce on demand. Each round made a judgement call instead,
+ * and the third asked, correctly, for this to stop being a judgement call. It now is one command,
+ * a restart, and one more command.
  *
  * There is a cheaper door, and the third round found it. `compactionStillChased()` answers false
  * for any continuation opened before `compactionWatchFloor`, which is stamped when *this process*
@@ -22,54 +23,44 @@
  * read, or written — and because the id names no chat, no tab for it can ever exist, so no pickup
  * can reload one and no prompt can be typed anywhere.
  *
- * ## The precondition nobody had written down
+ * ## Why this talks to the app directly
  *
- * A ticket is not enough, and neither is a session. Measured here on 2026-09-05: the synthetic
- * chat had a durable session, a registered request-id attribution and an open continuation below
- * the floor, and the app still declined to recover it —
+ * Not through the extension, and that is the whole reason this works. Earlier versions sent every
+ * message through the content script, because that is how a page talks to the app — and it cannot
+ * survive the wait. `events`, `bind` and `correlate` are gated on `ownsDocument(source)`, so they
+ * need a real injected content script; a headless chatgpt.com with no session redirects to auth
+ * inside two minutes, which unloads the script, posts `/closed`, ends the session and takes the
+ * chat out of the very set being measured. Serving a local page and adding it to the content
+ * script's match patterns does not help either: `content.js` claims its document lazily from
+ * inside its own `ask()`, and on a page that is not ChatGPT its observer loop never runs, so
+ * nothing ever claims it. Both were tried on 2026-09-05; both are recorded here so the next reader
+ * does not spend the afternoon rediscovering them.
  *
- *     bridge: cccccccc-… closed its last tab — not reopened: it has never called a tool
+ * But `ownsDocument` is the *worker's* rule about which page it will relay for, not the app's. The
+ * app's bridge asks for a bearer token, a matching protocol header, and an Origin that is absent
+ * or an extension — and `originOf`'s own comment says the token "is the boundary that actually
+ * carries the weight here". A node client presents no Origin. So the popup is opened once to read
+ * the token and protocol the extension already holds, and everything after that goes straight to
+ * the bridge: no page to die, no document to own, and no browser that has to stay alive.
  *
- * That is deliberate and right. `queueMissingTab`'s own comment says a chat qualifies for recovery
- * on "the one fact that makes it this app's business — it has proved at least one MCP call. A chat
- * that has never called a tool is the user's own browsing." A real chat has always called one by
- * the time it is compacting, so the requirement is invisible in the field and fatal to a synthetic
- * fixture. The recipe the third round wrote down — open a ticket, restart, wait — would have
- * walked the fourth into exactly this wall, which is the wall this script exists to remove.
+ * One consequence worth naming: because no tab is ever bound to this conversation, the `/closed`
+ * path never runs, so the `toolCalls` gate on `queueMissingTab` — which declines a chat that has
+ * "never called a tool" — is never consulted. That gate is real and correct, and it is simply not
+ * on the path this measures. `inspectSilentChats` has no such gate.
  *
- * So pass `--conversation <id>` naming a chat that has actually used the app when you want the
- * whole path to run. The synthetic default still proves the cheap half — that a ticket opens and
- * survives a restart below the floor — and says plainly why it stops there.
+ * ## What this has actually shown
  *
- * ## What was proven here, and what was not
+ * Run end to end on 2026-09-05, both ways round:
  *
- * `open` was run end to end on 2026-09-05 and works: session, attribution, and
- * `continuation … durably opened`, against an id naming no real chat. That was the step the third
- * round called the only expensive one left, and it is no longer expensive.
+ *     fix in place    PASS  {"conversationId":"cccccccc-…","token":"AyL45m0mZOrY",
+ *                            "reason":"silence","focus":false}
+ *     fix removed     FAIL  no repair handed out within four minutes
  *
- * `check` was **not** completed against the synthetic id, for two reasons worth writing down so
- * the next reader does not repeat them:
- *
- *   - `toolCalls` is zero for a chat that only ever had events posted at it, and the reopen path
- *     declines on exactly that (above).
- *   - a headless browser on `chatgpt.com` with no session tears the content script down within a
- *     couple of minutes, which posts `/closed`, ends the session, and takes the chat out of the
- *     silence set before its grant can expire. The window is `CHAT_SILENCE_MS`; the page did not
- *     survive it.
- *
- * Both are properties of the fixture, not of the app. A real chat has tool calls and a page that
- * stays up, which is why `--conversation` exists and why the remaining run belongs on a machine
- * with a live connector rather than in a synthetic harness.
- *
- * One route was tried and abandoned, recorded so nobody spends an afternoon on it twice: serving
- * a local page and adding it to the content script's match patterns, to get a document that
- * outlives the silence window without a login. The script does inject there, but `content.js`
- * sends `register_document` lazily from inside its own `ask()`, and on a page that is not ChatGPT
- * its observer loop never runs — so nothing ever claims the document and every message is refused
- * `stale_document`. Sending `register_document` explicitly from the isolated world got no reply
- * either. The content script is entitled to assume the page it was written for; teaching it to
- * run anywhere else would be a change to the thing under test, which is the wrong trade for a
- * fixture.
+ * The control is the half that makes the first line mean anything: with the floor check in
+ * `compactionStillChased()` commented out — the pre-fix behaviour — the same sequence produced
+ * nothing, and with it restored the app handed out a silence recovery for a chat holding an open
+ * automatic continuation. That is the wedged chat, reproduced on demand and released, against the
+ * running app rather than a unit harness.
  *
  * ## Running it
  *
@@ -179,20 +170,34 @@ try {
   if (!ready) throw new Error('Chrome never opened its debugging port');
 
   /*
-   * The content script's own world, not the popup's.
+   * The extension is used for one thing only: its bearer token.
    *
-   * `bind`, `correlate` and `activity` all check `ownsDocument(source)` — they are the page's
-   * messages, and a popup does not own a document. The isolated world is where the real page
-   * sends them from, and the DevTools protocol can address it by context id, which is the same
-   * trick `verify-compact-chain` uses for the same reason.
+   * Earlier versions of this script sent every message through the content script, because that
+   * is how the page talks to the app. It does not survive the wait. `bind`, `events` and
+   * `correlate` are all gated on `ownsDocument(source)`, so they need a real injected content
+   * script — and a headless chatgpt.com with no session redirects to auth inside two minutes,
+   * which unloads the script, posts `/closed`, ends the session and takes the chat out of the
+   * silence set before its grant can expire. Measured repeatedly on 2026-09-05.
+   *
+   * But `ownsDocument` is the *worker's* rule about which page it will relay for, not the app's.
+   * The app's own bridge asks for two things: a bearer token, and an Origin that is absent or an
+   * extension (`originOf`, with the comment that the token "is the boundary that actually carries
+   * the weight here"). A node client presents no Origin. So the popup is opened once to read the
+   * token the extension already holds, and every request after that goes straight to the bridge —
+   * no page to die, no document to own, and nothing waiting on a browser that has no reason to
+   * stay alive.
    */
+  await fetch(
+    `http://127.0.0.1:${PORT}/json/new?${encodeURIComponent(`chrome-extension://${extensionId}/popup.html`)}`,
+    { method: 'PUT' }
+  );
+  await sleep(3000);
   const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-  const target = list.find((entry) => entry.type === 'page');
-  if (!target) throw new Error('no page target to attach to');
+  const target = list.find((entry) => entry.url.includes(extensionId) && entry.url.includes('popup.html'));
+  if (!target) throw new Error('the extension popup never opened; is this a Chrome that still loads unpacked extensions?');
 
   const socket = new WebSocket(target.webSocketDebuggerUrl);
   const waiting = new Map();
-  const contexts = [];
   let id = 0;
   await new Promise((resolve, reject) => {
     socket.addEventListener('open', resolve);
@@ -200,65 +205,91 @@ try {
   });
   socket.addEventListener('message', (event) => {
     const frame = JSON.parse(event.data);
-    if (frame.method === 'Runtime.executionContextCreated') contexts.push(frame.params.context);
     const settle = waiting.get(frame.id);
     if (settle) { waiting.delete(frame.id); settle(frame); }
   });
   popup = { close: () => socket.close() };
-  const send = (method, params = {}) => new Promise((resolve) => {
-    const message = { id: ++id, method, params };
-    const timer = setTimeout(() => { waiting.delete(message.id); resolve({ error: `${method} timed out` }); }, 60_000);
+  const evaluate = (expression) => new Promise((resolve) => {
+    const message = { id: ++id, method: 'Runtime.evaluate', params: { expression, awaitPromise: true, returnByValue: true } };
+    const timer = setTimeout(() => { waiting.delete(message.id); resolve({ error: 'evaluate timed out' }); }, 60_000);
     waiting.set(message.id, (frame) => {
       clearTimeout(timer);
-      resolve(frame.error ? { error: JSON.stringify(frame.error) } : (frame.result ?? {}));
+      const details = frame.result?.exceptionDetails;
+      resolve(details ? { error: details.text } : { value: frame.result?.result?.value });
     });
     socket.send(JSON.stringify(message));
   });
-  await send('Page.enable');
-  await send('Runtime.enable');
-  await send('Page.navigate', { url: 'https://chatgpt.com/' });
-  await sleep(9000);
-  const world = contexts.find((context) => String(context.origin ?? '').startsWith('chrome-extension://'));
-  if (!world) throw new Error('the content script never injected; no isolated world to speak from');
 
-  /** One message from the page's own world to the worker, which forwards it to the app. */
-  const ask = async (message) => {
-    const result = await send('Runtime.evaluate', {
-      expression: `(async () => {
-        try { return JSON.stringify(await chrome.runtime.sendMessage(${JSON.stringify(message)})); }
-        catch (e) { return JSON.stringify({ threw: String(e && e.message ? e.message : e) }); }
-      })()`,
-      contextId: world.id,
-      returnByValue: true,
-      awaitPromise: true
+  // One message, so the worker discovers the app and provisions a token if it has none yet.
+  await evaluate(`(async () => {
+    try { return JSON.stringify(await chrome.runtime.sendMessage({ type: 'status' })); }
+    catch (e) { return JSON.stringify({ threw: String(e && e.message ? e.message : e) }); }
+  })()`);
+  const held = await evaluate(`(async () => JSON.stringify(
+    await chrome.storage.local.get(['port', 'token'])
+  ))()`);
+  const credential = (() => {
+    try { return JSON.parse(String(held.value ?? '{}')); } catch { return {}; }
+  })();
+  const bridgePort = Number(credential.port) || 8765;
+  const bearer = typeof credential.token === 'string' ? credential.token : '';
+
+  // The protocol handshake the app checks on every request beyond /hello, read from the manifest
+  // and from the extension itself rather than hardcoded — a copy of the number here would be one
+  // more thing to forget when BRIDGE_PROTOCOL moves, and the app answers 426 when it disagrees.
+  const declared = await evaluate(`(async () => JSON.stringify({
+    version: chrome.runtime.getManifest().version,
+    protocol: (await chrome.runtime.sendMessage({ type: 'status' }))?.appProtocol ?? null
+  }))()`);
+  const speaks = (() => {
+    try { return JSON.parse(String(declared.value ?? '{}')); } catch { return {}; }
+  })();
+
+  /** Straight to the app, as the extension would, with no page in the path. */
+  const call = async (route, init = {}) => {
+    const res = await fetch(`http://127.0.0.1:${bridgePort}${route}`, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${bearer}`,
+        'content-type': 'application/json',
+        ...(speaks.version ? { 'x-extension-version': String(speaks.version) } : {}),
+        ...(speaks.protocol !== null && speaks.protocol !== undefined
+          ? { 'x-extension-protocol': String(speaks.protocol) }
+          : {}),
+        ...(init.headers ?? {})
+      }
     });
-    try { return JSON.parse(String(result.result?.value ?? '{}')); }
-    catch { return { unparsed: result.result?.value }; }
+    const text = await res.text();
+    try { return { status: res.status, body: JSON.parse(text) }; }
+    catch { return { status: res.status, body: text }; }
   };
 
-  const status = await ask({ type: 'status' });
-  report(status.connected === true && status.paired === true,
-    'the app is running and the extension is paired',
-    JSON.stringify({ connected: status.connected, paired: status.paired }));
-  if (!status.connected || !status.paired) {
-    console.log('\nStart the app first (npm run dev, or an installed build).');
+  const hello = await call('/hello');
+  report(Boolean(bearer) && hello.status === 200,
+    'the app answers on its bridge with the extension’s token',
+    `port ${bridgePort}, token ${bearer ? 'held' : 'missing'}, /hello ${hello.status}`);
+  if (!bearer || hello.status !== 200) {
+    console.log('\nStart the app first (npm run dev, or an installed build), and make sure');
+    console.log('the extension has paired with it at least once.');
     throw new Error('no app');
   }
 
   if (mode === 'open') {
     // A recorded user message first: the ticket is filed against a conversation the app knows,
     // and a chat with no events is not one.
-    const seeded = await ask({
-      type: 'events',
-      conversationId: CONVERSATION,
-      events: [{
-        kind: 'user_message',
-        time: Date.now(),
-        messageId: `m-release-${Date.now()}`,
-        text: 'seeding a continuation for the compaction-release check'
-      }]
+    const seeded = await call('/events', {
+      method: 'POST',
+      body: JSON.stringify({
+        conversationId: CONVERSATION,
+        events: [{
+          kind: 'user_message',
+          time: Date.now(),
+          messageId: `m-release-${Date.now()}`,
+          text: 'seeding a continuation for the compaction-release check'
+        }]
+      })
     });
-    report(seeded.ok === true, 'the app recorded the synthetic chat', JSON.stringify(seeded).slice(0, 160));
+    report(seeded.status === 200, 'the app recorded the synthetic chat', JSON.stringify(seeded).slice(0, 160));
 
     /*
      * A durable session, which the ticket requires and events alone do not create.
@@ -275,21 +306,26 @@ try {
      * previous round stopped here rather than run a genuine auto-compaction against a real chat,
      * and was right to.
      */
-    const correlated = await ask({
-      type: 'correlate',
-      conversationId: CONVERSATION,
-      calls: [{
-        messageId: `m-release-corr-${Date.now()}`,
-        tool: 'read',
-        order: 0,
-        answered: false,
-        requestId: `wfr_release_${Date.now().toString(16)}`
-      }]
+    const correlated = await call('/correlations', {
+      method: 'POST',
+      body: JSON.stringify({
+        conversationId: CONVERSATION,
+        calls: [{
+          messageId: `m-release-corr-${Date.now()}`,
+          tool: 'read',
+          order: 0,
+          answered: false,
+          requestId: `wfr_release_${Date.now().toString(16)}`
+        }]
+      })
     });
-    report(correlated.ok === true, 'the chat has a durable local session', JSON.stringify(correlated).slice(0, 200));
+    report(correlated.status === 200, 'the chat has a durable local session', JSON.stringify(correlated).slice(0, 200));
 
-    const filed = await ask({ type: 'compact', conversationId: CONVERSATION, ticket: true, automatic: true });
-    const token = filed?.data?.token;
+    const filed = await call('/compact', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: CONVERSATION, ticket: true, automatic: true })
+    });
+    const token = filed?.body?.token;
     report(typeof token === 'string' && token.length > 0,
       'an automatic continuation is open', JSON.stringify(filed).slice(0, 200));
 
@@ -305,12 +341,14 @@ try {
   } else {
     // The chat has to look alive to be worth reloading: an open turn is what earns a silence
     // grant, and the grant expiring is what the recovery pass acts on.
-    const opened = await ask({
-      type: 'events',
-      conversationId: CONVERSATION,
-      events: [{ kind: 'turn_start', time: Date.now(), turnId: `t-release-${Date.now()}` }]
+    const opened = await call('/events', {
+      method: 'POST',
+      body: JSON.stringify({
+        conversationId: CONVERSATION,
+        events: [{ kind: 'turn_start', time: Date.now(), turnId: `t-release-${Date.now()}` }]
+      })
     });
-    report(opened.ok === true, 'the chat has an open turn again', JSON.stringify(opened).slice(0, 160));
+    report(opened.status === 200, 'the chat has an open turn again', JSON.stringify(opened).slice(0, 160));
 
     console.log('\nWaiting for the silence window and the next sweep — up to four minutes.');
     let sawRepair = null;
@@ -320,8 +358,8 @@ try {
       // The app hands repairs out on `/status`, which is the extension's maintenance pass —
       // `drain` posts journal entries and never carries them, so watching it would wait forever
       // and report a working release as broken. The worker's own `status` handler is the poll.
-      const polled = await ask({ type: 'status' });
-      const repairs = polled?.repairs ?? polled?.data?.repairs ?? [];
+      const polled = await call('/status');
+      const repairs = polled?.body?.repairs ?? [];
       sawRepair = (Array.isArray(repairs) ? repairs : [])
         .find((entry) => entry && entry.conversationId === CONVERSATION) ?? null;
       // Deliberately no further events while waiting. `grantActivity` pushes the silence deadline
