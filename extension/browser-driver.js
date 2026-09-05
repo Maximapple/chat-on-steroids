@@ -1395,7 +1395,12 @@ export const browserDriver = {
         // other than where we already are. Anything else — a fragment, a new tab, a script
         // handler — has no outcome that can be checked by watching the address, and guessing at
         // one would file a "nothing happened" report against a click that worked perfectly.
-        const anchor = el.closest ? el.closest('a[href]') : null;
+        // Top document only. The address watched after the click is the page's, and a link inside
+        // an iframe moves the frame while the page stays exactly where it was — so checking one
+        // against the other would report a working click as having reached nothing, which is
+        // worse than saying nothing. The top/self test is a reference comparison and is safe
+        // across origins. (No backticks in here: this whole source is a template literal.)
+        const anchor = window.top === window.self && el.closest ? el.closest('a[href]') : null;
         let expect = '';
         if (anchor && !anchor.target) {
           const href = anchor.href;

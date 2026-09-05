@@ -203,6 +203,13 @@ pad.addEventListener('mouseup', (e) => {
 </script>`;
 
 const FRAME = `<!doctype html><meta charset="utf-8"><title>inner</title>
+<!-- A link that moves this frame and not the page above it. The navigation check watches the
+     page's address, which correctly does not change here — so the check must not run at all
+     rather than report a working click as having reached nothing.
+     First, and on its own line: the log below grows when the button is clicked, and anything
+     after it gets reflowed onto a point the click then misses. A missed click would still show
+     no navigation claim, which is the assertion passing for the wrong reason. -->
+<div><a id="innerlink" href="/second">Frame link</a></div>
 <button id="inner">Inside the frame</button><span id="innerlog">idle</span>
 <script>
 document.getElementById('inner').addEventListener('click', (e) => {
@@ -615,6 +622,34 @@ try {
     `document.getElementById('frame').contentDocument.getElementById('innerlog').textContent`
   );
   check('the iframe received a TRUSTED click', innerLog === 'inner clicked trusted=true', innerLog);
+
+  /*
+   * A link inside an iframe is not a claim about the page's address.
+   *
+   * The navigation check watches the top document, which a frame-local navigation correctly leaves
+   * alone. Comparing one against the other would report a click that worked perfectly as having
+   * reached nothing — a false accusation is worse than no claim, so for a ref outside the top
+   * document no claim is made at all. Deliberately last among the frame checks: it navigates the
+   * frame, which retires the context every other frame ref resolves through.
+   */
+  const frameLinkRef = refFor('Frame link');
+  check('a link inside a frame is observable', Boolean(frameLinkRef), String(frameLinkRef));
+  if (frameLinkRef) {
+    const framed = await act({ type: 'click_ref', ref: frameLinkRef });
+    await sleep(800);
+    const text = String(framed.value ?? '');
+    // The click must actually land on the link, or "no navigation claim" is true for the boring
+    // reason that nothing was clicked.
+    check('the frame link is what got clicked', /"hit":"a#innerlink"/.test(text), text);
+    check('a frame-local link click makes no claim about the page address',
+      !text.includes('"navigated"'), text);
+    const pageTitle = await readPage(`document.title`);
+    check('and the page above it really did not move', pageTitle === 'Driver fixture', String(pageTitle));
+    const framedTitle = await readPage(
+      `document.getElementById('frame').contentDocument.title`
+    ).catch(() => '');
+    check('while the frame itself did move', String(framedTitle) === 'Second document', String(framedTitle));
+  }
 
   check('the pointer overlay is drawn in the page',
     (await readPage(`Boolean(document.getElementById('__cos_pointer__'))`)) === true);
