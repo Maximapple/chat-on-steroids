@@ -42,6 +42,38 @@ describe('a browser answer carries what the driver answered', () => {
     expect(lines[0]).toContain('createdTab={"tabId":99,"url":"https://example.com/new","title":"New tab"}');
   });
 
+  /**
+   * Passing a field through is not the same as passing it through whole.
+   *
+   * The generic renderer above truncates any value past 200 characters with an ellipsis, which is
+   * right for a page title or a long url and wrong for a sentence written to be read. The
+   * swallowed-click note was drafted at 315 and lost its second half at exactly that cut — the
+   * caller would have been told a click reached nothing and not what to do about it, which is the
+   * half worth having. Nothing below the MCP layer could see that: the driver's own suite proved
+   * the field was set, and it was, in full.
+   *
+   * So this asserts the remedy survives rendering, not merely that the field appears.
+   */
+  it('renders the swallowed-click note whole, remedy included', () => {
+    const note =
+      'delivered, but the page did not go there. A Chrome password or permission dialog in ' +
+      'front of the tab can swallow a click invisibly. Check the screen, or use navigate ' +
+      'to reach the address directly.';
+    const { lines } = renderBrowserAction('click_ref', {
+      clicked: { x: 12, y: 34 },
+      hit: 'i',
+      covered: false,
+      navigated: false,
+      expected: 'https://example.com/secure',
+      note
+    });
+    expect(lines[0]).toContain('navigated=false');
+    expect(lines[0]).toContain('expected=https://example.com/secure');
+    // The whole sentence, and no ellipsis: the actionable clause is the last one.
+    expect(lines[0]).toContain('use navigate to reach the address directly.');
+    expect(lines[0]).not.toContain('…');
+  });
+
   it('carries a field nobody has thought of yet', () => {
     // The point of reading the answer rather than listing its fields: this test passes without
     // anyone editing the renderer, which is exactly what did not happen for hit and covered.
