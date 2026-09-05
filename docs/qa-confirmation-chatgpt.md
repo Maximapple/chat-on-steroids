@@ -9,6 +9,23 @@ app can only attribute a call once the extension has observed a real request id 
 turn. If the app's status still reads "Pick the tunnel in ChatGPT", stop and fix that first —
 every step here is unreachable without it.
 
+**What this round is for.** Every step below was driven against the live site on 2026-09-05, from
+a clean profile, through the real extension over CDP — not against a fixture. All of them passed:
+
+    set_value on the real select    -> {"set":"g1_e0","value":"1","selected":"Option 1"}
+    unmatched option                -> BROWSER_ACTION_REFUSED: g1_e0 has no option matching that
+                                       text. Options: Option 1, Option 2   (select left untouched)
+    /hovers observe                 -> all three targets exposed:
+                                       "name: user1 View profile", user2, user3
+    move_ref on one                 -> {"moved":{"x":105,"y":200},"hit":"img","covered":false}
+    Logout click_ref                -> hit=i covered=false navigated=true, landing on /login
+    navigate to a dead port         -> BROWSER_URL_REFUSED naming the unreachable address
+    detach then observe             -> refused, not the Chrome error page
+
+So this is a confirmation that the same code behaves the same way through ChatGPT's own connector
+path, which is the one thing that run could not cover. A disagreement with the table above is the
+interesting result and worth reporting in full; agreement can be one line per step.
+
 ---
 
 You are confirming four browser fixes. Only use the public test site named here. Do not create
