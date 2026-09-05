@@ -1701,11 +1701,17 @@ export const browserDriver = {
           answer.navigated = settled;
           if (!settled) {
             answer.expected = at.expect;
+            // Under 200 characters, deliberately. The MCP layer renders a driver answer by
+            // printing every field it finds — which is what lets a new field like this one arrive
+            // there without being enumerated — and truncates any value past 200 with an ellipsis.
+            // The first draft ran to 315 and lost its whole second half at exactly that cut: the
+            // caller was told a click had been swallowed and not what to do about it, which is the
+            // half worth having. `expected` already carries the address, so this does not repeat
+            // it. Measured through renderBrowserAction rather than estimated — see its test.
             answer.note =
-              'the click was delivered but the page did not go to the link’s address. Something ' +
-              'outside the page can swallow a click without the page seeing it — a Chrome password ' +
-              'or permission dialog in front of the tab is the usual cause, and it is invisible to ' +
-              'this tool. Check the screen, or use navigate to go there directly.';
+              'delivered, but the page did not go there. A Chrome password or permission dialog in ' +
+              'front of the tab can swallow a click invisibly. Check the screen, or use navigate ' +
+              'to reach the address directly.';
           }
         }
         return answer;
