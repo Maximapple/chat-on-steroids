@@ -43,6 +43,9 @@ the app refuses the extension and asks you to reload the matching copy.
   detected — but its effect can: when a click resolves to a link that should move the page in this
   tab, the answer now reports whether it did, names the address it did not reach, and says what
   kind of thing swallows a click invisibly. Nothing is refused and no click behaves differently.
+  The same button was then driven against the live site from a clean profile and worked, with the
+  identical `hit=i covered=false` the failing runs reported — so that signature was never the
+  cause, and the click itself was never broken.
 - **Being fenced out of a browser window now says where to go instead.** Desktop input cannot
   reach a web page that has no focused control yet: the fence asks the application which control
   has keyboard focus, a browser answers only when the page exposes one, and the click that would
