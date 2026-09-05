@@ -61,6 +61,16 @@
  * stays up, which is why `--conversation` exists and why the remaining run belongs on a machine
  * with a live connector rather than in a synthetic harness.
  *
+ * One route was tried and abandoned, recorded so nobody spends an afternoon on it twice: serving
+ * a local page and adding it to the content script's match patterns, to get a document that
+ * outlives the silence window without a login. The script does inject there, but `content.js`
+ * sends `register_document` lazily from inside its own `ask()`, and on a page that is not ChatGPT
+ * its observer loop never runs — so nothing ever claims the document and every message is refused
+ * `stale_document`. Sending `register_document` explicitly from the isolated world got no reply
+ * either. The content script is entitled to assume the page it was written for; teaching it to
+ * run anywhere else would be a change to the thing under test, which is the wrong trade for a
+ * fixture.
+ *
  * ## Running it
  *
  *     node scripts/verify-compaction-release.mjs open     # with the app running
