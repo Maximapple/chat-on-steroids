@@ -1665,7 +1665,12 @@ export const browserDriver = {
          * cannot be detected — but its effect can. The click still happened and is still reported
          * as such; what is added is whether the page went where the link pointed.
          */
-        if (at.expect) {
+        // `before` must be known for the comparison to mean anything. If the address could not be
+        // read at all, every later reading differs from it and the click would be reported as
+        // having navigated — turning this check into the very thing it exists to catch. An
+        // unreadable address says the session is already in trouble; say nothing rather than
+        // something false.
+        if (at.expect && before) {
           const settled = await this.waitForUrlChange(before, CLICK_NAVIGATION_MS);
           answer.navigated = settled;
           if (!settled) {
