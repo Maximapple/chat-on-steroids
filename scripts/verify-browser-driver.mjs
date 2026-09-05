@@ -220,9 +220,42 @@ document.getElementById('inner').addEventListener('click', (e) => {
 const SECOND = `<!doctype html><meta charset="utf-8"><title>Second document</title>
 <h1>Second</h1>`;
 
+/*
+ * A page whose interactive controls and hover targets together exceed MAX_ELEMENTS.
+ *
+ * Its own page on purpose. Filling the budget is the whole point of the fixture, and doing it in
+ * the main one starved the iframe checks that share it — the crowd is meant to compete with the
+ * hover targets, not with the rest of the suite.
+ *
+ * 150 hover-styled rows before 150 ordinary buttons: merged in document order the rows are seen
+ * first and the buttons at the end fall off the budget, which is the regression. Filled
+ * interactive-first they cannot. Everything is tiny and inside the viewport, or it would be
+ * filtered out as unreachable and prove nothing.
+ */
+const CROWD = `<!doctype html><meta charset="utf-8"><title>Crowd</title>
+<style>body{margin:0;font:11px system-ui}.rowy:hover{outline:1px solid #0a0}</style>
+<div id="rows"></div>
+<div id="manybuttons"></div>
+<button id="afterrows" aria-label="Button after the crowd">After</button>
+<script>
+(() => {
+  let html = '';
+  for (let i = 0; i < 150; i++) html += '<span class="rowy" style="display:inline-block;width:4px;height:4px">.</span>';
+  document.getElementById('rows').innerHTML = html;
+  let buttons = '';
+  for (let i = 0; i < 150; i++) buttons += '<button style="width:4px;height:4px;padding:0" aria-label="bulk' + i + '"></button>';
+  document.getElementById('manybuttons').innerHTML = buttons;
+})();
+</script>`;
+
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-  res.end(req.url === '/frame' ? FRAME : req.url.startsWith('/second') ? SECOND : PAGE);
+  res.end(
+    req.url === '/frame' ? FRAME
+      : req.url.startsWith('/crowd') ? CROWD
+        : req.url.startsWith('/second') ? SECOND
+          : PAGE
+  );
 });
 await new Promise((resolve) => server.listen(pagePort, '127.0.0.1', resolve));
 
@@ -1034,6 +1067,36 @@ try {
   check('a driven tab that lands on a refused page is let go of',
     String(landed.refusal ?? '').startsWith('BROWSER_URL_REFUSED') && landed.attached === false,
     wandered.value ?? wandered.error);
+
+  /*
+   * A crowd of hover targets must not cost an interactive control its ref.
+   *
+   * Reading the page's own ":hover" rules is what makes move_ref usable at all, but rules like
+   * "tr:hover" and "li:hover" are ordinary on tables and menus, so a dashboard can declare
+   * hundreds of matches. Merged into one list in document order they are seen first, spend the
+   * element budget on rows, and truncate away the controls further down the page — breaking
+   * pages that work today in order to fix one that did not.
+   *
+   * Judged on the last control of the crowd page, which is exactly the one such a cut loses. It
+   * gets a page of its own because filling the budget in the main fixture starved the iframe
+   * checks that share it: the crowd is meant to compete with the hover targets, not the suite.
+   */
+  const crowded = await run(`(async () => {
+    const driver = globalThis.__driver.browserDriver;
+    await driver.act({ type: 'navigate', url: 'http://127.0.0.1:${pagePort}/crowd' });
+    await new Promise((r) => setTimeout(r, 700));
+    const o = await driver.observe({ screenshot: false });
+    const names = o.elements.map((e) => e.name);
+    await driver.act({ type: 'navigate', url: 'http://127.0.0.1:${pagePort}/' });
+    return JSON.stringify(names);
+  })()`);
+  const crowdNames = (() => {
+    try { return JSON.parse(String(crowded.value ?? '[]')); } catch { return []; }
+  })();
+  check('a crowd of hover targets does not push an interactive control out of the budget',
+    crowdNames.includes('Button after the crowd'),
+    `${crowdNames.length} elements; last few: ${crowdNames.slice(-6).join(' | ')}`);
+  await sleep(900);
 
   /*
    * A tab showing Chrome's error page is not a page to drive, and detach is not a door back in.

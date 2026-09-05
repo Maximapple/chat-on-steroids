@@ -699,18 +699,28 @@ export const COLLECT_SOURCE = `(() => {
     }
     return found;
   };
-  const hovers = hoverTargets();
-  const candidates = Array.from(document.querySelectorAll(SELECTOR));
-  const already = new Set(candidates);
-  for (const el of hovers) if (!already.has(el)) candidates.push(el);
-  // Document order, so the MAX_ELEMENTS cut keeps taking the page from the top rather than
-  // reporting every interactive element and then a separate tail of hover targets.
-  candidates.sort((a, b) => {
+  const inDocumentOrder = (a, b) => {
     const rel = a.compareDocumentPosition(b);
     if (rel & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
     if (rel & Node.DOCUMENT_POSITION_PRECEDING) return 1;
     return 0;
-  });
+  };
+  const hovers = hoverTargets();
+  const interactive = Array.from(document.querySelectorAll(SELECTOR));
+  const already = new Set(interactive);
+  const extra = [];
+  for (const el of hovers) if (!already.has(el)) extra.push(el);
+  extra.sort(inDocumentOrder);
+  // Interactive elements first, and never displaced.
+  //
+  // A hover target is an addition to the surface; it must not cost a button. Rules like
+  // "tr:hover" and "li:hover" are ordinary on tables and menus, so a dashboard can easily
+  // declare a hundred of them, and a single list merged in document order would spend the
+  // MAX_ELEMENTS budget on rows and truncate away the controls further down the page — breaking
+  // pages that work today in order to fix one that did not. Filling in two passes means the cut
+  // always falls on hover targets first, and the output is put back into document order
+  // afterwards so the caller still reads the page from the top.
+  const candidates = interactive.concat(extra);
   for (const el of candidates) {
     if (seen.length >= ${MAX_ELEMENTS}) break;
     const rect = el.getBoundingClientRect();
@@ -732,6 +742,7 @@ export const COLLECT_SOURCE = `(() => {
       label = (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 160);
     }
     seen.push({
+      el,
       path: pathOf(el),
       role: role(el),
       name: label,
@@ -757,12 +768,15 @@ export const COLLECT_SOURCE = `(() => {
       height: Math.round(rect.height)
     });
   }
+  // Back into document order for the caller, after the two-pass fill above chose *which*
+  // elements survive the budget. The element is carried only for this sort and dropped here.
+  seen.sort((a, b) => inDocumentOrder(a.el, b.el));
   return JSON.stringify({
     url: location.href,
     title: document.title,
     scrollY: Math.round(scrollY),
     scrollHeight: Math.round(document.documentElement.scrollHeight),
-    elements: seen
+    elements: seen.map((row) => { const copy = Object.assign({}, row); delete copy.el; return copy; })
   });
 })()`;
 
