@@ -5312,7 +5312,7 @@ function inspectSilentChats(now: number): { queued: boolean; spent: string[] } {
   // transaction simply stops suppressing the check that could rescue it.
   const compacting = new Set(
     pendingAutomaticContinuations()
-      .filter((entry) => compactionPickupsRemain(entry.from))
+      .filter((entry) => compactionStillChased(entry))
       .map((entry) => entry.from)
   );
   for (const [conversationId, grant] of activeUntil) {
@@ -5460,9 +5460,18 @@ function compactionPhaseOf(entry: ContinuationView): CompactionPhase {
  * No watch yet counts as still chasing: the entry is new and `inspectOwedCompactions` arms it on
  * its next sweep, so answering "given up" in that gap would be wrong about a transaction that has
  * not had its first attempt.
+ *
+ * Below the watch floor is the exception, and it is not a corner case. The floor is the moment
+ * *this* process started serving, and `inspectOwedCompactions` skips anything older outright —
+ * an obligation this run never accepted. So a continuation restored from disk has no watch and
+ * never will have one: it is not being chased, and "no watch yet" would answer that it is,
+ * suppressing the silence check for the rest of its six-hour life. That is the same wedged chat
+ * this exists to release, reached by the commoner route — the app was restarted while a handoff
+ * was open, which is exactly how the machine that reported it got there.
  */
-function compactionPickupsRemain(conversationId: string): boolean {
-  const watch = compactionWatch.get(conversationId);
+function compactionStillChased(entry: { from: string; openedAt: number }): boolean {
+  if (compactionWatchFloor === null || entry.openedAt < compactionWatchFloor) return false;
+  const watch = compactionWatch.get(entry.from);
   if (!watch) return true;
   return watch.attempts < COMPACTION_PICKUPS[watch.phase].attempts;
 }

@@ -102,6 +102,13 @@ the app refuses the extension and asks you to reload the matching copy.
   text is deliberately not translated, so the same spelling inside `cmd` is refused. Both rules
   were already enforced; only the description was silent, and one QA round met both sides of the
   gap in a single session.
+- **A handoff open across an app restart no longer costs that chat its browser recovery either.**
+  The compaction pickups that reload a chat mid-handoff only ever apply to tickets this run
+  accepted — anything older is skipped, by design, since the obligation predates the process. But
+  "no pickups scheduled" was being read as "new, about to be scheduled", so a continuation restored
+  from disk counted as busy forever and the silence check skipped that chat for the ticket's whole
+  six-hour life. Same wedged chat as below, by the route people actually take: the app restarted
+  while a handoff was open.
 - **A stalled compaction no longer takes browser recovery down with it.** A chat named by an open
   automatic continuation was skipped by the silence check for the life of that continuation. The
   skip is there so nothing reloads a page out from under a handoff still being worked — but once
