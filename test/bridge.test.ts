@@ -80,6 +80,7 @@ const { createSession, deleteSession, findSessionByConversation, getSession, ini
 );
 const { closeConversation, liveConversations, noteChatOrigin, recordChatObservations, recordProgress, recordToolCall, REQUEST_ID_GRACE_MS, resetRecorderForTests } = await import('../src/main/session/recorder.js');
 const { resetBlockedChatsForTests, setChatBlocked } = await import('../src/main/session/blocked-chats.js');
+const { emptyEvidence, runningToolCalls, trackInFlight } = await import('../src/main/mcp/call-context.js');
 const {
   CONTINUATIONS_STATE,
   abortContinuation,
@@ -3449,6 +3450,62 @@ describe('delivering a bootstrap', () => {
       // is no longer refused with AGENTS_BUSY.
       expect(swarmState().running).toBe(false);
     } finally {
+      resetBlockedChatsForTests();
+    }
+  });
+
+  /**
+   * Blocking a worker that is in the middle of something still frees its slot.
+   *
+   * The case above blocks an idle worker. This one blocks a worker with a tool call actually
+   * running, which is the shape a QA round named as the one it never reached and the one where
+   * "a broker deadlocks if it is going to": the block is the user's stop, the call is work in
+   * flight, and if freeing the slot waited on the work then a worker whose tools are all refused
+   * would hold the run's only slot until its call gave up.
+   *
+   * It does not, and that is a property worth pinning rather than re-deriving: `sleepAgent`
+   * consults the agent's state and its own finish barrier, never `runningToolCalls`. Reading the
+   * code says so today; this says so after someone edits it.
+   */
+  it('frees a blocked worker’s slot while one of its tool calls is still running', async () => {
+    spawn({ workers: [{ task: 'blocked with work in flight' }], caller: { conversationId: PRIME_CHAT } });
+    const workerChat = 'blocked-mid-call-worker';
+    expect(bindConversation('worker-1', workerChat)).toBe(true);
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.state).toBe('active');
+
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // A real in-flight registration, through the seam the MCP dispatcher itself uses, so the
+    // call is genuinely counted against this worker's conversation for the whole sweep.
+    const inFlight = trackInFlight(
+      {
+        startedAt: Date.now(),
+        transportKey: null,
+        agent: 'worker-1',
+        caller: { transportKey: null, requestId: 'wfr_blocked_mid_call', conversationId: workerChat },
+        outcome: null,
+        evidence: emptyEvidence()
+      },
+      () => held
+    );
+
+    try {
+      expect(runningToolCalls(workerChat)).toBeGreaterThan(0);
+      setChatBlocked(workerChat, true);
+      await sweepStaleSwarm(Date.now());
+
+      const log = getLog().map((entry) => entry.message);
+      expect(log.some((line) => line.includes('worker-1 is sleeping — The user blocked its chat'))).toBe(true);
+      // The slot, which is the point: with its only worker asleep the run parks, so the next
+      // prime is not refused with AGENTS_BUSY behind a call that may never come back.
+      expect(swarmState().running).toBe(false);
+      // And the call was neither cancelled nor waited on — it is still exactly where it was.
+      expect(runningToolCalls(workerChat)).toBeGreaterThan(0);
+    } finally {
+      release?.();
+      await inFlight;
       resetBlockedChatsForTests();
     }
   });
