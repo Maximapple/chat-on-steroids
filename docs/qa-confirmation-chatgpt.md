@@ -42,6 +42,13 @@ Quote literal error text; a paraphrase is worth far less. Never report a step yo
    Quote the complete `click_ref` result either way. If a Chrome password or permission dialog is
    on screen, say so and dismiss it, then click Logout again and report whether it works second
    time — that would confirm the dialog is the cause rather than merely present.
+
+   For what it is worth before you start: this exact button was driven against the live site from
+   a clean profile on 2026-09-05 and worked — `hit=i covered=false navigated=true`, landing on
+   `/login`. The login click had the same `hit=i` and also worked. So `hit=i` is not the cause,
+   measured on the real page rather than a fixture, and a profile with no saved-password state has
+   nothing to raise the dialog. A failure here therefore says something about the profile, not the
+   click, and the useful thing to report is what is on screen.
 8. `navigate` to `http://127.0.0.1:1/` — a port nothing is listening on. Report exactly what
    happens; a named refusal is the expected answer.
 9. `detach`, then immediately `observe`. It may re-attach to an ordinary tab; that is deliberate
