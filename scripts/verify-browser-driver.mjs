@@ -113,6 +113,24 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Driver fixture</title>
      naive reading gave the text field one too. (No backticks in here: this page is a template
      literal, and a backtick ends it.) -->
 <input id="agree" type="checkbox" aria-label="Agree to terms">
+<!-- A native select. Chrome paints its dropdown in the browser process, so no synthetic click can
+     ever reach an option — which is why set_value has a branch for it rather than typing. The log
+     is written from a real 'change' listener, so a value set without events would leave it. -->
+<select id="pick" aria-label="Pick a colour">
+  <option value="">Please select an option</option>
+  <option value="r">Red</option>
+  <option value="g">Green</option>
+</select>
+<div id="picklog">no pick</div>
+<!-- The shape of the-internet's /hovers, which move_ref could not touch: a plain wrapper with no
+     role and no href, holding a caption that is display:none until the wrapper is hovered. Nothing
+     here matches the interactive selector, and the caption is unreachable while hidden, so before
+     the stylesheet walk this whole block was invisible to observe. -->
+<style>.figure .figcaption{display:none}.figure:hover .figcaption{display:block}</style>
+<div class="figure" style="width:100px;height:40px;border:1px solid #ccc">
+  <img src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" width="20" height="20">
+  <div class="figcaption"><h5>name: user1</h5><a href="/second">View profile</a></div>
+</div>
 <div id="hoverlog">no hover</div>
 <iframe id="frame" src="/frame" style="width:320px;height:80px;border:1px solid #ccc"></iframe>
 <!-- A small horizontally-scrollable strip, absolutely positioned so it costs the rest of the
@@ -136,6 +154,14 @@ document.getElementById('name').addEventListener('input', () => {
 });
 document.getElementById('name').addEventListener('keydown', (e) => {
   document.getElementById('klog').textContent = 'key:' + e.key + ' trusted=' + e.isTrusted;
+});
+// Deliberately a 'change' listener, and it records the value the page can read back. A driver
+// that set the property without firing events would leave this saying "no pick" while the control
+// on screen looked correct — the exact shape of a set_value that reports success and does nothing.
+// isTrusted is false here and is asserted as false: an option can only be chosen from inside the
+// page, so this is the one action in the driver that is not trusted input.
+document.getElementById('pick').addEventListener('change', (e) => {
+  document.getElementById('picklog').textContent = 'picked ' + e.target.value + ' trusted=' + e.isTrusted;
 });
 document.getElementById('hovertarget').addEventListener('mouseover', (e) => {
   document.getElementById('hoverlog').textContent = 'hovered trusted=' + e.isTrusted;
@@ -499,6 +525,76 @@ try {
   await sleep(300);
   const cleared = await readPage(`document.getElementById('name').value`);
   check('an empty set_value empties the field', cleared === '', JSON.stringify(cleared));
+
+  /*
+   * A native select, which no coordinate can reach.
+   *
+   * Chrome paints the dropdown in the browser process, so the typing path — click, select all,
+   * insertText — opens a popup this driver cannot see and then writes into nothing, reporting
+   * success the whole way. A QA run spent a step on it: click_ref, keyboard, set_value and typing
+   * in turn, no tool error from any of them, every read-back still "Please select an option".
+   *
+   * Judged by the page's own 'change' listener as well as the value, because setting the property
+   * alone would satisfy a value check while leaving every listener on the page unaware.
+   */
+  const selectRef = refFor('Pick a colour');
+  check('a native select is exposed as a ref at all', Boolean(selectRef), String(selectRef));
+  if (selectRef) {
+    await act({ type: 'set_value', ref: selectRef, text: 'Green' });
+    await sleep(300);
+    const pickedValue = await readPage(`document.getElementById('pick').value`);
+    check('set_value picks an option of a native select by its label', pickedValue === 'g', String(pickedValue));
+    // The page's listener ran, with the new value already in place — which is the part that
+    // matters. `trusted=false` is asserted rather than tolerated: this is the one action in the
+    // driver that cannot be trusted input, because the option can only be chosen from inside the
+    // page, and pinning it here means a future change that quietly loses the event is still
+    // caught. A page that gates a select on isTrusted is not drivable; nothing else is affected.
+    const pickLog = await readPage(`document.getElementById('picklog').textContent`);
+    check('the select fired a change event the page can see', pickLog === 'picked g trusted=false', pickLog);
+
+    // By the value it submits, not only by the label it shows.
+    await act({ type: 'set_value', ref: selectRef, text: 'r' });
+    await sleep(300);
+    const byValue = await readPage(`document.getElementById('pick').value`);
+    check('set_value picks a select option by its value too', byValue === 'r', String(byValue));
+
+    // A refusal that names the choices, rather than a success that changed nothing.
+    let refused = null;
+    try {
+      await act({ type: 'set_value', ref: selectRef, text: 'Purple' });
+    } catch (error) {
+      refused = String(error?.message ?? error);
+    }
+    check('an unmatched option is refused and the choices are named',
+      Boolean(refused) && /Red/.test(refused) && /Green/.test(refused), String(refused));
+    const unchanged = await readPage(`document.getElementById('pick').value`);
+    check('a refused set_value leaves the select alone', unchanged === 'r', String(unchanged));
+  }
+
+  /*
+   * A hover-revealed caption, which is what move_ref is for.
+   *
+   * On the-internet's /hovers a QA run found no ref for any of the three hover targets — the only
+   * ref on the page was an unrelated footer link — so the required move_ref could not be made at
+   * all. The wrapper is a plain div and the caption is display:none until hovered, so neither is
+   * reachable through a selector of interactive elements. The page's own ":hover" rule is what
+   * says the wrapper is a target, and that is what observe now reads.
+   */
+  const figureRef = (view.elements ?? []).find((e) => String(e.name ?? '').includes('name: user1'));
+  check('a hover-revealed caption exposes its wrapper as a ref',
+    Boolean(figureRef), (view.elements ?? []).map((e) => e.name).join(' | ').slice(0, 200));
+  if (figureRef) {
+    const hiddenFirst = await readPage(
+      `getComputedStyle(document.querySelector('.figcaption')).display`
+    );
+    check('the caption starts hidden', hiddenFirst === 'none', String(hiddenFirst));
+    await act({ type: 'move_ref', ref: figureRef.ref });
+    await sleep(300);
+    const shownAfter = await readPage(
+      `getComputedStyle(document.querySelector('.figcaption')).display`
+    );
+    check('move_ref on that ref reveals the caption', shownAfter === 'block', String(shownAfter));
+  }
 
   const innerRef = refFor('Inside the frame');
   if (innerRef) await act({ type: 'click_ref', ref: innerRef });
