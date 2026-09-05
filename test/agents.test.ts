@@ -3031,6 +3031,9 @@ describe('through the MCP endpoint', () => {
 
       const text = await execWithNoWorkdir('c-worker-needs-workspace');
       expect(text).toContain('WORKSPACE_REQUIRED');
+      // The refusal names the folders it will accept. A worker meets this on its first command,
+      // and "supply an approved workdir" is only actionable if you know which ones exist.
+      expect(text).toContain('Approved roots: /probe');
     });
   });
 });

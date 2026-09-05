@@ -625,8 +625,12 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           // see resolveCwd's own comment in kernel.ts for the measured reason and the fix it
           // shares this shape with.
           if (!workspace && currentCall()?.agent) {
+            // Named, for the same reason resolveCwd names them: "use an absolute path" is only
+            // actionable if you know which absolute paths exist.
+            const approved = ctx.roots.map((root) => `/${root.name}`).join(', ');
             return fail(
-              'WORKSPACE_REQUIRED: this multi-agent chat has no proven workspace. Use an absolute path in another tool first so the approved project can be learned.'
+              'WORKSPACE_REQUIRED: this multi-agent chat has no proven workspace. Use an absolute path in another tool first so the approved project can be learned.' +
+                (approved ? ` Approved roots: ${approved}` : '')
             );
           }
           const baseVirtual = workspace?.virtual ?? (ctx.roots[0] ? `/${ctx.roots[0].name}` : null);
