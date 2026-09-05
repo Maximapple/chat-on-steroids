@@ -5841,6 +5841,68 @@ describe('unattributed activity recovery', () => {
   });
 
   /**
+   * A compaction that has stopped being chased stops suppressing this pass.
+   *
+   * The skip is for a handoff still being worked, so nothing reloads a chat out from under it.
+   * Once the phase pickups are spent, the compaction machinery is not reloading that chat either,
+   * and the skip only hides a silent chat from the one check that would notice it.
+   *
+   * Measured on macOS on 2026-09-04: six continuations stalled at `dispatched-unresolved` on
+   * ChatGPT transport failures, every one with its three `writing` pickups spent, each chat then
+   * sitting out the full six-hour TTL with no pickup left and no silence recovery. The same shape
+   * was found once before by a different route — see the deleted-session case in ipc.test.ts.
+   *
+   * The ticket stays open on purpose: this is the recovery half, not a decision to abandon a
+   * handoff early. A reloaded page reads the pending ticket back and can still finish it.
+   */
+  it('restores browser recovery to a chat whose compaction pickups are all spent', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      await events(OTHER, [
+        { kind: 'user_message', time: Date.now(), text: 'generate the huge handoff', messageId: 'm-wedged' }
+      ]);
+      const filed = await request('POST', '/compact', {
+        body: { conversationId: OTHER, ticket: true, automatic: true }
+      });
+      const token = filed.body.token as string;
+
+      const pickup = async (): Promise<{ conversationId: string; token: string; reason: string } | null> => {
+        await sweepStaleSwarm(Date.now());
+        return maintenance();
+      };
+
+      // The one asking-phase pickup, spent before the page gets the prompt out.
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
+      const asking = await pickup();
+      expect(asking).toMatchObject({ conversationId: OTHER, reason: 'compaction' });
+      await request('GET', `/status?repaired=${asking!.token}&repairAction=reloaded`);
+
+      // The prompt goes out and the brief never comes back: the writing phase, three pickups.
+      expect((await request('POST', '/compact', { body: { conversationId: OTHER, token, sourceAttempt: true } })).body.allowed).toBe(true);
+      expect((await request('POST', '/compact', { body: { conversationId: OTHER, token, sourceDispatch: true } })).body.armed).toBe(true);
+      expect(continuationByToken(token)?.sourceSend.state).toBe('dispatched-unresolved');
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        const handout = await pickup();
+        expect(handout).toMatchObject({ conversationId: OTHER, reason: 'compaction' });
+        await request('GET', `/status?repaired=${handout!.token}&repairAction=reloaded`);
+      }
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(await pickup()).toBeNull();
+
+      // Spent, and the ticket still open. The chat now goes silent with a turn in the air.
+      await events(OTHER, [openTurn('turn-wedged-by-compaction')]);
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toMatchObject({ conversationId: OTHER, reason: 'silence' });
+      expect(continuationByToken(token)).toMatchObject({ state: 'awaiting-summary' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
    * The prime stops writing with no final answer. Two minutes of silence earn the reload; the
    * fresh page shows the same dead turn; one more minute of nothing — no tool call, no page
    * change — and the loop treats it as it treats a finished answer: the chat is owed the next
