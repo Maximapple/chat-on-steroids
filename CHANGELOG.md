@@ -43,6 +43,16 @@ the app refuses the extension and asks you to reload the matching copy.
   detected — but its effect can: when a click resolves to a link that should move the page in this
   tab, the answer now reports whether it did, names the address it did not reach, and says what
   kind of thing swallows a click invisibly. Nothing is refused and no click behaves differently.
+- **Being fenced out of a browser window now says where to go instead.** Desktop input cannot
+  reach a web page that has no focused control yet: the fence asks the application which control
+  has keyboard focus, a browser answers only when the page exposes one, and the click that would
+  create that focus is itself the click being refused. That is the fence failing closed on honest
+  ignorance of where input would land, which is exactly its job, and it is not being changed. But
+  the way out exists and was never stated — the `browser` tool drives the page over CDP and needs
+  none of this. A QA run met these refusals five times in a row against a browser window,
+  re-observing and retrying between each. `INPUT_TARGET_LOST`, `STALE_UI_SNAPSHOT` and
+  `FOCUS_FAILED` against a browser window now name that remedy, and the original refusal — the
+  partial-batch accounting included — is kept whole in front of it.
 - **Refusals that ask for a folder now name the folders.** `WORKSPACE_REQUIRED` told a caller to
   supply "an explicit approved workdir" without saying which ones exist, and a worker meets it on
   its very first command — the second thing that ever happens in its chat. It now lists the
