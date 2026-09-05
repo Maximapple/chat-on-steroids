@@ -65,6 +65,14 @@ part blocked — do not spend the session working around it, and do not forge id
    the one item the last round could not reach, and it is where a broker deadlocks if it is going
    to. The spawn → work → report → prime-reads-result loop already passed cleanly, so do not spend
    the session re-running it; go straight for the failure path.
+
+   Since that report this is pinned by a test — a real in-flight call registered through
+   `trackInFlight`, the chat blocked under it, the sweep run — which passes, and which was
+   confirmed to fail when `sleepAgent` is made to wait on in-flight work. `sleepAgent` consults
+   the agent's state and its own finish barrier and never `runningToolCalls`, so the slot frees
+   whatever the worker is in the middle of. The question here is therefore no longer "does it
+   deadlock" but whether the live path agrees with the unit one. If it does, say so in a line and
+   move on; a disagreement is the only interesting outcome.
 3. A chat blocked **mid-generation**, not idle. Confirm the refusal is named, the turn stops
    cleanly, and releasing restores tools on the very next call. The last round carried this from an
    earlier build on an identical code path rather than re-driving it, so drive it once here.
