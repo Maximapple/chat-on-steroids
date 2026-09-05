@@ -1427,6 +1427,15 @@ export const browserDriver = {
       .sort((left, right) => (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0))[0];
     if (candidate) {
       await this.attach(candidate.id);
+      // Judged again, by what the tab holds rather than by what it was asked for.
+      //
+      // The filter above reads `tab.url`, which for a page that failed to load is still the
+      // address that was requested — so a tab showing Chrome's error page looks like an ordinary
+      // site and is picked. QA met this straight after a detach: the next observe silently
+      // re-attached and returned `chrome-error://chromewebdata/` as the page, with no refusal
+      // anywhere. attach() cannot answer this either, for the same reason; only the frame tree
+      // can, and only once attached.
+      await this.assertPageStillAllowed();
       return;
     }
     // "No page is open" and "no page whose address I may read" are different problems with
@@ -1479,19 +1488,49 @@ export const browserDriver = {
    * judged by `attach`, and a tab this driver just opened passes through about:blank on its way
    * to the page it was asked for, which is refused and would detach it on arrival.
    */
-  async assertPageStillAllowed() {
-    if (!session) return;
-    let address = '';
+  /**
+   * The address the tab is really showing.
+   *
+   * Three surfaces answer this and two of them lie about a page that failed to load. Measured
+   * against a dead port: `chrome.tabs` reports the requested `http://127.0.0.1:1/`,
+   * `Page.getNavigationHistory` reports the same, and only `Page.getFrameTree` reports what the
+   * tab actually holds — `chrome-error://chromewebdata/`, carrying the address that failed
+   * alongside it as `unreachableUrl`. The isolated world agrees with the frame tree, which is why
+   * observe could describe a Chrome error page as though it were the site: every check upstream
+   * had asked one of the two surfaces that still name the site.
+   */
+  async currentPageUrl() {
+    try {
+      const { frameTree } = await send('Page.getFrameTree');
+      const frame = frameTree?.frame;
+      const url = String(frame?.url ?? '');
+      if (url) return { url, unreachable: String(frame?.unreachableUrl ?? '') };
+    } catch { /* fall back to history below */ }
     try {
       const history = await send('Page.getNavigationHistory');
-      address = String(history?.entries?.[history.currentIndex]?.url ?? '');
+      return { url: String(history?.entries?.[history.currentIndex]?.url ?? ''), unreachable: '' };
     } catch {
       // Unreadable through the protocol means the session is already in trouble; onDetach and
       // tabs.onRemoved cover a tab that has gone, and the next action will fail on its own.
-      return;
+      return { url: '', unreachable: '' };
     }
+  },
+
+  async assertPageStillAllowed() {
+    if (!session) return;
+    const { url: address, unreachable } = await this.currentPageUrl();
     if (!address || !refusedUrl(address)) return;
     await this.detach().catch(() => {});
+    // A page that failed to load is not a page that "moved" somewhere, and saying so sends the
+    // caller looking for a redirect that never happened. The address it could not reach is the
+    // one thing worth naming, because retrying or fixing it is the only way forward.
+    if (unreachable) {
+      throw fail(
+        'BROWSER_URL_REFUSED',
+        `the tab is showing Chrome's error page because ${unreachable} could not be loaded, so there ` +
+          'is no page to drive. The tab has been let go of.'
+      );
+    }
     throw fail(
       'BROWSER_URL_REFUSED',
       `the page moved to ${address}, which browser control refuses. The tab has been let go of.`

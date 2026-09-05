@@ -98,6 +98,10 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Driver fixture</title>
 <button id="dbl" aria-label="Double me">Double</button>
 <div id="pad" style="width:220px;height:70px;border:1px dashed #999">Drag pad</div>
 <a id="onward" href="/second">Go onward</a>
+<!-- The shape of the-internet's Logout button, which a QA run could not actuate: an anchor whose
+     centre lands on an inline child, so click_ref reports hit=i rather than hit=a. The click must
+     still navigate — the event bubbles to the anchor and its default action runs. -->
+<a id="iconlink" class="button" href="/second" style="display:inline-block;width:120px;height:36px"><i id="iconkid" style="display:block;width:120px;height:36px;font-style:normal">&#9881; Log out</i></a>
 <a id="leave" href="about:blank">Leave for a refused page</a>
 <a id="popsNewTab" href="/second" target="_blank">Open in a new tab</a>
 <div id="log">nothing yet</div>
@@ -845,6 +849,33 @@ try {
   const reloadedTitle = await readPage(`document.title`);
   check('reload keeps the same document', reloadedTitle === 'Driver fixture', String(reloadedTitle));
 
+  /*
+   * Clicking a link actually navigates — which nothing here checked before.
+   *
+   * A QA run could not log out of the-internet's secure area: click_ref on its Logout anchor
+   * reported clicked={...} hit=i covered=false and the page stayed put, and a coordinate click and
+   * Enter did no better. `hit=i` is the anchor's centre landing on the inline icon inside it, which
+   * is ordinary and must still navigate, because the event bubbles to the anchor and runs its
+   * default action. This pins that shape: an anchor whose centre resolves to a child element.
+   */
+  const reobserved = await run(`(async () => {
+    const o = await globalThis.__driver.browserDriver.observe({ screenshot: false });
+    return JSON.stringify(o.elements.map((e) => ({ ref: e.ref, name: e.name })));
+  })()`);
+  const afterReload = JSON.parse(String(reobserved.value ?? '[]'));
+  const iconLink = afterReload.find((e) => String(e.name ?? '').includes('Log out'));
+  check('an anchor wrapping an icon is exposed as a ref',
+    Boolean(iconLink), afterReload.map((e) => e.name).join(' | ').slice(0, 200));
+  if (iconLink) {
+    const landed = await act({ type: 'click_ref', ref: iconLink.ref });
+    await sleep(900);
+    const navigatedTitle = await readPage(`document.title`);
+    check('click_ref on a link whose centre is an inline child still navigates',
+      navigatedTitle === 'Second document', `${navigatedTitle} — ${String(landed.value ?? '')}`);
+    await act({ type: 'back' });
+    await sleep(900);
+  }
+
   const refused = await run(`(async () => {
     try { await globalThis.__driver.browserDriver.act({ type: 'click_ref', ref: 'e999' }); return 'NOT REFUSED'; }
     catch (e) { return (e.code || '') + ': ' + e.message; }
@@ -923,6 +954,45 @@ try {
   check('a driven tab that lands on a refused page is let go of',
     String(landed.refusal ?? '').startsWith('BROWSER_URL_REFUSED') && landed.attached === false,
     wandered.value ?? wandered.error);
+
+  /*
+   * A tab showing Chrome's error page is not a page to drive, and detach is not a door back in.
+   *
+   * QA: "After detach said no tab is under control, the very next browser observe succeeded and
+   * returned the Chrome error page instead of refusing." Two things met there. ensureAttached
+   * auto-picks the newest ordinary tab by `tab.url` — which for a page that failed to load is
+   * still the address that was *requested*, so a broken tab looks like an ordinary site. And the
+   * post-attach guard read Page.getNavigationHistory, which tells the same lie. Only the frame
+   * tree reports chrome-error://chromewebdata/, and only once attached.
+   *
+   * Measured here rather than asserted from the docs: against a dead port, chrome.tabs said
+   * http://127.0.0.1:1/, navigation history said http://127.0.0.1:1/, and the frame tree said
+   * chrome-error://chromewebdata/ with unreachableUrl alongside.
+   */
+  const brokenTab = await run(`(async () => {
+    const driver = globalThis.__driver.browserDriver;
+    const out = {};
+    try { await driver.act({ type: 'navigate', url: 'http://127.0.0.1:1/' }); }
+    catch (e) { out.navRefusal = (e.code || '') + ': ' + e.message; }
+    await new Promise((r) => setTimeout(r, 1200));
+    try { const s = await driver.detach(); out.detached = s.attached === false; }
+    catch (e) { out.detachErr = String(e.message); }
+    try {
+      const o = await driver.observe({ screenshot: false });
+      out.observed = o.url ?? '(no url)';
+    } catch (e) { out.refusal = (e.code || '') + ': ' + e.message; }
+    out.attachedAfter = (await driver.status()).attached;
+    return JSON.stringify(out);
+  })()`);
+  const broken = (() => {
+    try { return JSON.parse(String(brokenTab.value ?? '{}')); } catch { return {}; }
+  })();
+  check('an observe after detach refuses a tab holding Chrome’s error page',
+    String(broken.refusal ?? '').startsWith('BROWSER_URL_REFUSED') && broken.observed === undefined,
+    brokenTab.value ?? brokenTab.error);
+  check('and it names the address that could not be loaded',
+    /127\.0\.0\.1:1/.test(String(broken.refusal ?? '')), String(broken.refusal ?? ''));
+  check('and it does not stay attached to it', broken.attachedAfter === false, String(broken.attachedAfter));
 
   // An address the extension cannot read must be refused, not allowed. `tab.url` is undefined
   // for every tab the extension has no access to, and the refusal list is written against that
