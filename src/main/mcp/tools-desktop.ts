@@ -104,8 +104,24 @@ async function browserInputHint(actions: Action[], targetWindow: number | undefi
   }
 }
 
-/** Refusals that mean "desktop input could not be aimed", which is the browser case above. */
-const INPUT_FENCE_CODES = ['INPUT_TARGET_LOST', 'STALE_UI_SNAPSHOT', 'FOCUS_FAILED'];
+/**
+ * Refusals that mean "desktop input could not be aimed", which is the browser case above.
+ *
+ * `INPUT_TARGET_REQUIRED` joined them after a QA round hit it twice in four minutes while trying
+ * to drive a browser window. It already names its own remedy and names it well — supply
+ * targetWindow, a window-bound frame, a semantic ref, or focus in the batch — but every one of
+ * those is a way to aim desktop input at a page, and against a browser the better answer is not
+ * to aim desktop input at all.
+ *
+ * `STALE_FRAME` is deliberately absent. That one is about a capture whose geometry moved, which
+ * is a real answer about the screenshot rather than about where input would land, and it says so.
+ */
+const INPUT_FENCE_CODES = [
+  'INPUT_TARGET_LOST',
+  'INPUT_TARGET_REQUIRED',
+  'STALE_UI_SNAPSHOT',
+  'FOCUS_FAILED'
+];
 
 /**
  * Runs the batch, and on an input-fence refusal against a browser adds the way out.

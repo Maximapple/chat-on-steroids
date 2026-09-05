@@ -155,6 +155,46 @@ describe('Desktop computer browser chords', () => {
     expect(text).toContain('browser tool');
   });
 
+  /**
+   * The refusal that fires *before* the action, for the same reason.
+   *
+   * INPUT_TARGET_REQUIRED names its own remedy well — supply targetWindow, a frame, a ref, or
+   * focus in the batch — but every one of those is a way to aim desktop input at a page, and a QA
+   * round hit it twice in four minutes while driving a browser. Against a browser the better
+   * answer is not to aim desktop input at all.
+   */
+  it('points at the browser tool for the target-required refusal too', async () => {
+    desktop.actAndCapture.mockClear();
+    desktop.activeWindow.mockReset();
+    desktop.activeWindow.mockResolvedValue({ window: chrome, screen });
+    desktop.actAndCapture.mockRejectedValueOnce(
+      new desktop.ComputerError('PARTIAL_BATCH: completed_count=0 failed_index=0. INPUT_TARGET_REQUIRED: application keyboard input requires targetWindow')
+    );
+    const computer = desktopSurface({ control: true }).get('computer')!;
+
+    const result = await computer.handler({ actions: [{ type: 'type', text: 'hello' }] });
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text as string;
+    expect(text).toContain('INPUT_TARGET_REQUIRED');
+    expect(text).toContain('browser tool');
+  });
+
+  /** A capture whose geometry moved is an answer about the screenshot, not about aiming input. */
+  it('leaves a stale-frame refusal alone', async () => {
+    desktop.actAndCapture.mockClear();
+    desktop.activeWindow.mockReset();
+    desktop.activeWindow.mockResolvedValue({ window: chrome, screen });
+    desktop.actAndCapture.mockRejectedValueOnce(
+      new desktop.ComputerError('STALE_FRAME: window 11678 changed geometry before capture')
+    );
+    const computer = desktopSurface({ control: true }).get('computer')!;
+
+    const result = await computer.handler({ actions: [{ type: 'click', x: 10, y: 10, frameId: 1 }] });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('STALE_FRAME');
+    expect(result.content[0].text).not.toContain('browser tool');
+  });
+
   it('adds no browser advice when the window is not a browser', async () => {
     desktop.actAndCapture.mockClear();
     desktop.activeWindow.mockReset();
