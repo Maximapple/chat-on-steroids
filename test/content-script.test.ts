@@ -150,6 +150,8 @@ interface Hook {
   visibleStream(entries: Array<Record<string, any>>, groupId?: string | null): Array<Record<string, any>>;
   /** How long the stop button must stay gone before content.js calls a turn finished. */
   TURN_SETTLE_MS: number;
+  WAIT_STATUS_MS: number;
+  PENDING_TOOLS_TRUST_MS: number;
   /** Test seam for the no-visible-progress fallback. */
   STALL_MS: number;
   /** How long a failed Goal draft waits before it asks again. */
@@ -9340,6 +9342,43 @@ describe('the field above the composer', () => {
     }));
     await live.hook.pullActivity();
     await settle();
+    expect(live.document.querySelector('.clf-stage')).toBeNull();
+  });
+
+  /**
+   * The count describes another process's memory, so it is only as good as the last answer.
+   *
+   * Restarting the app under a live turn left this panel reading "Waiting for 2 tool calls" for
+   * over ten minutes, across a turn that had since completed: the calls died with the old
+   * process, every subsequent pull failed, and a failed pull deliberately leaves the number
+   * alone. Nothing expired it, so the page kept asserting a fact about a process that no longer
+   * existed. An app restart is an ordinary event — the updater performs one.
+   *
+   * A single dropped poll still changes nothing, which is why this expires on a clock rather
+   * than zeroing on the first failure: a count that blinked off at every blip would be a worse
+   * claim than a briefly stale one.
+   */
+  it('stops asserting a pending-tool count once the app has stopped confirming it', async () => {
+    live = await harness('https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', {
+      activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 2 } })
+    });
+    await live.hook.pullActivity();
+    await settle();
+    live.advance(live.hook.WAIT_STATUS_MS * 2);
+    live.hook.injectStage();
+    expect(live.document.querySelector('.clf-stage')?.textContent).toContain('Waiting for 2 tool calls');
+
+    // The app goes away. Every pull fails from here, so nothing refreshes the count.
+    live.reply.set('activity', () => ({ ok: false, error: 'unreachable' }));
+    await live.hook.pullActivity();
+    await settle();
+    live.hook.injectStage();
+    expect(live.document.querySelector('.clf-stage')?.textContent).toContain('Waiting for 2 tool calls');
+
+    live.advance(live.hook.PENDING_TOOLS_TRUST_MS + 1);
+    await live.hook.pullActivity();
+    await settle();
+    live.hook.injectStage();
     expect(live.document.querySelector('.clf-stage')).toBeNull();
   });
 
