@@ -98,6 +98,11 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Driver fixture</title>
 <button id="dbl" aria-label="Double me">Double</button>
 <div id="pad" style="width:220px;height:70px;border:1px dashed #999">Drag pad</div>
 <a id="onward" href="/second">Go onward</a>
+<!-- A link that looks exactly like a working one and goes nowhere. Stands in for the case the
+     driver cannot see: a Chrome-native dialog over the tab swallowing the click. The page cannot
+     be made to host one of those, but the observable outcome is identical — the click is
+     delivered and trusted, hit and covered are honest, and the address does not move. -->
+<a id="swallowed" href="/second">Swallowed link</a>
 <!-- The shape of the-internet's Logout button, which a QA run could not actuate: an anchor whose
      centre lands on an inline child, so click_ref reports hit=i rather than hit=a. The click must
      still navigate — the event bubbles to the anchor and its default action runs. -->
@@ -164,6 +169,9 @@ document.getElementById('name').addEventListener('keydown', (e) => {
 // on screen looked correct — the exact shape of a set_value that reports success and does nothing.
 // isTrusted is false here and is asserted as false: an option can only be chosen from inside the
 // page, so this is the one action in the driver that is not trusted input.
+// Swallows the click the way a browser-native dialog does: the event is delivered and trusted,
+// and the navigation never happens. Nothing readable from inside the page distinguishes the two.
+document.getElementById('swallowed').addEventListener('click', (e) => { e.preventDefault(); });
 document.getElementById('pick').addEventListener('change', (e) => {
   document.getElementById('picklog').textContent = 'picked ' + e.target.value + ' trusted=' + e.isTrusted;
 });
@@ -872,8 +880,45 @@ try {
     const navigatedTitle = await readPage(`document.title`);
     check('click_ref on a link whose centre is an inline child still navigates',
       navigatedTitle === 'Second document', `${navigatedTitle} — ${String(landed.value ?? '')}`);
+    // A working link must say so, or the report below is just noise on every click.
+    check('a link click that worked reports navigated',
+      String(landed.value ?? '').includes('"navigated":true'), String(landed.value ?? ''));
     await act({ type: 'back' });
     await sleep(900);
+  }
+
+  /*
+   * A click that is delivered, is trusted, and reaches nothing.
+   *
+   * QA hit this twice on the-internet's Logout button and the second run caught the cause on
+   * camera: `hit=i covered=false`, the URL unchanged, and a Chrome-native "Passwort ändern"
+   * dialog in front of the tab. Such a dialog is painted by the browser process and suspends
+   * input to the web contents, so `elementFromPoint` cannot see it — `covered` is honestly false
+   * — and no CDP event announces it. The dialog cannot be detected. Its effect can.
+   *
+   * The fixture link swallows its own click, which is indistinguishable from the real case at
+   * every point the driver can observe.
+   */
+  const swallowedAfter = await run(`(async () => {
+    const o = await globalThis.__driver.browserDriver.observe({ screenshot: false });
+    return JSON.stringify(o.elements.map((e) => ({ ref: e.ref, name: e.name })));
+  })()`);
+  const swallowedRef = JSON.parse(String(swallowedAfter.value ?? '[]'))
+    .find((e) => String(e.name ?? '').includes('Swallowed link'));
+  check('the swallowed link is observable', Boolean(swallowedRef), String(swallowedAfter.value ?? '').slice(0, 200));
+  if (swallowedRef) {
+    const dead = await act({ type: 'click_ref', ref: swallowedRef.ref });
+    const text = String(dead.value ?? '');
+    const stillHere = await readPage(`document.title`);
+    check('a link click that reached nothing says so rather than reporting plain success',
+      text.includes('"navigated":false'), text);
+    check('and it names the address the page did not reach',
+      text.includes('"expected"') && /\/second/.test(text), text);
+    check('and the page really did not move', stillHere === 'Driver fixture', String(stillHere));
+    // The old answer is still there: this adds to hit/covered rather than replacing them, and
+    // both are still honestly false here, which is exactly why they were not enough.
+    check('and the honest hit/covered answer is unchanged',
+      text.includes('"covered":false'), text);
   }
 
   const refused = await run(`(async () => {
