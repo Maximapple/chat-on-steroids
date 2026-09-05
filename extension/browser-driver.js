@@ -1476,7 +1476,14 @@ export const browserDriver = {
       // re-attached and returned `chrome-error://chromewebdata/` as the page, with no refusal
       // anywhere. attach() cannot answer this either, for the same reason; only the frame tree
       // can, and only once attached.
-      await this.assertPageStillAllowed();
+      //
+      // Not when the caller brought an address, though. `navigate` is about to replace the
+      // document, so what the tab holds right now is not what it will be driven on — and
+      // refusing here would be a trap rather than a guard: the failed tab stays open, every
+      // later `navigate` auto-picks it, is refused, and detaches again, so the one action that
+      // would fix the situation is the one action that can never run. That is the dead end the
+      // comment below already names, arrived at from the other side.
+      if (!openUrl) await this.assertPageStillAllowed();
       return;
     }
     // "No page is open" and "no page whose address I may read" are different problems with

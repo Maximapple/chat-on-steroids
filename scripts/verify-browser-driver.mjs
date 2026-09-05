@@ -1125,6 +1125,12 @@ try {
       out.observed = o.url ?? '(no url)';
     } catch (e) { out.refusal = (e.code || '') + ': ' + e.message; }
     out.attachedAfter = (await driver.status()).attached;
+    // And out again. The failed tab is still open and is still the newest ordinary one, so every
+    // later navigate auto-picks it — if that were refused too, the situation could never be left.
+    try {
+      await driver.act({ type: 'navigate', url: 'http://127.0.0.1:${pagePort}/second' });
+      out.recovered = (await driver.status()).url;
+    } catch (e) { out.recoverRefusal = (e.code || '') + ': ' + e.message; }
     return JSON.stringify(out);
   })()`);
   const broken = (() => {
@@ -1136,6 +1142,12 @@ try {
   check('and it names the address that could not be loaded',
     /127\.0\.0\.1:1/.test(String(broken.refusal ?? '')), String(broken.refusal ?? ''));
   check('and it does not stay attached to it', broken.attachedAfter === false, String(broken.attachedAfter));
+  // A guard that cannot be left is a trap. The failed tab stays open and stays the newest
+  // ordinary one, so navigate keeps auto-picking it; refusing there too would mean the one action
+  // that fixes the situation is the one action that can never run.
+  check('and navigate can still leave the failed tab',
+    /\/second$/.test(String(broken.recovered ?? '')),
+    `${broken.recovered ?? ''} ${broken.recoverRefusal ?? ''}`);
 
   // An address the extension cannot read must be refused, not allowed. `tab.url` is undefined
   // for every tab the extension has no access to, and the refusal list is written against that
