@@ -1,8 +1,9 @@
 # Confirmation round — Claude Code, macOS
 
-Targeted, not another full sweep. The last round produced three findings and four browser
-failures; this confirms what was fixed and closes the one open question. The four browser-tool
-steps are **not** here — they need an attributed ChatGPT conversation and live in
+Second confirmation round. The previous one closed Findings 2 and 3 live and ran the sub-agent
+loop end to end for the first time; what is left is one item it could not reach, one it carried
+from an older build, and one that is open on evidence rather than on doubt. The browser-tool steps
+are **not** here — they need an attributed ChatGPT conversation and live in
 `docs/qa-confirmation-chatgpt.md`.
 
 Standing authorization to fix and push applies: root cause first, smallest correct fix, a
@@ -11,7 +12,7 @@ no Claude attribution in commits, PRs or tags.
 
 ## Setup
 
-`git pull` → `661247a` or later. Install the macOS arm64 artifact from the newest green *Release
+`git pull` → `03f8f27` or later. Install the macOS arm64 artifact from the newest green *Release
 candidate* run, fresh. Then baseline:
 
     npx tsc --noEmit
@@ -34,34 +35,42 @@ checkpoints if you forget.
 
 Confirm the digest `verify:compact-chain` prints matches the app's connect line.
 
-## Part A — the three findings
+## Part A — the one finding still open
+
+Findings 2 and 3 were confirmed live last round and are **closed** — do not re-run them. Only one
+remains open, and it is open on evidence, not on doubt about the code.
 
 1. **Finding 1, the wedged chat.** The product decision is unchanged: the ticket still runs to its
    six-hour deadline and nothing is abandoned early. What changed is that a chat whose compaction
    pickups are spent no longer loses browser recovery for that whole window — the skip now lasts
-   exactly as long as the chat is still being chased. If you can arrange a stalled handoff, confirm
-   the chat is still reloaded by the silence path afterwards. If you cannot force one, say so
-   plainly; it is genuinely hard to arrange and a guess is worth nothing here.
-2. **Finding 2, the path contract.** Read the `exec_command` schema. `workdir` should now say it
-   takes the same form `read.paths` does, and that paths written inside `cmd` are not translated.
-   Confirm both halves against the running app: a virtual `workdir` is accepted, and the same
-   spelling inside `cmd` is refused. Note that the fix is the opposite of what the last report
-   implied — `workdir` accepts virtual paths and always did; only `cmd` refuses them.
-3. **Finding 3, the stale overlay.** Restart the app under a live turn with tool calls in flight.
-   The "Waiting for N tool calls" panel must clear within about a minute rather than persisting.
-   Last round it survived over ten minutes and a completed turn. Time it.
+   exactly as long as the chat is still being chased.
 
-## Part B — what the last round could not reach
+   The last round could not force a stalled handoff, and was right not to claim one: it needs an
+   automatic compaction to reach `dispatched-unresolved` and then fifteen minutes of ChatGPT's own
+   transport failing, which nobody can induce on demand. Closing the tab produces a different stall
+   shape and would not exercise the same release.
+
+   So: try once if the opportunity arises naturally, and otherwise **say it is unconfirmed and move
+   on**. Do not spend the session manufacturing it. If you find a way to force the exact shape —
+   three spent `writing` pickups on an open ticket — write down how, because that is the missing
+   instrument and it is worth more than one more attempt.
+
+## Part B — the failure paths
 
 Only with an attributable connector. If calls arrive Unattributed, say so at the top and mark this
 part blocked — do not spend the session working around it, and do not forge identity through
 `/pair` and `/correlations`. You were right to refuse that.
 
-4. Sub-agents end to end: spawn a prime, spawn a worker, have it do real work and report back,
-   read the result from the prime. Then a worker blocked mid-run, and confirm the swarm slot frees
-   rather than deadlocking.
-5. A chat blocked **mid-generation**, not idle. Confirm the refusal is named, the turn stops
-   cleanly, and releasing restores tools on the very next call.
+2. **A worker blocked mid-run**, and confirm the swarm slot frees rather than deadlocking. This is
+   the one item the last round could not reach, and it is where a broker deadlocks if it is going
+   to. The spawn → work → report → prime-reads-result loop already passed cleanly, so do not spend
+   the session re-running it; go straight for the failure path.
+3. A chat blocked **mid-generation**, not idle. Confirm the refusal is named, the turn stops
+   cleanly, and releasing restores tools on the very next call. The last round carried this from an
+   earlier build on an identical code path rather than re-driving it, so drive it once here.
+4. While spawning that worker, watch its first command. `WORKSPACE_REQUIRED` now lists the approved
+   roots. Confirm the worker can act on that in one step instead of guessing — that was the report's
+   own example of a loud refusal being the second thing that ever happens in a worker's chat.
 
 ## Report
 

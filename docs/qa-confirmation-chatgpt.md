@@ -29,13 +29,19 @@ Quote literal error text; a paraphrase is worth far less. Never report a step yo
 5. `move_ref` to one of those refs. Confirm the caption appears **without** a click.
 6. `navigate` to `/login`, submit `tomsmith` / `SuperSecretPassword!` (the page's own documented
    demo credentials), and confirm you reach the secure area.
-7. `click_ref` the Logout button. **This one is not fixed and could not be reproduced**, so the
-   evidence matters more than the verdict. Whatever happens, report: the full `observe` entry for
-   that button, the complete `click_ref` result including `hit` and `covered`, the page URL
-   immediately after, and any console error. A fixture with the exact shape you reported last time
-   (`hit=i covered=false`, an anchor whose centre resolves to an inline child) navigates correctly
-   in real Chrome, so if this fails again the cause is something else and that evidence is the
-   only way to find it.
+7. `click_ref` the Logout button. Two outcomes are acceptable and one is not.
+   - It navigates. Fine.
+   - It does not navigate, **and the result says so** — `navigated: false`, the address it did not
+     reach, and a note about something outside the page swallowing the click. Also fine, and it is
+     the honest answer: your last run caught the cause on screen, a Chrome-native "Passwort ändern"
+     dialog in front of the tab. That dialog is painted by the browser process and suspends input
+     to the page; no protocol event announces it, so it cannot be detected, only its effect can.
+   - It does not navigate and the result reads like plain success. **That is a FAIL** and is the
+     thing this fix exists to prevent.
+
+   Quote the complete `click_ref` result either way. If a Chrome password or permission dialog is
+   on screen, say so and dismiss it, then click Logout again and report whether it works second
+   time — that would confirm the dialog is the cause rather than merely present.
 8. `navigate` to `http://127.0.0.1:1/` — a port nothing is listening on. Report exactly what
    happens; a named refusal is the expected answer.
 9. `detach`, then immediately `observe`. It may re-attach to an ordinary tab; that is deliberate
