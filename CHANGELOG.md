@@ -31,6 +31,17 @@ the app refuses the extension and asks you to reload the matching copy.
   executable and exercised over its real newline-delimited JSON protocol.
 
 ### Fixed
+- **Chrome's error page is no longer mistaken for the site.** Ask three parts of Chrome what a tab
+  that failed to load is showing and two of them name the site: measured against a dead port,
+  `chrome.tabs` reported the requested address and so did the navigation history, while only the
+  frame tree reported `chrome-error://chromewebdata/`. Every check upstream had been asking one of
+  the two that lie. So a broken tab looked like an ordinary page to the auto-attach that picks one
+  when nothing is attached, and to the guard that re-checks a page the driver is holding. A QA run
+  met the result: straight after `detach` said no tab was under control, the next `observe`
+  silently re-attached and returned the Chrome error page as though it were a real page, with no
+  refusal anywhere. The address is now read from the frame tree, and a tab holding an error page is
+  refused by name — saying which address could not be loaded, rather than reporting a page that
+  isn't there.
 - **A dropdown can now actually be set.** `set_value` was click, select-all, insert — which is
   right for a text field and cannot work on a native `<select>`, because Chrome paints that
   dropdown in the browser process, outside the page, where no synthetic event of any kind reaches
