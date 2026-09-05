@@ -199,20 +199,37 @@ try {
     }
   };
 
-  for (const [name, fields, expected] of CHECKPOINTS) {
-    const reply = await ask(fields);
-    const error = reply && reply.data ? reply.data.error : undefined;
-    report(error === expected, `${name} reaches its own branch`, `got ${JSON.stringify(error)}`);
-  }
-
-  // A shape with no checkpoint at all must still be routed as an ordinary start request, or the
-  // check above would pass for the wrong reason — every reply being a refusal proves nothing.
-  const plain = await ask({ ticket: false });
+  // The precondition, checked once and named.
+  //
+  // Every assertion below reads an error code out of the app's reply, so with no app running they
+  // all failed identically with "got undefined" — seven failures that read as seven broken
+  // checkpoints and said nothing about the one thing actually wrong. The worker reports a failed
+  // discovery as `app_not_found` at the top level rather than inside `data`, which is precisely
+  // the shape that produced that `undefined`.
+  const reachable = await ask({ sourceAttempt: true });
+  const appMissing = reachable?.error === 'app_not_found';
   report(
-    !plain?.data?.error || !String(plain.data.error).includes('no_such_continuation'),
-    'a request with no checkpoint is not mistaken for one',
-    JSON.stringify(plain?.data?.error ?? plain?.status ?? plain)
+    !appMissing,
+    'the app is running, so the chain can be checked at all',
+    appMissing ? 'not reachable — start it (npm run dev, or an installed build) and run this again' : ''
   );
+
+  if (!appMissing) {
+    for (const [name, fields, expected] of CHECKPOINTS) {
+      const reply = await ask(fields);
+      const error = reply && reply.data ? reply.data.error : undefined;
+      report(error === expected, `${name} reaches its own branch`, `got ${JSON.stringify(error)}`);
+    }
+
+    // A shape with no checkpoint at all must still be routed as an ordinary start request, or the
+    // check above would pass for the wrong reason — every reply being a refusal proves nothing.
+    const plain = await ask({ ticket: false });
+    report(
+      !plain?.data?.error || !String(plain.data.error).includes('no_such_continuation'),
+      'a request with no checkpoint is not mistaken for one',
+      JSON.stringify(plain?.data?.error ?? plain?.status ?? plain)
+    );
+  }
 
   const digest = createHash('sha256').update(await readFile(path.join(EXTENSION, 'background.js'))).digest('hex').slice(0, 12);
   console.log(`\nextension/background.js digest: ${digest}`);
