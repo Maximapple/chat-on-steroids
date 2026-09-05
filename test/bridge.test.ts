@@ -5841,6 +5841,49 @@ describe('unattributed activity recovery', () => {
   });
 
   /**
+   * A continuation this process never adopted is not "being chased" either.
+   *
+   * The compaction watch floor is the instant this run started serving, and `inspectOwedCompactions`
+   * skips anything older outright — so a ticket restored from disk gets no watch, ever. Reading
+   * that absence as "new, about to be armed" made a restarted app suppress the silence check for
+   * the ticket's whole six-hour life: no pickup, no recovery, no explanation. It is the same
+   * wedged chat as the spent-pickups case, by the route users actually take — the app was
+   * restarted while a handoff was open, which is how the machine that reported this got there.
+   */
+  it('restores browser recovery to a chat whose continuation predates this run', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      await events(OTHER, [
+        { kind: 'user_message', time: Date.now(), text: 'generate the huge handoff', messageId: 'm-restart' }
+      ]);
+      const filed = await request('POST', '/compact', {
+        body: { conversationId: OTHER, ticket: true, automatic: true }
+      });
+      const token = filed.body.token as string;
+
+      // A second, so the ticket is strictly older than the floor the restart is about to stamp.
+      // Well inside the two-minute asking cadence, so no pickup is spent here.
+      await vi.advanceTimersByTimeAsync(1_000);
+      // Restarting moves the floor above this ticket, which is what a real restart does to every
+      // continuation on disk.
+      await stopBridge();
+      const restarted = await startBridge();
+      base = `http://127.0.0.1:${restarted}`;
+      await pair();
+
+      await events(OTHER, [openTurn('turn-wedged-across-restart')]);
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toMatchObject({ conversationId: OTHER, reason: 'silence' });
+      // Still open: this is the recovery half only, exactly as in the spent-pickups case.
+      expect(continuationByToken(token)).toMatchObject({ state: 'awaiting-summary' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
    * A compaction that has stopped being chased stops suppressing this pass.
    *
    * The skip is for a handoff still being worked, so nothing reloads a chat out from under it.
