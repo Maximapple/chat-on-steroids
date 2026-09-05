@@ -5292,7 +5292,29 @@ function inspectSilentChats(now: number): { queued: boolean; spent: string[] } {
   let queued = false;
   let deferred = false;
   const spent: string[] = [];
-  const compacting = new Set(pendingAutomaticContinuations().map((entry) => entry.from));
+  // Skipped while the compaction is still being chased, and not one sweep longer.
+  //
+  // The skip exists so this pass does not reload a chat out from under a handoff that is still
+  // being worked. Once the phase pickups are spent, nothing is being worked: the compaction
+  // machinery has stopped reloading that chat itself, so the skip is no longer protecting a
+  // transaction — it is only hiding a silent chat from the one check that would notice.
+  //
+  // Measured on macOS on 2026-09-04: six continuations, all stalled at `dispatched-unresolved`
+  // after ChatGPT transport failures, every one with its three `writing` pickups spent. Each chat
+  // then sat for the full six-hour TTL with no compaction pickup left *and* no ordinary silence
+  // recovery, which is a chat that has simply stopped working for the rest of the afternoon with
+  // nothing to say why. The compaction failing is allowed — it depends on ChatGPT's own transport.
+  // Taking an unrelated subsystem down with it is not.
+  //
+  // Letting recovery through is also the repair, not merely the absence of harm: a reloaded page
+  // reads the pending ticket back through `maybeResumePendingCompaction()` and can finish the
+  // handoff that the dead page could not. Nothing is aborted here and no deadline moves; a stalled
+  // transaction simply stops suppressing the check that could rescue it.
+  const compacting = new Set(
+    pendingAutomaticContinuations()
+      .filter((entry) => compactionPickupsRemain(entry.from))
+      .map((entry) => entry.from)
+  );
   for (const [conversationId, grant] of activeUntil) {
     if (compacting.has(conversationId)) continue;
     if (grant.until > now) continue;
@@ -5426,6 +5448,23 @@ const compactionWatch = new Map<string, { token: string; phase: CompactionPhase;
 function compactionPhaseOf(entry: ContinuationView): CompactionPhase {
   if (entry.state !== 'awaiting-summary') return 'opening';
   return sendUnattempted(entry.sourceSend) ? 'asking' : 'writing';
+}
+
+/**
+ * Whether this chat's compaction is still being chased with reloads.
+ *
+ * A chat with pickups left is mid-transaction and must not be reloaded by anything else. A chat
+ * whose pickups are spent is not being reloaded by this machinery at all any more, so treating it
+ * as busy only hides it from the silence check — see the set built in `inspectSilentChats`.
+ *
+ * No watch yet counts as still chasing: the entry is new and `inspectOwedCompactions` arms it on
+ * its next sweep, so answering "given up" in that gap would be wrong about a transaction that has
+ * not had its first attempt.
+ */
+function compactionPickupsRemain(conversationId: string): boolean {
+  const watch = compactionWatch.get(conversationId);
+  if (!watch) return true;
+  return watch.attempts < COMPACTION_PICKUPS[watch.phase].attempts;
 }
 
 /**

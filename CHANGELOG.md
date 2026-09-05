@@ -31,6 +31,20 @@ the app refuses the extension and asks you to reload the matching copy.
   executable and exercised over its real newline-delimited JSON protocol.
 
 ### Fixed
+- **A stalled compaction no longer takes browser recovery down with it.** A chat named by an open
+  automatic continuation was skipped by the silence check for the life of that continuation. The
+  skip is there so nothing reloads a page out from under a handoff still being worked — but once
+  the phase's scheduled pickups are spent, the compaction machinery has stopped reloading that
+  chat itself, and the skip is no longer protecting a transaction. It is only hiding a silent chat
+  from the one check that would notice. Measured on macOS: six continuations stalled after ChatGPT
+  transport failures, every one with its `writing` pickups spent, each chat then sitting out the
+  full six-hour deadline with no pickup left *and* no silence recovery — a chat that had simply
+  stopped working for the afternoon with nothing on screen to say why. The compaction failing is
+  allowed, since it depends on ChatGPT's own transport; taking an unrelated subsystem down with it
+  is not. The skip now lasts exactly as long as the chat is still being chased. Nothing is aborted
+  and no deadline moves — and letting recovery through is the repair rather than merely the
+  absence of harm, because a reloaded page reads the pending ticket back and can still finish the
+  handoff the dead page could not.
 - **An automatic compaction whose prompt ChatGPT never took could wedge a chat for six hours.**
   The instruction is armed in durable state immediately *before* the click, because a page that
   dies at that moment may or may not have left the prompt with ChatGPT, and re-sending it would
