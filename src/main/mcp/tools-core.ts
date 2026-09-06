@@ -34,6 +34,7 @@ import { SandboxError, isNativeWindowsPath, resolvePath, strayVirtualPath } from
 import { currentWorkspace } from '../workspace.js';
 import type { Capabilities, Root } from '../../shared/types.js';
 import type { FileChange } from '../../shared/session.js';
+import { REASONING_EFFORTS } from '../../shared/session.js';
 import { DEFAULT_EXCLUDES, MAX_CONTENT_FILE_BYTES, globToRegExp, search, searchOneFile } from '../search.js';
 import {
   ApplyPatchError,
@@ -1080,7 +1081,20 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
                 .min(1)
                 .max(4000)
                 .describe(
-                  'This worker\'s job: objective, relevant files, constraints and expected handoff. Model and reasoning are predefined by the user in app settings.'
+                  'This worker\'s job: objective, relevant files, constraints and expected handoff.'
+                ),
+              model: z
+                .string()
+                .max(80)
+                .optional()
+                .describe(
+                  'ChatGPT model slug for this worker only, e.g. to keep an expensive model for yourself. Omit for the default set in app settings.'
+                ),
+              reasoning_effort: z
+                .enum(REASONING_EFFORTS)
+                .optional()
+                .describe(
+                  'How much reasoning this worker uses. Independent of model: it never selects or changes one. Omit for the default set in app settings.'
                 )
             }).strict()
           )

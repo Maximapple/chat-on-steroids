@@ -169,6 +169,7 @@ async function call(surface: SurfaceId, method: string, params: unknown = {}): P
 const core = (method: string, params: unknown = {}): Promise<any> => call('core', method, params);
 const desktop = (method: string, params: unknown = {}): Promise<any> => call('desktop', method, params);
 
+const { REASONING_EFFORTS } = await import('../src/shared/session.js');
 const PROTOCOL_2026 = '2026-07-28';
 const META_VERSION = 'io.modelcontextprotocol/protocolVersion';
 const META_CAPABILITIES = 'io.modelcontextprotocol/clientCapabilities';
@@ -630,6 +631,39 @@ describe('surface boundaries', () => {
     // And an ordinary read from a worker's chat carries nothing at all.
     const call1 = await core('tools/call', { name: 'read', arguments: { paths: ['/workspace/src/app.ts'] } });
     expect(failed(call1)).toBe(false);
+  });
+
+  /**
+   * The prime has to be able to say which model each worker gets — issue #67.
+   *
+   * The broker has accepted per-worker `model` and `reasoning_effort` for a while, validates
+   * both before creating anything, and has tests for the rejection path. What it did not have
+   * was any way for a caller to send them: the `workers` object is `.strict()`, so a spawn
+   * naming a model was rejected outright rather than honoured. This asserts the surface, since
+   * that gate is the one seam the broker's own tests cannot see.
+   */
+  it('lets a spawn choose a model and reasoning level per worker', async () => {
+    everything();
+    const agentsTool = toolList(await core('tools/list')).find((tool) => tool.name === 'agents')!;
+    const worker = agentsTool.inputSchema.properties.workers.items;
+
+    expect(Object.keys(worker.properties).sort()).toEqual(['label', 'model', 'reasoning_effort', 'task']);
+    // Only `task` is required: omitting both keeps exactly the previous behaviour, which is
+    // the account default, or whatever the user chose in settings.
+    expect(worker.required).toEqual(['task']);
+    expect(worker.additionalProperties).toBe(false);
+
+    // Declared as an enum so the caller can discover the vocabulary instead of guessing at it
+    // and having the spawn fail. `pro` belongs here: a worker is a real ChatGPT browser chat.
+    expect(worker.properties.reasoning_effort.enum).toEqual([...REASONING_EFFORTS]);
+    expect(worker.properties.model.type).toBe('string');
+
+    // The task description used to tell the model the opposite — that model and reasoning were
+    // fixed in app settings. A caller that believes that will never pass either field.
+    expect(worker.properties.task.description).not.toMatch(/predefined by the user/i);
+    for (const field of ['model', 'reasoning_effort']) {
+      expect(worker.properties[field].description, field).toMatch(/app settings/i);
+    }
   });
 
   it('removes the agents tool entirely once multi-agent is switched off', async () => {

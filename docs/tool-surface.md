@@ -111,9 +111,11 @@ Available while multi-agent mode is enabled. It has exactly four actions:
   on a limited model can spawn workers on a cheaper one. Omitted means the account default;
   a slug ChatGPT does not recognise opens with the default too. The model is fixed for the
   life of that conversation, including across sleep/wake reuse. Each worker also takes an
-  optional `reasoning_effort`: none, minimal, low, medium, high, xhigh, max or ultra, forwarded
-  on the open URL independently of `model` — a level never selects or changes the model, and
-  omitting both inherits the normal worker defaults.
+  optional `reasoning_effort`: pro, none, minimal, low, medium, high, xhigh, max or ultra,
+  forwarded on the open URL independently of `model` — a level never selects or changes the
+  model, and omitting either inherits the default set in app settings, or the account default
+  when no setting is chosen. The vocabulary is the one in `shared/session.ts`; `pro` is the
+  ChatGPT browser Power tier and is listed here because a worker is a real browser chat.
 - `message` sends one message or an all-or-nothing batch. Messaging a sleeping worker is what
   wakes it, in the chat it already has.
 - `status` reports the run and workers, including who is asleep and how many worker slots are free.
