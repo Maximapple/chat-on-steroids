@@ -71,6 +71,13 @@ describe('open upstream issue hardening bundle', () => {
     expect(verify).not.toContain("runGit(['rev-list', '--all'])");
     expect(verify).toContain("runGit(['rev-list', 'HEAD'])");
     expect(verify).toContain("runGit(['tag', '--merged', 'HEAD', '--list'])");
-    expect(verify).toContain('enforceHistoricalMaintainerIdentity');
+    // Fork inheritance used to be handled by relaxing the identity check whenever the checkout
+    // was not the maintainer's own repository. 2.0.6 replaced that with a stronger rule: find
+    // the canonical repository by URL under whatever name the remote carries, and exempt only
+    // what is already published there. A fork therefore inherits the public history without the
+    // check being switched off in it, so the relaxation must not come back.
+    expect(verify).not.toContain('enforceHistoricalMaintainerIdentity');
+    expect(verify).toContain("remotes.find((remote) => {");
+    expect(verify).toContain("refs/remotes/${canonical ?? 'origin'}/main");
   });
 });

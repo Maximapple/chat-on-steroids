@@ -63,6 +63,7 @@ const {
   onReviveRequest,
   pendingWorkerRevivals,
   primeConversationGone,
+  primeForOwnedConversation,
   WORKER_CONTEXT_CEILING_TOKENS,
   freeWorkerSlots,
   releaseQuiescentRun,
@@ -90,13 +91,13 @@ const {
   workerRevivalClaimed
 } = await import('../src/main/agents.js');
 const { startMcpServer } = await import('../src/main/mcp/server.js');
-const { emptyEvidence, runInCallContext, runningToolCalls } = await import('../src/main/mcp/call-context.js');
+const { runningToolCalls } = await import('../src/main/mcp/call-context.js');
 const { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } = await import('../src/main/durable.js');
 const { findSessionByConversation, initSessionStore, readRecentEvents, resetSessionStoreForTests } = await import(
   '../src/main/session/store.js'
 );
 const { recordChatObservations, resetRecorderForTests } = await import('../src/main/session/recorder.js');
-const { resetWorkspaces, setCurrentWorkspace, setWorkspaceFor, workspaceForChat } = await import('../src/main/workspace.js');
+const { resetWorkspaces, setWorkspaceFor, workspaceForChat } = await import('../src/main/workspace.js');
 const { DEFAULT_CAPABILITIES } = await import('../src/shared/types.js');
 const { makeTempDir, removeTempDir } = await import('./helpers.js');
 
@@ -267,12 +268,11 @@ describe('spawning a run', () => {
     expect(() => spawn({ workers: [{ task: 'one too many' }], caller: prime })).toThrow(/limit|maximum|too many/i);
   });
 
-  it('lets only the prime conversation recruit more workers', () => {
+  it('lets independent primes recruit only into their own worker families', () => {
     startSwarm(1);
-    expect(() => spawn({ workers: [{ task: 'more' }], caller: { conversationId: 'c-stranger' } })).toThrow(
-      /AGENTS_BUSY/
-    );
-    expect(swarmState().agents).toHaveLength(2);
+    spawn({ workers: [{ task: 'more' }], caller: { conversationId: 'c-stranger' } });
+    expect(swarmState().agents).toHaveLength(4);
+    expect(swarmStateForCaller(prime).agents).toHaveLength(2);
     spawn({ workers: [{ task: 'more' }], caller: prime });
     expect(swarmState().agents.map((agent) => agent.id)).toContain('worker-2');
   });
@@ -312,6 +312,116 @@ describe('spawning a run', () => {
     expect(staged.waking).toEqual(['worker-1']);
     staged.commit();
     expect(pendingWorkerRevivals()[0]).toMatchObject({ id: 'worker-1', conversationId: 'c-worker-1' });
+  });
+});
+
+describe('worker models', () => {
+  it('stores the requested model on the worker and hands it to the browser request', () => {
+    const handed: Array<{ id: string; model: string | null }> = [];
+    onSpawnRequest((workers) => handed.push(...workers));
+    const result = spawn({
+      workers: [
+        { label: 'Cheap', task: 'bulk work', model: 'cheap-high-reasoning' },
+        { label: 'Default', task: 'other work' }
+      ],
+      caller: prime
+    });
+    expect(result.created.map((agent) => [agent.id, agent.model])).toEqual([
+      ['worker-1', 'cheap-high-reasoning'],
+      ['worker-2', null]
+    ]);
+    expect(handed).toEqual([
+      expect.objectContaining({ id: 'worker-1', model: 'cheap-high-reasoning' }),
+      expect.objectContaining({ id: 'worker-2', model: null })
+    ]);
+    expect(pendingWorkerSpawns()).toEqual([
+      expect.objectContaining({ id: 'worker-1', model: 'cheap-high-reasoning' }),
+      expect.objectContaining({ id: 'worker-2', model: null })
+    ]);
+  });
+
+  it('treats a blank model as the account default', () => {
+    const result = spawn({ workers: [{ task: 'plain work', model: '   ' }], caller: prime });
+    expect(result.created[0]?.model).toBeNull();
+  });
+
+  it('rejects a malformed model with zero workers created', () => {
+    expect(() =>
+      spawn({ workers: [{ task: 'fine' }, { task: 'bad', model: 'not a slug!' }], caller: prime })
+    ).toThrow(/model.*slug/i);
+    expect(swarmRunning()).toBe(false);
+    expect(swarmState().agents).toEqual([]);
+  });
+
+  it('folds an exact repeat but treats a different model as new work', () => {
+    spawn({ workers: [{ label: 'W', task: 'same task', model: 'model-a' }], caller: prime });
+    const repeat = spawn({ workers: [{ label: 'W', task: 'same task', model: 'model-a' }], caller: prime });
+    expect(repeat.created.map((agent) => agent.id)).toEqual(['worker-1']);
+    const changed = spawn({ workers: [{ label: 'W', task: 'same task', model: 'model-b' }], caller: prime });
+    expect(changed.created.map((agent) => agent.id)).toEqual(['worker-2']);
+    expect(changed.created[0]?.model).toBe('model-b');
+  });
+
+  it('round-trips the model through a snapshot restore and repairs a malformed one', () => {
+    spawn({ workers: [{ label: 'W', task: 'task', model: 'model-a' }], caller: prime });
+    const saved = snapshotSwarm()!;
+    resetAgentsForTests();
+    restoreSwarm(saved);
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.model).toBe('model-a');
+
+    const tampered = snapshotSwarm()!;
+    tampered.activeRuns![0]!.agents.find((entry) => entry.info.id === 'worker-1')!.info.model = 'not a slug!';
+    resetAgentsForTests();
+    restoreSwarm(tampered);
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.model).toBeNull();
+  });
+
+  it('stores reasoning_effort without touching the model', () => {
+    const result = spawn({
+      workers: [{ label: 'High Reasoning', task: 'deep work', reasoning_effort: 'high' }],
+      caller: prime
+    });
+    expect(result.created[0]).toMatchObject({ id: 'worker-1', model: null, reasoningEffort: 'high' });
+    expect(pendingWorkerSpawns()).toEqual([
+      expect.objectContaining({ id: 'worker-1', model: null, reasoningEffort: 'high' })
+    ]);
+  });
+
+  it('rejects an unknown reasoning_effort with zero workers created', () => {
+    expect(() => spawn({ workers: [{ task: 'work', reasoning_effort: 'banana' }], caller: prime })).toThrow(
+      /reasoning_effort must be one of/i
+    );
+    expect(swarmRunning()).toBe(false);
+    expect(swarmState().agents).toEqual([]);
+  });
+
+  it('canonicalizes the level spelling but stores the canonical form', () => {
+    const result = spawn({ workers: [{ task: 'work', reasoning_effort: ' High ' }], caller: prime });
+    expect(result.created[0]?.reasoningEffort).toBe('high');
+  });
+
+  it('folds repeats only when model and reasoning both match', () => {
+    spawn({ workers: [{ label: 'W', task: 'same', reasoning_effort: 'high' }], caller: prime });
+    const repeat = spawn({ workers: [{ label: 'W', task: 'same', reasoning_effort: 'high' }], caller: prime });
+    expect(repeat.created.map((agent) => agent.id)).toEqual(['worker-1']);
+    const changed = spawn({ workers: [{ label: 'W', task: 'same', reasoning_effort: 'low' }], caller: prime });
+    expect(changed.created.map((agent) => agent.id)).toEqual(['worker-2']);
+    expect(changed.created[0]?.reasoningEffort).toBe('low');
+  });
+
+  it('round-trips reasoning_effort through a snapshot restore and repairs a malformed one', () => {
+    spawn({ workers: [{ label: 'W', task: 'task', reasoning_effort: 'high' }], caller: prime });
+    const saved = snapshotSwarm()!;
+    resetAgentsForTests();
+    restoreSwarm(saved);
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.reasoningEffort).toBe('high');
+
+    const tampered = snapshotSwarm()!;
+    // @ts-expect-error a malformed level smuggled past the type system, as disk can hold
+    tampered.activeRuns![0]!.agents.find((entry) => entry.info.id === 'worker-1')!.info.reasoningEffort = 'banana';
+    resetAgentsForTests();
+    restoreSwarm(tampered);
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.reasoningEffort).toBeNull();
   });
 });
 
@@ -460,22 +570,9 @@ describe('at-least-once delivery', () => {
     startSwarm(1);
     const worker = startWorker('worker-1');
 
-    // The prime moves to project B mid-run, through a real call context rather than by poking a
-    // key: `agent` is `prime` and the conversation is proven, which is the only shape a prime's
-    // call can have — every path that sets agent=prime resolves the conversation first. The
-    // point of the assertion below is that such a call writes the conversation key, so there is
-    // no second prime identity for the run's end to collapse back.
-    runInCallContext(
-      {
-        startedAt: Date.now(),
-        transportKey: null,
-        agent: PRIME_ID,
-        caller: { transportKey: null, secret: null, requestId: null, conversationId: PRIME_CHAT },
-        outcome: null,
-        evidence: emptyEvidence()
-      } as never,
-      () => setCurrentWorkspace({ virtual: '/root/project-b', real: 'C:\\root\\project-b' })
-    );
+    // Spawn mirrored project A into `agent:prime`. During the live run the prime is resolved
+    // under that agent identity, so an explicit absolute-path call now moves only that key to B.
+    setWorkspaceFor(`chat:${PRIME_CHAT}`, { virtual: '/root/project-b', real: 'C:\\root\\project-b' });
     expect(workspaceForChat(PRIME_CHAT)?.virtual).toBe('/root/project-b');
 
     fillContext('c-worker-1');
@@ -770,6 +867,10 @@ describe('clearing one agent from the app', () => {
     const primeB: Caller = { conversationId: 'c-prime-b-row-clear' };
     spawn({ workers: [{ task: 'B active work' }], caller: primeB });
     startWorker('worker-1', 'c-worker-b-row-clear');
+    // Slot names repeat, but sidebar parentage follows exact conversation ownership.
+    expect(primeForOwnedConversation('c-worker-a-row-clear')).toBe(PRIME_CHAT);
+    expect(primeForOwnedConversation('c-worker-b-row-clear')).toBe(primeB.conversationId);
+    expect(primeForOwnedConversation('unrelated')).toBeNull();
 
     expect(clearAgent(PRIME_ID).cleared).toBe('run');
     expect(swarmRunning()).toBe(false);
@@ -831,7 +932,7 @@ describe('a worker that is sleeping', () => {
     expect(dormantWorkerNotice('c-worker-1')).toBeNull();
   });
 
-  it('keeps a parked family parked for a worker that is over, or while another prime owns the slot', () => {
+  it('keeps terminal workers parked while allowing sleeping workers their own independent incarnation', () => {
     startSwarm(1);
     const worker = startWorker('worker-1');
     fillContext('c-worker-1');
@@ -845,8 +946,8 @@ describe('a worker that is sleeping', () => {
     finishAgent(other.caller, 'B done');
     expect(releaseQuiescentRun()).toBe(true);
     startSwarm(1, { conversationId: 'c-prime-c' });
-    expect(reactivateDormantRunForConversation('c-worker-b-1')).toBe(false);
-    expect(dormantWorkerNotice('c-worker-b-1')).toContain('WORKER_SLEEPING');
+    expect(reactivateDormantRunForConversation('c-worker-b-1')).toBe(true);
+    expect(dormantWorkerNotice('c-worker-b-1')).toBeNull();
   });
 
   it('lets MCP win only before the browser claims a waking worker', () => {
@@ -1149,7 +1250,8 @@ describe('a worker that is sleeping', () => {
 
     // A can inspect its history while B owns execution, but cannot wake into B's capacity or
     // enqueue work that would be stranded behind somebody else's active incarnation.
-    expect(() => stageMessages(prime, [{ to: 'worker-1', text: 'too early for A' }])).toThrow(/AGENTS_BUSY/i);
+    const parallelWake = stageMessages(prime, [{ to: 'worker-1', text: 'A can wake alongside B' }]);
+    parallelWake.rollback();
     expect(swarmStateForCaller(prime).agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
       state: 'sleeping',
       pending: 0,
@@ -1192,7 +1294,7 @@ describe('a worker that is sleeping', () => {
     expect(releaseQuiescentRun()).toBe(true);
 
     const saved = snapshotSwarm()!;
-    expect(saved.version).toBe(5);
+    expect(saved.version).toBe(6);
     expect(saved.runId).toBeNull();
     expect(saved.dormantRuns).toHaveLength(2);
 
@@ -1812,7 +1914,7 @@ describe('restart', () => {
       revivable: false,
       conversationId: 'c-worker-a-terminal-restore'
     });
-    expect(statusForCaller(prime)).toMatchObject({ runId: null, freeWorkerSlots: 0 });
+    expect(statusForCaller(prime)).toMatchObject({ runId: null, freeWorkerSlots: 3 });
   });
 
   it('persists worker binding and activation as one state transition', () => {
@@ -1830,7 +1932,7 @@ describe('restart', () => {
   it('repairs the legacy bound-but-invited crash snapshot instead of opening a duplicate worker chat', () => {
     startSwarm(1);
     const snapshot = snapshotSwarm()!;
-    const worker = snapshot.agents.find((entry) => entry.info.id === 'worker-1')!.info;
+    const worker = snapshot.activeRuns![0]!.agents.find((entry) => entry.info.id === 'worker-1')!.info;
     // This is the exact intermediate generation the old two-step activation could put on
     // disk if the process died between its two changed() calls.
     worker.conversationId = 'c-worker-1';
@@ -1849,7 +1951,7 @@ describe('restart', () => {
     startSwarm(1);
     startWorker('worker-1');
     const snapshot = snapshotSwarm()!;
-    const worker = snapshot.agents.find((entry) => entry.info.id === 'worker-1')!.info;
+    const worker = snapshot.activeRuns![0]!.agents.find((entry) => entry.info.id === 'worker-1')!.info;
     worker.state = 'finished';
     worker.finishedAt = Date.now();
     worker.result = 'already done';
@@ -2027,7 +2129,7 @@ describe('restart', () => {
 
     expect(swarmState().running).toBe(true);
     expect(snapshotSwarm()?.agents.map((entry) => entry.info.id)).toEqual(['prime', 'worker-1']);
-    expect(pendingWorkerSpawns()).toEqual([{ id: 'worker-1', task: 'inspect topology' }]);
+    expect(pendingWorkerSpawns()).toEqual([{ runId: staged.runId, primeConversationId: PRIME_CHAT, id: 'worker-1', model: null, reasoningEffort: null, task: 'inspect topology' }]);
     expect(ordinary.at(-1)?.agents.map((entry) => entry.info.id)).toEqual(['prime', 'worker-1']);
   });
 
@@ -2365,7 +2467,7 @@ describe('through the MCP endpoint', () => {
     expect(structured.self).toBe(PRIME_ID);
     expect(structured.run_id).toBeNull();
     // A owns history but cannot consume the one global execution claim while B is active.
-    expect(structured.free_worker_slots).toBe(0);
+    expect(structured.free_worker_slots).toBe(3);
     expect(structured.agents).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: 'worker-1', label: 'A history worker', state: 'sleeping' })])
     );
@@ -2373,7 +2475,7 @@ describe('through the MCP endpoint', () => {
     expect(JSON.stringify(structured)).not.toContain('B private task');
   });
 
-  it('fences an exact dormant worker tool call while another prime owns the active run', async () => {
+  it('recognizes an exact sleeping worker still calling while another prime also executes', async () => {
     await setEnabled(true, 3, true);
     startSwarm(1);
     const worker = startWorker('worker-1');
@@ -2399,9 +2501,8 @@ describe('through the MCP endpoint', () => {
     const reply = await ordinaryWithRequestId(requestId, 'read', { paths: ['/anything'] });
     const text = textOfReply(reply);
     await setEnabled(true);
-    expect(text).toContain('WORKER_SLEEPING');
-    expect(text).toContain('Nothing was run');
-    expect(text).not.toMatch(REFUSED_ON_ROOTS);
+    expect(text).not.toContain('WORKER_SLEEPING');
+    expect(text).toMatch(REFUSED_ON_ROOTS);
     expect(identify({ conversationId: 'c-prime-b' }).id).toBe(PRIME_ID);
   });
 
@@ -2549,7 +2650,7 @@ describe('through the MCP endpoint', () => {
     // stranger and it is certainly not given a credential to carry instead.
     const text = await agents('status');
     expect(text).toContain('WORKER_IDENTITY_LOST');
-    expect(text).toMatch(/extension/i);
+    expect(text).toMatch(/No agent operation was performed/);
     expect(text).not.toContain('worker-1');
   });
 
@@ -3035,5 +3136,140 @@ describe('through the MCP endpoint', () => {
       // and "supply an approved workdir" is only actionable if you know which ones exist.
       expect(text).toContain('Approved roots: /probe');
     });
+  });
+});
+
+describe('simultaneous independent prime families', () => {
+  const primeB: Caller = { conversationId: 'parallel-prime-b' };
+  const recruit = (caller: Caller, count = 2) => spawn({ caller,
+    workers: Array.from({ length: count }, (_, i) => ({ task: `parallel task ${i}` })) });
+
+  it('admits two workers for each of two primes and refuses only the full owner', async () => {
+    await setEnabled(true, 2);
+    try {
+      const a = recruit(prime);
+      const b = recruit(primeB);
+      expect(a.runId).not.toBe(b.runId);
+      expect(swarmState().agents.filter(row => row.role === 'worker')).toHaveLength(4);
+      expect(swarmState().agents.filter(row => row.id === 'worker-1').map(row => row.runId)).toEqual([a.runId, b.runId]);
+      for (const caller of [prime, primeB]) {
+        expect(statusForCaller(caller).freeWorkerSlots).toBe(0);
+        expect(() => spawn({ caller, workers: [{ task: 'third task' }] })).toThrow(/limit/);
+      }
+      expect(bindConversation('worker-1', 'parallel-worker-a', a.runId)).toBe(true);
+      expect(bindConversation('worker-1', 'parallel-worker-b', b.runId)).toBe(true);
+      finishAgent({ conversationId: 'parallel-worker-a' }, 'A finished its piece');
+      expect(freeWorkerSlots(a.runId)).toBe(1);
+      expect(freeWorkerSlots(b.runId)).toBe(0);
+      expect(recruit(prime, 1).runId).toBe(a.runId);
+      expect(freeWorkerSlots(a.runId)).toBe(0);
+      expect(freeWorkerSlots('stale-run')).toBe(0);
+    } finally { await setEnabled(true); }
+  });
+
+  it('routes same-named workers and their finish reports only to their exact owners', () => {
+    const a = recruit(prime, 1), b = recruit(primeB, 1);
+    expect(bindConversation('worker-1', 'parallel-worker-a', a.runId)).toBe(true);
+    expect(bindConversation('worker-1', 'parallel-worker-a', b.runId)).toBe(false);
+    expect(bindConversation('worker-1', 'parallel-worker-b', b.runId)).toBe(true);
+    expect(bindConversation('worker-1', 'ambiguous-worker')).toBe(false);
+    sendMessage(prime, 'worker-1', 'A-only instruction');
+    sendMessage(primeB, 'worker-1', 'B-only instruction');
+    expect(offerMessages('worker-1')).toEqual([]);
+    expect(offerMessagesForConversation('parallel-worker-a')?.messages.map(m => m.text)).toEqual(['A-only instruction']);
+    expect(offerMessagesForConversation('parallel-worker-b')?.messages.map(m => m.text)).toEqual(['B-only instruction']);
+    finishAgent({ conversationId: 'parallel-worker-a' }, 'A-only result');
+    expect(offerMessagesForConversation(PRIME_CHAT)?.messages.map(m => m.text).join('')).toContain('A-only result');
+    expect(offerMessagesForConversation(primeB.conversationId)?.messages).toEqual([]);
+    expect(() => recruit({ conversationId: 'parallel-worker-b' }, 1)).toThrow(/worker/i);
+  });
+
+  it('allows independent staged spawns while rollback cannot erase another accepted owner', async () => {
+    const a = stageSpawn({ caller: prime, workers: [{ task: 'A staged' }] });
+    const b = stageSpawn({ caller: primeB, workers: [{ task: 'B staged' }] });
+    expect(pendingWorkerSpawns()).toEqual([]);
+    expect(snapshotSwarm()).toBeNull();
+    expect(bindConversation('worker-1', 'unaccepted', a.runId)).toBe(false);
+    const writes: Array<ReturnType<typeof snapshotSwarm>> = [];
+    onSwarmPersistNow(async snapshot => { writes.push(structuredClone(snapshot)); });
+    expect(await persistCriticalSwarmNow()).toBe(true);
+    expect(writes.at(-1)?.activeRuns?.map(r => r.runId)).toEqual([a.runId, b.runId]);
+    b.commit(); a.rollback();
+    expect(pendingWorkerSpawns()).toEqual([expect.objectContaining({ runId: b.runId, primeConversationId: primeB.conversationId })]);
+    expect(currentRunId(PRIME_CHAT)).toBeNull();
+    expect(currentRunId(primeB.conversationId!)).toBe(b.runId);
+    expect(snapshotSwarm()?.activeRuns?.map(r => r.runId)).toEqual([b.runId]);
+    restoreSwarm(snapshotSwarm());
+    expect(currentRunId(PRIME_CHAT)).toBeNull();
+    expect(currentRunId(primeB.conversationId!)).toBe(b.runId);
+  });
+
+  it('restores both live owners and preserves each inbox and explicit command fence', () => {
+    const a = recruit(prime, 1), b = recruit(primeB, 1);
+    bindConversation('worker-1', 'parallel-worker-a', a.runId);
+    bindConversation('worker-1', 'parallel-worker-b', b.runId);
+    sendMessage(prime, 'worker-1', 'durable A');
+    sendMessage(primeB, 'worker-1', 'durable B');
+    const snapshot = JSON.parse(JSON.stringify(snapshotSwarm()));
+    resetAgentsForTests(); restoreSwarm(snapshot);
+    expect(currentRunId(PRIME_CHAT)).toBe(a.runId);
+    expect(currentRunId(primeB.conversationId!)).toBe(b.runId);
+    expect(offerMessagesForConversation('parallel-worker-a')?.messages.map(m => m.text)).toEqual(['durable A']);
+    expect(offerMessagesForConversation('parallel-worker-b')?.messages.map(m => m.text)).toEqual(['durable B']);
+    expect(acknowledgeOffers('worker-1', false, Infinity, 'old-incarnation')).toEqual([]);
+    expect(pendingCount('worker-1', b.runId)).toBe(1);
+  });
+
+  it('parks and reuses A beside executing B while rejecting A old incarnation commands', () => {
+    const a = recruit(prime, 1), b = recruit(primeB, 1);
+    bindConversation('worker-1', 'parallel-worker-a', a.runId);
+    bindConversation('worker-1', 'parallel-worker-b', b.runId);
+    finishAgent({ conversationId: 'parallel-worker-a' }, 'A sleeps');
+    expect(releaseQuiescentRun({}, a.runId)).toBe(true);
+    const wake = stageMessages(prime, [{ to: 'worker-1', text: 'reuse A' }]);
+    wake.commit();
+    const nextA = currentRunId(PRIME_CHAT)!;
+    expect(nextA).not.toBe(a.runId);
+    expect(currentRunId(primeB.conversationId!)).toBe(b.runId);
+    expect(claimWorkerRevival('worker-1', 'parallel-worker-a', a.runId)).toBe(false);
+    expect(claimWorkerRevival('worker-1', 'parallel-worker-a', nextA)).toBe(true);
+    expect(pendingWorkerRevivals()).toEqual([expect.objectContaining({ runId: nextA, conversationId: 'parallel-worker-a' })]);
+    clearAgent('prime', nextA);
+    expect(currentRunId(PRIME_CHAT)).toBeNull();
+    expect(statusForCaller(primeB).state.agents.find(a => a.id === 'worker-1')?.state).toBe('active');
+  });
+
+  it('fences overlapping prime transfers and preserves B when A resumes', async () => {
+    const { beginPrimeTransfer, freezePrimeTransfer, commitPrimeTransfer, cancelPrimeTransfer } = await import('../src/main/agents.js');
+    const a = recruit(prime, 1), b = recruit(primeB, 1);
+    expect(beginPrimeTransfer(PRIME_CHAT)).toBe(true);
+    expect(beginPrimeTransfer(primeB.conversationId!)).toBe(true);
+    expect(freezePrimeTransfer(PRIME_CHAT)).toBe('frozen');
+    expect(commitPrimeTransfer(PRIME_CHAT, primeB.conversationId!)).toBe(false);
+    expect(commitPrimeTransfer(PRIME_CHAT, 'parallel-prime-a-resumed')).toBe(true);
+    expect(currentRunId(PRIME_CHAT)).toBeNull();
+    expect(currentRunId('parallel-prime-a-resumed')).toBe(a.runId);
+    expect(currentRunId(primeB.conversationId!)).toBe(b.runId);
+    expect(swarmState(a.runId).agents.every(row => row.primeConversationId === 'parallel-prime-a-resumed')).toBe(true);
+    cancelPrimeTransfer(primeB.conversationId!);
+    expect(() => spawn({ caller: primeB, workers: [{ task: 'B next' }] })).not.toThrow();
+  });
+
+  it('publishes a staged finish only into A even when B is cleared and replaced during persistence', async () => {
+    const a = recruit(prime, 1), b = recruit(primeB, 1);
+    bindConversation('worker-1', 'parallel-worker-a', a.runId);
+    const staged = stageFinishAgent({ conversationId: 'parallel-worker-a' }, 'A durable report');
+    let unblock!: () => void;
+    onSwarmPersistNow(async () => { await new Promise<void>(resolve => { unblock = resolve; }); });
+    const barrier = persistCriticalSwarmNow();
+    await Promise.resolve();
+    clearAgent('prime', b.runId);
+    recruit(primeB, 1);
+    onSwarmPersistNow(async () => undefined);
+    unblock();
+    expect(await barrier).toBe(true);
+    staged.commit();
+    expect(offerMessagesForConversation(PRIME_CHAT)?.messages.map(m => m.text).join('')).toContain('A durable report');
+    expect(offerMessagesForConversation(primeB.conversationId)?.messages).toEqual([]);
   });
 });

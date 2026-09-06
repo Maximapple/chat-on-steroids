@@ -14,6 +14,8 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/server';
+import { z } from 'zod';
+import type { PluginToolSchema } from '../../shared/plugin-refresh.js';
 import { createRegistrar, type ToolContext } from './kernel.js';
 import { registerCoreTools } from './tools-core.js';
 import { registerDesktopTools } from './tools-desktop.js';
@@ -23,7 +25,7 @@ import { BUILD_VERSION } from './../version.js';
 import { toVirtualPath } from '../sandbox.js';
 import { logWarn } from '../logger.js';
 
-export function buildServer(ctx: ToolContext, surface: SurfaceId): McpServer {
+export function buildServer(ctx: ToolContext, surface: SurfaceId, observe?: (connectorName: string, version: string, instructions: string, tools: PluginToolSchema[]) => void): McpServer {
   const definition = surfaceDefinition(surface);
   const server = new McpServer(
     // The build, not just the release. This is the one identity that reaches ChatGPT itself, so
@@ -33,7 +35,12 @@ export function buildServer(ctx: ToolContext, surface: SurfaceId): McpServer {
     { capabilities: { tools: {} }, instructions: serverInstructions(ctx, surface) }
   );
 
-  const registrar = createRegistrar(server, ctx, surface);
+  const tools: PluginToolSchema[] = [];
+  const registrar = createRegistrar(server, ctx, surface, observe ? (name, config) => {
+    // Match the SDK's Standard Schema conversion target and object-root normalization.
+    const schema = z.toJSONSchema(config.inputSchema, { target: 'draft-2020-12', io: 'input' });
+    tools.push({ name, description: config.description, inputSchema: { type: 'object', ...schema }, ...(config.annotations ? { annotations: { ...config.annotations } } : {}) });
+  } : undefined);
   if (surface === 'core') registerCoreTools(registrar);
   else registerDesktopTools(registrar);
 
@@ -48,6 +55,7 @@ export function buildServer(ctx: ToolContext, surface: SurfaceId): McpServer {
     }
   }
 
+  observe?.(definition.connectorName, BUILD_VERSION, serverInstructions(ctx, surface), tools);
   return server;
 }
 
