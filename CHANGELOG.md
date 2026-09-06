@@ -9,6 +9,20 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## Unreleased
+
+### Fixed
+- **A prime can choose each worker's model and reasoning level again.** The broker has accepted
+  per-worker `model` and `reasoning_effort` for some time — validating both before creating
+  anything, failing the whole spawn on an unrecognised value, carrying them on the worker's
+  fresh-chat URL, and reporting them in spawn receipts and status — and `docs/tool-surface.md`
+  documented them as available. The `agents` input schema never exposed them: its `workers`
+  object is `.strict()` and declared only `label` and `task`, so a spawn naming a model was
+  rejected outright rather than honoured, and the task description told the caller the opposite,
+  that model and reasoning were fixed in app settings. Both fields are now on the schema, with
+  `reasoning_effort` declared as the canonical vocabulary so a caller can discover it instead of
+  guessing. Omitting them is unchanged: the default from app settings, or the account default.
+
 ## [2.0.6] — 2026-09-06
 
 **I am exhausted.**
