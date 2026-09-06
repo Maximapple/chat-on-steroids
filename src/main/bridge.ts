@@ -156,6 +156,7 @@ import {
   supersededSourceConversations,
   dispatchContinuationDestinationSendNow,
   dispatchContinuationSourceSendNow,
+  normalizeProjectId,
   openContinuationNow,
   releaseContinuationDestinationSendNow,
   repairPrimeFromResumeShadow,
@@ -1186,7 +1187,7 @@ async function fileCompactionTicket(sessionId: string, id: string, automatic = f
   if (isChatBlocked(id)) throw new Error('chat_blocked');
   if (automatic && !automaticCompactionAllowed(await getSession(sessionId))) throw new Error('automatic_compaction_disabled');
   const existing = continuationForSession(sessionId);
-  const opened = existing ?? await openContinuationNow(sessionId, id, automatic);
+  const opened = existing ?? await openContinuationNow(sessionId, id, automatic, observedProject(id));
   rememberToken(sessionId, opened.token);
   changed();
   return { opened, started: !existing };
@@ -1782,6 +1783,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const since = Number(url.searchParams.get('since') ?? 0);
     const goalClient = (url.searchParams.get('goalClient') ?? '').slice(0, 100);
     if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    // Where this chat is being viewed, straight from the page's own address. Older extensions
+    // send nothing, which leaves whatever was already observed alone rather than clearing it.
+    if (url.searchParams.has('project')) noteConversationProject(id, url.searchParams.get('project'));
     const retiredWorker = retiredWorkerForConversation(id);
     const superseded = await conversationWasSuperseded(id);
     /**
@@ -2508,7 +2512,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
 
     let opened;
     try {
-      opened = await openContinuationNow(sessionId, id);
+      opened = await openContinuationNow(sessionId, id, false, observedProject(id));
     } catch (err) {
       logWarn(`bridge: could not durably open Compact & Resume for ${sessionId} — ${err instanceof Error ? err.message : String(err)}`);
       return json(res, 503, { error: 'continuation_not_durable', retryable: true, sessionId }, origin);
@@ -4596,13 +4600,53 @@ export function setBrowserOpener(open: ((url: string) => Promise<void>) | null):
   openInBrowser = open;
 }
 
+/**
+ * The Project each live chat is being viewed in, as last reported by its own page.
+ *
+ * Only the browser can see this: a Project is part of chat A's address, and nothing in the
+ * app's own record of a session says which Project it is filed under. The page reports it on
+ * the poll it already makes, and it is read once, when a continuation opens, and copied onto
+ * that continuation -- which is what survives a restart. This map is deliberately not durable:
+ * it is a cache of what a live page said a moment ago, and a page that is gone cannot be
+ * trusted to still describe where its chat lives.
+ *
+ * Bounded, because entries are only ever added by a chat being polled.
+ */
+const projectByConversation = new Map<string, string>();
+const MAX_OBSERVED_PROJECTS = 256;
+
+function noteConversationProject(conversationId: string, raw: string | null): void {
+  const project = normalizeProjectId(raw);
+  if (!project) {
+    // An explicit "not in a Project" is information too: a chat moved out of one must stop
+    // being remembered as in it. Only a malformed value is ignored rather than believed.
+    if (raw === null || raw === '') projectByConversation.delete(conversationId);
+    return;
+  }
+  if (!projectByConversation.has(conversationId) && projectByConversation.size >= MAX_OBSERVED_PROJECTS) {
+    const oldest = projectByConversation.keys().next();
+    if (!oldest.done) projectByConversation.delete(oldest.value);
+  }
+  projectByConversation.set(conversationId, project);
+}
+
+/** The Project a fresh chat opened for this conversation should be created in. */
+function observedProject(conversationId: string | null): string | null {
+  return conversationId ? projectByConversation.get(conversationId) ?? null : null;
+}
+
 /** The one place this app writes a ChatGPT conversation URL. */
 export function chatUrl(conversationId: string): string {
   return `https://chatgpt.com/c/${encodeURIComponent(conversationId)}`;
 }
 
 /** Where the app opens a fresh worker/resume chat. The marker is an id, not a credential. */
-export function commandUrl(id: string, model?: string | null, reasoningEffort?: ReasoningEffort | null): string {
+export function commandUrl(
+  id: string,
+  model?: string | null,
+  reasoningEffort?: ReasoningEffort | null,
+  project?: string | null
+): string {
   // Both a query and a fragment: ChatGPT is a single-page app that rewrites its own URL
   // during boot, and which of the two survives has changed between builds. The content
   // script accepts either, and redeeming still requires the extension's bearer token —
@@ -4613,11 +4657,19 @@ export function commandUrl(id: string, model?: string | null, reasoningEffort?: 
   // declared creation intent, forwarded independently: it never selects or changes the
   // model, and whether ChatGPT applies it is proven by the chat's own picker state, not
   // by this URL.
+  //
+  // A chat created inside a Project has to be started from that Project's own page, because
+  // the address is the only thing that says which Project a new conversation belongs to --
+  // issue #84. `/g/<id>/project` is that page. The id is normalized first, so a display name
+  // that happens to be in a stored value can never reach the path, and anything unrecognised
+  // falls back to the root exactly as before rather than to an address nobody has seen.
   const marker = `clf=${encodeURIComponent(id)}`;
   const params = [marker];
   if (model) params.push(`model=${encodeURIComponent(model)}`);
   if (reasoningEffort) params.push(`reasoning_effort=${encodeURIComponent(reasoningEffort)}`);
-  return `https://chatgpt.com/?${params.join('&')}#${marker}`;
+  const inProject = normalizeProjectId(project);
+  const base = inProject ? `https://chatgpt.com/g/${inProject}/project` : 'https://chatgpt.com/';
+  return `${base}?${params.join('&')}#${marker}`;
 }
 
 /**
@@ -4704,7 +4756,7 @@ export const BROWSER_PLACEMENT_MS = 20_000;
 let placementCollector: string | null = null;
 
 /** The one fresh chat currently offered to its home page, and the fallback that outlives it. */
-let placementOffer: { id: string; conversationId: string | null; model: string | null; reasoningEffort: ReasoningEffort | null } | null = null;
+let placementOffer: { id: string; conversationId: string | null; model: string | null; reasoningEffort: ReasoningEffort | null; project: string | null } | null = null;
 let placementTimer: NodeJS.Timeout | null = null;
 
 /** Drops the standing offer and its fallback. Called by every path that ends a command. */
@@ -4730,7 +4782,11 @@ function offerPlacement(command: Command): boolean {
     id: command.id,
     conversationId: backgroundWorker ? null : home,
     model: command.spec.type === 'worker' ? command.spec.model : null,
-    reasoningEffort: command.spec.type === 'worker' ? command.spec.reasoningEffort : null
+    reasoningEffort: command.spec.type === 'worker' ? command.spec.reasoningEffort : null,
+    // Named by the app so both placement paths agree. The extension can read the Project off
+    // the tab it is placing beside, but only for a chat it can still see; a background worker
+    // has no such tab, and the OS fallback below has none either.
+    project: commandProject(command)
   };
   placementTimer = setTimeout(() => {
     placementTimer = null;
@@ -4756,7 +4812,7 @@ function offerPlacement(command: Command): boolean {
  * a second one. If that page fails to act, the fallback above is what recovers it, not a
  * repeated offer.
  */
-function pendingBrowserPlacement(conversationId: string | null): { id: string; model: string | null; reasoningEffort: ReasoningEffort | null; background?: true } | null {
+function pendingBrowserPlacement(conversationId: string | null): { id: string; model: string | null; reasoningEffort: ReasoningEffort | null; project?: string; background?: true } | null {
   const offer = placementOffer;
   if (!offer || offer.conversationId !== conversationId) return null;
   if (!commands.some((entry) => entry.id === offer.id && entry.owner === null)) {
@@ -4764,7 +4820,13 @@ function pendingBrowserPlacement(conversationId: string | null): { id: string; m
     return null;
   }
   placementOffer = null;
-  return { id: offer.id, model: offer.model, reasoningEffort: offer.reasoningEffort, ...(offer.conversationId === null ? { background: true as const } : {}) };
+  return {
+    id: offer.id,
+    model: offer.model,
+    reasoningEffort: offer.reasoningEffort,
+    ...(offer.project ? { project: offer.project } : {}),
+    ...(offer.conversationId === null ? { background: true as const } : {})
+  };
 }
 
 // -------------------------------------------------------- exact browser recovery
@@ -4947,7 +5009,7 @@ async function considerAutomaticCompaction(conversationId: string, sessionId: st
     // Re-read after the awaits: the turn may have ended, or a page may have filed by hand.
     if (!chatIsWorking(conversationId) || continuationForSession(sessionId) || goalFencedChat(conversationId) ||
         !automaticCompactionAllowed(await getSession(sessionId))) return;
-    const opened = await openContinuationNow(sessionId, conversationId, true);
+    const opened = await openContinuationNow(sessionId, conversationId, true, observedProject(conversationId));
     rememberToken(sessionId, opened.token);
     changed();
     logInfo(
@@ -6651,6 +6713,19 @@ async function deliverOne(): Promise<void> {
  * running. It is also the fallback for an offer nobody collected, which is why it is reachable
  * from the placement timer as well as from delivery.
  */
+/**
+ * The Project a command's fresh chat belongs in, or null for the site root.
+ *
+ * Read from the continuation rather than from the live observation, because this is the path
+ * taken when the browser did not place the chat -- the tab is gone, or this process restarted
+ * and the map is empty. The continuation is what was written down at open time and is the only
+ * thing here that survives either.
+ */
+function commandProject(command: Command): string | null {
+  if (command.spec.type !== 'resume') return null;
+  return continuationByToken(command.spec.token)?.project ?? null;
+}
+
 async function openFreshChatInBrowser(command: Command): Promise<void> {
   if (!openInBrowser) {
     drop(command, 'this app has no way to open a browser window');
@@ -6664,7 +6739,7 @@ async function openFreshChatInBrowser(command: Command): Promise<void> {
     await openInBrowser(
       command.spec.type === 'worker'
         ? commandUrl(command.id, command.spec.model, command.spec.reasoningEffort)
-        : commandUrl(command.id)
+        : commandUrl(command.id, null, null, commandProject(command))
     );
   } catch (err) {
     // One command is one browser-open attempt. A rejected opener can never produce an ACK,

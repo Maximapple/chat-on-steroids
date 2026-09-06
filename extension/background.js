@@ -2236,6 +2236,27 @@ function conversationFromUrl(value) {
   }
 }
 
+/**
+ * The ChatGPT Project a URL belongs to, or null.
+ *
+ * Mirrors chatgpt-dom.js::projectFromPath and src/main/session/continuation.ts's
+ * normalizeProjectId: only `g-p-` plus 32 hex digits counts. A Project chat's path appends the
+ * Project's display name to that id, so the name is stripped here rather than carried into an
+ * address that a rename would invalidate. Custom GPTs are also served from `/g/`, and their
+ * slugs do not have this shape, so they are correctly not Projects.
+ */
+function projectFromUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    if (url.protocol !== 'https:' || (url.hostname !== 'chatgpt.com' && url.hostname !== 'chat.openai.com')) return null;
+    if (url.pathname.length > 512) return null;
+    const match = /^\/g\/(g-p-[0-9a-f]{32})(?:-[^/]*)?\//i.exec(url.pathname);
+    return match ? match[1].toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
 function isChatGptUrl(value) {
   try {
     const url = new URL(String(value || ''));
@@ -2583,7 +2604,7 @@ const HANDLERS = {
     });
     return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
   },
-  async activity(message, _sender, source) {
+  async activity(message, sender, source) {
     await load();
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
     await noteTabConversation(source, message.conversationId);
@@ -2591,9 +2612,15 @@ const HANDLERS = {
     // Goal drafts are conversation-scoped in the app but browser writes are tab-scoped. Tell
     // the app which tab is polling so two tabs showing the same chat cannot both receive and
     // submit one ready Goal draft.
+    // Which Project this chat is being viewed in, read from the polling document's own
+    // address. Only the browser can see this, and the app needs it before a Compact & Resume
+    // opens the successor -- see issue #84. Always sent, including as empty for a chat at the
+    // root, so that moving a chat out of a Project is reported as clearly as moving it in.
+    const project = projectFromUrl(sender && sender.tab ? sender.tab.url : null) || '';
     const query =
       `?conversationId=${encodeURIComponent(message.conversationId)}` +
       `&since=${Number(message.since) || 0}` +
+      `&project=${encodeURIComponent(project)}` +
       `&goalClient=${encodeURIComponent(String(source.tab))}`;
     const result = await call(`/activity${query}`);
     if (ownsDocument(source) && result.ok && result.data && await acceptBrowserRevival(result.data.revival)) {
@@ -3150,6 +3177,26 @@ function deferredRevivalUrl(entry) {
  * locally either — when no redeem arrives the app opens it the old way, which is the only
  * recovery that still works if this window is closing.
  */
+/**
+ * Where a fresh chat has to be created so it lands in the right Project.
+ *
+ * `/g/<id>/project` is the Project's own page; a chat started from it belongs to that Project,
+ * which no query parameter can express. The app names the Project on the offer because it is
+ * the side that remembers one across a restart; `observed` is the tab this successor is being
+ * placed beside, used only when the offer carries nothing -- an older app, or a path that never
+ * had a continuation to record it on. Neither being usable means the site root, as before.
+ */
+function successorChatBase(offered, observed) {
+  const project = normalizedProjectId(offered) || projectFromUrl(observed);
+  return project ? `https://chatgpt.com/g/${project}/project` : 'https://chatgpt.com/';
+}
+
+/** Accepts only the Project routing identity itself; a display name is never part of it. */
+function normalizedProjectId(value) {
+  const candidate = String(value || '').trim().toLowerCase();
+  return /^g-p-[0-9a-f]{32}$/.test(candidate) ? candidate : null;
+}
+
 async function placeSuccessorChat(raw, tabId) {
   const id = commandMarkerId(raw && raw.id);
   if (id && raw.background === true) {
@@ -3159,7 +3206,7 @@ async function placeSuccessorChat(raw, tabId) {
     const query = [marker];
     if (model) query.push(`model=${encodeURIComponent(model)}`);
     if (effort) query.push(`reasoning_effort=${encodeURIComponent(effort)}`);
-    const created = await createChatTab(`https://chatgpt.com/?${query.join('&')}#${marker}`, true);
+    const created = await createChatTab(`${successorChatBase(raw.project, null)}?${query.join('&')}#${marker}`, true);
     if (Number.isInteger(created?.id)) {
       await chrome.tabs.update(created.id, { autoDiscardable: false });
       discardProtectedTabs[String(created.id)] = true;
@@ -3185,7 +3232,11 @@ async function placeSuccessorChat(raw, tabId) {
   const query = [marker];
   if (model) query.push(`model=${encodeURIComponent(model)}`);
   if (reasoningEffort) query.push(`reasoning_effort=${encodeURIComponent(reasoningEffort)}`);
-  const create = { url: `https://chatgpt.com/?${query.join('&')}#${marker}`, windowId: home.windowId, active: true };
+  const create = {
+    url: `${successorChatBase(raw && raw.project, home.url)}?${query.join('&')}#${marker}`,
+    windowId: home.windowId,
+    active: true
+  };
   // Directly after the chat it continues, so a handoff reads as one piece of work instead of a
   // tab appended to the far end of a long strip.
   if (typeof home.index === 'number') create.index = home.index + 1;

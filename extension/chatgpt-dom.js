@@ -291,6 +291,34 @@ var CLF_DOM = (() => {
     }, null);
   }
 
+  /**
+   * The Project a ChatGPT path belongs to, reduced to the identity ChatGPT itself routes by.
+   *
+   * A Project chat is served from `/g/<slug>/c/<id>`, and that slug is not the Project's
+   * identity: ChatGPT appends the Project's current display name to it, so the same Project
+   * reads as `g-p-<hex>-homelab-development` on a chat and as plain `g-p-<hex>` on the Project
+   * page itself. Carrying the chat's slug over to a Project URL verbatim therefore builds an
+   * address for a name that can be renamed out from under it. Only the `g-p-<hex>` head is
+   * stable, and it is what `/g/<id>/project` is addressed by.
+   *
+   * Strict on purpose. Anything that is not exactly this shape returns null, and every caller
+   * treats null as "open at the site root", which is what this app did everywhere before. A
+   * Project whose id is shaped differently therefore keeps today's behaviour rather than being
+   * sent to an address guessed from a pattern that was never observed.
+   *
+   * Length is bounded before the match: a path is attacker-influenced only in the sense that
+   * the user can visit anything, but an unbounded backtrackable pattern over a long path is a
+   * cost nobody needs to pay on every navigation.
+   */
+  function projectFromPath(pathname) {
+    return safe(() => {
+      const path = String(pathname || '');
+      if (path.length > 512) return null;
+      const match = /^\/g\/(g-p-[0-9a-f]{32})(?:-[^/]*)?\//i.exec(path);
+      return match ? match[1].toLowerCase() : null;
+    }, null);
+  }
+
   /** The conversation this tab is on, or null for a chat that has not been sent yet. */
   function conversationId() {
     return safe(() => conversationFromPath(location.pathname), null);
@@ -2013,6 +2041,7 @@ var CLF_DOM = (() => {
     },
     conversationId,
     conversationFromPath,
+    projectFromPath,
     conversationTitle,
     turns,
     presentationTurns,
