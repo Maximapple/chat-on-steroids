@@ -2155,6 +2155,7 @@ export function chatSettingsPatch(current: Config): {
   compaction: Config['compaction'];
   multiAgent: Config['multiAgent'];
   goal: Config['goal'];
+  mcp: Config['mcp'];
 } {
   const number = (id: string, fallback: number, min: number, max: number): number => {
     const raw = Number($<HTMLInputElement>(id).value);
@@ -2202,7 +2203,9 @@ export function chatSettingsPatch(current: Config): {
         DEFAULT_GOAL_OBJECTIVE_SYSTEM_PROMPT,
       loopPrompt:
         $<HTMLTextAreaElement>('goalLoopPrompt').value.trim() || DEFAULT_GOAL_LOOP_SYSTEM_PROMPT
-    }
+    },
+    // Empty is a real choice here, not a value to repair: it means "add nothing of mine".
+    mcp: { instructions: $<HTMLTextAreaElement>('mcpInstructions').value.trim() }
   };
 }
 
@@ -2332,6 +2335,7 @@ function applyGoal(state: AppState, previous?: Config): void {
   goalModel = config.goal.model;
   applyChatValue($<HTMLSelectElement>('goalReasoning'), config.goal.reasoning, previous?.goal.reasoning);
   applyChatValue($<HTMLTextAreaElement>('goalPrompt'), config.goal.prompt, previous?.goal.prompt);
+  applyChatValue($<HTMLTextAreaElement>('mcpInstructions'), config.mcp?.instructions ?? '', previous?.mcp?.instructions);
   applyChatValue(
     $<HTMLTextAreaElement>('goalObjectivePrompt'),
     config.goal.objectivePrompt,
@@ -2474,7 +2478,8 @@ const CHAT_INPUTS = [
   'goalReasoning',
   'goalPrompt',
   'goalObjectivePrompt',
-  'goalLoopPrompt'
+  'goalLoopPrompt',
+  'mcpInstructions'
 ];
 
 /** Writes app state into this panel's controls. Called from the renderer's apply(). */

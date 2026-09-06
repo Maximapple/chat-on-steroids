@@ -472,6 +472,10 @@ async function saveSnapshot(patch: SettingsPatch, previous: AppState['config']):
   const toolSurfaceChanged =
     previous.sessions.record !== patch.sessions.record ||
     previous.multiAgent.enabled !== patch.multiAgent.enabled ||
+    // The user's own connector instructions are part of what each server advertises about
+    // itself, and ChatGPT reads that once when it loads the tools. Editing them is therefore
+    // the same kind of change as adding a tool: it needs the same reconnect to be seen.
+    (previous.mcp?.instructions ?? '') !== patch.mcp.instructions ||
     (Object.keys(patch.capabilities) as Capability[]).some((cap) => {
       const before = previous.capabilities[cap] && !(previous.readOnly && WRITE_CAPABILITIES.includes(cap));
       const after = patch.capabilities[cap] && !(patch.readOnly && WRITE_CAPABILITIES.includes(cap));
@@ -484,6 +488,7 @@ async function saveSnapshot(patch: SettingsPatch, previous: AppState['config']):
     ui: previous.ui,
     sessions: previous.sessions,
     compaction: previous.compaction,
+    mcp: previous.mcp ?? { instructions: '' },
     multiAgent: previous.multiAgent,
     goal: previous.goal
   };
