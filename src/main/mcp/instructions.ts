@@ -11,7 +11,7 @@
  */
 
 import { LAUNCHES_WINDOWS_POWERSHELL_5 } from '../codex/tool-specs.js';
-import { getConfig } from '../config.js';
+import { getConfig, MAX_MCP_INSTRUCTIONS_CHARS } from '../config.js';
 import { isGitRepository } from '../toolchain.js';
 import type { ToolContext } from './kernel.js';
 import { surfaceDefinition, type SurfaceId } from './surfaces.js';
@@ -22,6 +22,23 @@ export function serverInstructions(
   platform: NodeJS.Platform = process.platform
 ): string {
   return surface === 'desktop' ? desktopInstructions(ctx, platform) : coreInstructions(ctx, platform);
+}
+
+/**
+ * The user's own additions, appended to whichever connector is being described.
+ *
+ * Last, and fenced under a heading that says whose words these are. Both matter. Last, because
+ * everything above is what the app can actually promise about its own tools, and a preference
+ * must not quietly redefine one of them. Attributed, because the model should be able to tell a
+ * standing instruction from this user apart from the connector's description of itself -- they
+ * carry different authority, and running them together hides that.
+ *
+ * Empty is the normal case and adds nothing at all, not even the heading.
+ */
+function userInstructions(): string[] {
+  const text = getConfig().mcp.instructions.trim();
+  if (!text) return [];
+  return ['', "The user's own standing instructions for this connector:", text.slice(0, MAX_MCP_INSTRUCTIONS_CHARS)];
 }
 
 function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
@@ -155,6 +172,8 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform): string {
     );
   }
 
+  lines.push(...userInstructions());
+
   return lines.join('\n');
 }
 
@@ -202,6 +221,8 @@ function desktopInstructions(ctx: ToolContext, platform: NodeJS.Platform): strin
     `Files, patches and commands live in a separate connector, "${surfaceDefinition('core').connectorName}".`,
     'This one cannot read or change files. If a task needs that and it is not available here, say so.'
   );
+
+  lines.push(...userInstructions());
 
   return lines.join('\n');
 }

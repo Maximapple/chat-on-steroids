@@ -39,6 +39,7 @@ export interface SettingsPatch {
   compaction: Config['compaction'];
   multiAgent: Config['multiAgent'];
   goal: Config['goal'];
+  mcp: Config['mcp'];
 }
 
 /** One page of the OpenRouter catalogue, as the model picker asks for it. */

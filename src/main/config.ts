@@ -238,6 +238,16 @@ const capabilitiesSchema = z
   )
   .transform((caps) => ({ ...DEFAULT_CAPABILITIES, ...caps }) as Capabilities);
 
+/**
+ * The user's own MCP instructions.
+ *
+ * Empty by default, and deliberately so: the connector instructions are how the app explains
+ * its own tools, and inventing text on the user's behalf there would put words the app cannot
+ * honour in front of the model.
+ */
+export const MAX_MCP_INSTRUCTIONS_CHARS = 4000;
+const DEFAULT_MCP = { instructions: '' } as const;
+
 const configSchema = z.object({
   // A config written by hand — or by a build before `/skills` was reserved — must not be
   // able to claim a reserved virtual root. Renamed rather than rejected: a single bad root
@@ -383,6 +393,21 @@ const configSchema = z.object({
     })
     .optional()
     .default({ ...DEFAULT_GOAL, backend: 'chatgpt', loopBackend: 'chatgpt', impulseMinutes: 0, includeToolCalls: false, helperModel: 'gpt-5.6-sol', helperReasoning: 'high' })
+    ,
+  mcp: z
+    .object({
+      // Repaired rather than rejected, like the Goal prompts above: this is free text a person
+      // typed, and one over-long or malformed field must not send the whole config — every
+      // root, every permission — through conservative recovery.
+      instructions: z
+        .string()
+        .optional()
+        .default(DEFAULT_MCP.instructions)
+        .transform((value) => value.slice(0, MAX_MCP_INSTRUCTIONS_CHARS).trim())
+        .catch(DEFAULT_MCP.instructions)
+    })
+    .optional()
+    .default({ ...DEFAULT_MCP })
 });
 
 /**
@@ -408,7 +433,8 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform, rele
     sessions: { ...DEFAULT_SESSIONS },
     compaction: { ...DEFAULT_COMPACTION },
     multiAgent: { ...FIRST_LAUNCH_MULTI_AGENT },
-    goal: { ...DEFAULT_GOAL }
+    goal: { ...DEFAULT_GOAL },
+    mcp: { ...DEFAULT_MCP }
   };
 }
 

@@ -592,6 +592,15 @@
                   <div class="setting"><span class="setting-text"><b>When ChatGPT is wrapping up</b><em>Automatic follow-ups use your Loop instructions and selected Loop source.</em></span><select id="finishAction"><option value="notify">Notify me · Write or Generate Goal</option><option value="goal">Generate and inject Goal</option></select></div>
                   <div class="setting"><span class="setting-text"><b>Requested notice</b><em>A request to the model, not a guaranteed countdown.</em></span><select id="finishLeadMinutes"><option value="3">3 minutes</option><option value="5">5 minutes</option></select></div>
                   </div>
+                <h2 class="settings-section-title">Connector instructions</h2>
+                <div class="pane">
+                  <div class="field">
+                    <label for="mcpInstructions">Your own instructions</label>
+                    <textarea id="mcpInstructions" rows="6" maxlength="4000" spellcheck="false" placeholder="e.g. Always run the test suite before saying a change works."></textarea>
+                    <p class="hint">Added to the end of what each connector tells ChatGPT about itself, marked as yours. Kept across app updates. Leave empty for none.</p>
+                  </div>
+                  <p class="muted">ChatGPT reads connector instructions once, when it loads the tools, so a change reaches an existing conversation only after the connector is loaded again.</p>
+                </div>
                 <h2 class="settings-section-title">ChatGPT models</h2>
                 <div class="pane">
                   <div class="setting"><span class="setting-text"><b>Available ChatGPT models</b><em id="chatModelStatus">Read model choices from your account.</em></span><button class="btn" id="refreshChatModels" type="button">Refresh</button></div>
