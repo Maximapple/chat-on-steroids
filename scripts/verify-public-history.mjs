@@ -1,6 +1,5 @@
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import path from 'node:path';
 
 const maintainerLogin = 'totec448-spec';
 const safeMaintainerEmail = /^(?:\d+\+)?totec448-spec@users\.noreply\.github\.com$/i;
@@ -33,28 +32,6 @@ function runGit(args, { allowFailure = false, encoding = 'utf8' } = {}) {
     throw new Error(`git ${args[0] ?? ''} failed${detail ? `: ${detail}` : ''}`);
   }
   return result;
-}
-
-function repositoryOwner() {
-  // Ownership belongs to the repository being checked, not to an outer CI process.
-  // Vitest creates temporary Git repositories for this gate; those child repos inherit
-  // GITHUB_REPOSITORY/GITHUB_WORKSPACE from Actions and must not be mistaken for the fork.
-  const remote = runGit(['config', '--get', 'remote.origin.url'], { allowFailure: true });
-  if (remote.status === 0) {
-    const value = String(remote.stdout ?? '').trim();
-    const match = /(?:github\.com[/:])([^/:\s]+)\/[^/\s]+(?:\.git)?$/i.exec(value);
-    if (match?.[1]) return match[1];
-  }
-
-  const workspace = String(process.env.GITHUB_WORKSPACE ?? '').trim();
-  const fromActions = String(process.env.GITHUB_REPOSITORY ?? '').split('/')[0]?.trim();
-  if (!workspace || !fromActions) return null;
-
-  const normalize = (value) => {
-    const resolved = path.resolve(value);
-    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-  };
-  return normalize(process.cwd()) === normalize(workspace) ? fromActions : null;
 }
 
 function findBlockedText(text, location) {
@@ -112,22 +89,29 @@ function checkMessageFile(messagePath) {
  * Commits that are already published on the public main line.
  *
  * The gate exists to keep a private value from *entering* public history. A commit that is
- * already on `origin/main` has entered it, and refusing every later local push cannot
+ * already on the canonical repository's main has entered it, and refusing every later local push cannot
  * unpublish it — it only strands the working clone, because the merge commits GitHub writes
  * for a merged pull request carry whatever address that account publishes, and no local hook
  * ever saw them. Those are exempt here; everything a local push would actually add stays
  * checked. Removing a value from published history is a deliberate rewrite of a public branch,
  * not something a pre-push hook should be able to demand.
  *
- * A missing `origin/main` — a fresh CI checkout, a clone with another remote name — exempts
- * nothing, so the strict reading is the fallback.
+ * A fork's origin may lag upstream. Select by exact repository URL, never by the name
+ * "upstream". Without a canonical remote, retain the legacy origin/main convention.
+ * If a configured canonical remote has no fetched main, exempt nothing.
  */
 function publishedCommits() {
-  const ref = runGit(['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main'], {
+  const remotes = String(runGit(['remote']).stdout).split(/\r?\n/).filter(Boolean);
+  const canonical = remotes.find((remote) => {
+    const url = String(runGit(['remote', 'get-url', remote]).stdout).trim();
+    return /^(?:https?:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)totec448-spec\/chat-on-steroids(?:\.git)?\/?$/i.test(url);
+  });
+  const publishedRef = `refs/remotes/${canonical ?? 'origin'}/main`;
+  const ref = runGit(['rev-parse', '--verify', '--quiet', publishedRef], {
     allowFailure: true,
   });
   if (ref.status !== 0) return new Set();
-  const listed = runGit(['rev-list', 'refs/remotes/origin/main'], { allowFailure: true });
+  const listed = runGit(['rev-list', publishedRef], { allowFailure: true });
   if (listed.status !== 0) return new Set();
   return new Set(String(listed.stdout).split(/\r?\n/).filter(Boolean));
 }
@@ -147,12 +131,6 @@ function checkHistory() {
           .split(/\r?\n/)
           .filter(Boolean)
       : [];
-  // The maintainer's already-public upstream identity is inherited by every fork. It remains
-  // strict in the upstream repository, while fork CI still checks current author, messages,
-  // tracked content, and fork-reachable history for blocked text.
-  const owner = repositoryOwner();
-  const enforceHistoricalMaintainerIdentity =
-    owner === null || owner.toLowerCase() === maintainerLogin;
   // pull_request jobs default to a GitHub-generated merge object that can never enter
   // public history. Its identity belongs to GitHub's test ref, not to the proposed tree.
   const syntheticPullRequestCommit =
@@ -168,12 +146,8 @@ function checkHistory() {
       record.split('\0');
     const location = `commit ${commit}`;
     failures.push(
-      ...(enforceHistoricalMaintainerIdentity
-        ? checkMaintainerIdentity(authorName, authorEmail, `${location} author`)
-        : []),
-      ...(enforceHistoricalMaintainerIdentity
-        ? checkMaintainerIdentity(committerName, committerEmail, `${location} committer`)
-        : []),
+      ...checkMaintainerIdentity(authorName, authorEmail, `${location} author`),
+      ...checkMaintainerIdentity(committerName, committerEmail, `${location} committer`),
       ...findBlockedText(body.join('\0'), `${location} message`),
     );
   }
@@ -198,9 +172,7 @@ function checkHistory() {
     );
     const [taggerName = '', taggerEmail = '', ...body] = record.split('\0');
     failures.push(
-      ...(enforceHistoricalMaintainerIdentity
-        ? checkMaintainerIdentity(taggerName, taggerEmail, `tag ${tag} tagger`)
-        : []),
+      ...checkMaintainerIdentity(taggerName, taggerEmail, `tag ${tag} tagger`),
       ...findBlockedText(body.join('\0'), `tag ${tag} message`),
     );
   }
