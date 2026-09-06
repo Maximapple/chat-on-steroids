@@ -145,6 +145,25 @@ export interface ContinuationDestinationCheckpoint extends ContinuationSendCheck
 export const sendUnattempted = (checkpoint: ContinuationSendCheckpoint): boolean =>
   checkpoint.state === 'not-attempted' || checkpoint.state === 'attempted-unresolved';
 
+/**
+ * The ChatGPT Project a successor chat must be created in, reduced to its routing identity.
+ *
+ * Mirrors chatgpt-dom.js::projectFromPath, which is the browser-side half of the same rule --
+ * the extension is plain JS and cannot import this. Both accept only `g-p-` followed by 32 hex
+ * digits, because that is the form ChatGPT addresses a Project page by. A Project chat's own
+ * path carries the display name appended to that id, and a renamed Project changes it, so the
+ * name is never part of what is stored or built.
+ *
+ * Anything else is null, and null everywhere means "open at the site root" -- exactly what this
+ * app did before Projects were carried at all. An unrecognised shape therefore degrades to the
+ * previous behaviour rather than to a guessed address.
+ */
+export function normalizeProjectId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const candidate = value.trim().toLowerCase();
+  return /^g-p-[0-9a-f]{32}$/.test(candidate) ? candidate : null;
+}
+
 interface Continuation {
   token: string;
   sessionId: string;
@@ -175,6 +194,14 @@ interface Continuation {
   claimedBy: string | null;
   /** Chat B while the durable commit is in flight; persisted for restart recovery. */
   to: string | null;
+  /**
+   * The Project chat A belongs to, so chat B is created in it too. Null for a chat at the root.
+   *
+   * Held here rather than only in the browser because the app opens the replacement itself
+   * whenever the extension does not -- an OS fallback, or a recovery after this process
+   * restarted -- and by then the tab that knew the Project may be gone.
+   */
+  project: string | null;
   sourceSend: ContinuationSendCheckpoint;
   destinationSend: ContinuationDestinationCheckpoint;
   error: string | null;
@@ -198,6 +225,8 @@ interface ContinuationRecord {
   automatic?: boolean;
   /** Absent in records written before automatic handovers had a deadline. */
   askedAt?: number | null;
+  /** Absent in records written before Project affinity was carried; null means the site root. */
+  project?: string | null;
   state: ContinuationState;
   summary: string;
   handoffId: string | null;
@@ -225,6 +254,7 @@ function durableRecord(entry: Continuation): ContinuationRecord {
     openedAt: entry.openedAt,
     automatic: entry.automatic,
     askedAt: entry.askedAt,
+    project: entry.project,
     state: entry.state,
     summary: entry.summary.slice(0, 512 * 1024),
     handoffId: entry.handoffId,
@@ -344,6 +374,8 @@ export interface ContinuationView {
   automatic: boolean;
   /** When the brief request first went on its way, or null while it has not. */
   askedAt: number | null;
+  /** The Project the replacement chat belongs in, or null for the site root. */
+  project: string | null;
   sourceSend: ContinuationSendCheckpoint;
   destinationSend: ContinuationDestinationCheckpoint;
 }
@@ -359,6 +391,7 @@ const view = (entry: Continuation): ContinuationView => ({
   openedAt: entry.openedAt,
   automatic: entry.automatic,
   askedAt: entry.askedAt,
+  project: entry.project,
   sourceSend: { ...entry.sourceSend },
   destinationSend: { ...entry.destinationSend }
 });
@@ -622,11 +655,12 @@ export async function repairPrimeFromResumeShadow(conversationId: string): Promi
  * one already running. That is deliberate — the previous design let each press become its
  * own handoff and its own fresh tab.
  */
-function makeContinuation(sessionId: string, fromConversationId: string, automatic: boolean): Continuation {
+function makeContinuation(sessionId: string, fromConversationId: string, automatic: boolean, project: string | null): Continuation {
   return {
     token: randomBytes(16).toString('base64url'),
     sessionId,
     from: fromConversationId,
+    project,
     openedAt: Date.now(),
     automatic,
     askedAt: null,
@@ -647,7 +681,8 @@ function makeContinuation(sessionId: string, fromConversationId: string, automat
 export async function openContinuationNow(
   sessionId: string,
   fromConversationId: string,
-  automatic = false
+  automatic = false,
+  project: string | null = null
 ): Promise<ContinuationView> {
   sweep();
   const existing = [...byToken.values()].find((entry) => entry.sessionId === sessionId && isOpen(entry));
@@ -658,7 +693,7 @@ export async function openContinuationNow(
   const work = (async (): Promise<ContinuationView> => {
     const again = [...byToken.values()].find((entry) => entry.sessionId === sessionId && isOpen(entry));
     if (again) return view(again);
-    const entry = makeContinuation(sessionId, fromConversationId, automatic);
+    const entry = makeContinuation(sessionId, fromConversationId, automatic, normalizeProjectId(project));
     try {
       await writeDurableNow(CONTINUATIONS_STATE, snapshotWith(entry.token, durableRecord(entry)));
     } catch (err) {
@@ -1378,6 +1413,7 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
       from: raw.from,
       to: typeof raw.to === 'string' && raw.to ? raw.to : null,
       openedAt: raw.openedAt,
+      project: normalizeProjectId(raw.project),
       automatic: raw.automatic === true,
       askedAt: null,
       state: raw.state,

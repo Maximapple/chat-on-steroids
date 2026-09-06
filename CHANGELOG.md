@@ -9,6 +9,24 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## Unreleased
+
+### Fixed
+- **Compact & Resume no longer drops the replacement chat outside its Project.** Starting a
+  handoff from a conversation inside a ChatGPT Project created the successor at the site root,
+  so the work continued outside the Project it belonged to. A Project is expressed only in the
+  address — `/g/<project>/c/<id>` — and a chat created from anywhere else is not in it, so the
+  successor's URL was the entire mechanism, and all three places that build one were hardcoded
+  to the root: the extension's window-bound placement, its background-window placement and the
+  app's own OS fallback. The Project is now read from the polling page's own address, written
+  onto the continuation so a restart or a closed tab cannot lose it, and used by all three.
+
+  Two things this deliberately does not do. It does not carry the slug it sees: a Project chat's
+  path has the Project's display name appended to its id, so only the `g-p-<id>` head is stored
+  and emitted, and renaming a Project cannot invalidate a stored address. And it never guesses —
+  a value that is not exactly that shape, including one from a record written before this
+  existed, opens at the root exactly as before rather than at an address assembled from it.
+
 ## [2.0.6] — 2026-09-06
 
 **I am exhausted.**
