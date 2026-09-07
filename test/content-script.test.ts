@@ -178,6 +178,15 @@ interface Harness {
   /** Browser-extension listeners still owned by live recorder instances in this document. */
   listenerCounts(): { runtime: number; storage: number };
   /** Moves the clock the script reads. Nothing else advances it between ticks. */
+  /**
+   * What stood in the composer at the moment each send was clicked.
+   *
+   * The text ChatGPT was handed, read while it was being handed over. Reading the composer
+   * *after* the send used to say the same thing only because nothing ever emptied it; a send
+   * that lands now leaves the box the way the live page does, so what was submitted has to be
+   * recorded when it happens.
+   */
+  submitted: string[];
   advance(ms: number): void;
   close(): void;
 }
@@ -232,6 +241,12 @@ async function harness(
   reply.set('defer_revival', () => ({ ok: true, deferred: true }));
   reply.set('forget_revival', () => ({ ok: true }));
   for (const [type, answer] of Object.entries(replies)) reply.set(type, answer);
+  // First listener on the button, so it reads the composer before a test's own handler can
+  // render the user message or clear the box.
+  const submitted: string[] = [];
+  window.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+    submitted.push((window.document.querySelector('#prompt-textarea')?.textContent || '').trim());
+  });
   before(window.document, dom);
 
   window.chrome = {
@@ -315,15 +330,36 @@ async function harness(
   // suite stayed green while every worker whose task was short enough for the bootstrap's
   // blank line to land inside the first 80 characters failed to start in the real browser.
   window.document.execCommand = (command: string, _ui: boolean, value: string) => {
-    if (command !== 'insertText') return false;
     const box = window.document.querySelector('#prompt-textarea');
     if (!box) return false;
-    for (const line of String(value).split('\n')) {
-      const paragraph = window.document.createElement('p');
-      paragraph.textContent = line;
-      box.append(paragraph);
+    if (command === 'insertText') {
+      for (const line of String(value).split('\n')) {
+        const paragraph = window.document.createElement('p');
+        paragraph.textContent = line;
+        box.append(paragraph);
+      }
+      return true;
     }
-    return true;
+    // The other half of the same editing host. clearPromptExact() empties the box by
+    // selecting its content and deleting it, and both commands are scoped to the focused
+    // host in a real browser — which is why the caller focuses first, and why this refuses
+    // a selectAll aimed anywhere else. Without it every clearPromptExact() in the script
+    // was a silent no-op here, so no test could tell a box that was cleared from one that
+    // was not, and the suite recorded the uncleared box as the expected result.
+    if (command === 'selectAll') {
+      if (window.document.activeElement !== box) return false;
+      const selection = window.document.getSelection();
+      if (!selection) return false;
+      selection.selectAllChildren(box);
+      return true;
+    }
+    if (command === 'delete') {
+      const selection = window.document.getSelection();
+      if (!selection || selection.rangeCount === 0) return false;
+      selection.deleteFromDocument();
+      return true;
+    }
+    return false;
   };
 
   let hook: Hook | null = null;
@@ -359,6 +395,7 @@ async function harness(
         if (async !== true && !answered) resolve(undefined);
       }),
     listenerCounts: () => ({ runtime: runtimeListeners.size, storage: storageListeners.size }),
+    submitted,
     advance,
     close: () => dom.window.close()
   };
@@ -889,6 +926,50 @@ describe('desktop input delivery and helper ownership', () => {
     await settle();
     expect(live.sent).toContainEqual(expect.objectContaining({ type: 'focus_tab', conversationId: chatB }));
     expect(live.sent.filter(message => message.type === 'desktop_input' && message.response)).toHaveLength(1);
+  });
+});
+
+/**
+ * The brief a compaction opens its successor chat with.
+ *
+ * send() proves ChatGPT took a message by a page-owned consequence, and the one a fresh chat
+ * always lands on is the rendered user message: navigation alone is explicitly not acceptance
+ * here, and the box emptying is only one of the signals. Editor builds that keep the
+ * rich-text value mounted while React starts the turn therefore satisfy send() with the whole
+ * brief still sitting in the composer.
+ *
+ * Every failure path around that send already calls clearPromptExact(). The accepted path
+ * never did, so on 2026-09-07 a 43,904-character handoff stayed in the box of the chat it had
+ * just been sent to, underneath its own first message, for the rest of that chat's life.
+ */
+describe('the brief a successor chat is opened with', () => {
+  it('leaves nothing behind in the composer once ChatGPT has taken it', async () => {
+    const brief = '[[CLF-RESUME:0123456789abcdef0123456789abcdef]]\n\nContinue the previous ChatGPT session. Handoff: h-residue';
+    const assigned = 'cccccccc-dddd-eeee-ffff-000000000000';
+    live = await harness(
+      'https://chatgpt.com/?clf=cmd-residue#clf=cmd-residue',
+      {
+        redeem: () => ({ ok: true, command: { id: 'cmd-residue', type: 'resume', text: brief, agent: null } }),
+        ack: () => ({ ok: true })
+      },
+      (document, dom) => {
+        // ChatGPT accepts the send: the fresh chat gets its id and the message is rendered.
+        // The composer keeps the value, which is the editor behaviour send() tolerates and
+        // the one this chat is opened into.
+        document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+          dom.reconfigure({ url: `https://chatgpt.com/c/${assigned}` });
+          userTurn(document, 'accepted-residue', brief, { sent: false });
+        });
+      }
+    );
+
+    await settle(400);
+
+    // The brief was sent. This is not a test about a send that failed.
+    expect(live.submitted.join('\n')).toContain('Handoff: h-residue');
+    expect((live.window as any).CLF_DOM.conversationId()).toBe(assigned);
+    // And the box the user types into is theirs again.
+    expect(composerText(live.document)).toBe('');
   });
 });
 
@@ -9271,7 +9352,7 @@ describe('the Compact & resume control', () => {
     expect(asked).toBeGreaterThanOrEqual(3);
     expect(typedWhileBusy.length).toBeGreaterThan(0);
     expect(typedWhileBusy.filter(Boolean)).toEqual([]);
-    expect(composerText(live.document)).toContain('the brief itself');
+    expect(live.submitted.join('\n')).toContain('the brief itself');
     expect(sends()).toBe(1);
     const compacts = startedCompactions(live);
     expect(compacts).toHaveLength(1);
@@ -10236,7 +10317,7 @@ describe('the fresh chat the app opened', () => {
     expect(live.sent.findIndex((message) => message.type === 'redeem')).toBeLessThan(
       live.sent.findIndex((message) => message.type === 'status')
     );
-    expect(live.document.querySelector('#prompt-textarea')!.textContent).toContain('the long carried handoff');
+    expect(live.submitted.join('\n')).toContain('the long carried handoff');
     expect(live.sent.some((message) => message.type === 'compact' && message.destinationAttempt === true)).toBe(true);
 
     releaseStatus();
@@ -10279,7 +10360,7 @@ describe('the fresh chat the app opened', () => {
     expect(redeems[0]).toMatchObject({ type: 'redeem', id: 'cmd-7' });
     expect(typeof redeems[0]!.client).toBe('string');
     expect(redeems[0]!.client).not.toBe('');
-    expect(live.document.querySelector('#prompt-textarea')!.textContent).toContain('Handoff: h-1');
+    expect(live.submitted.join('\n')).toContain('Handoff: h-1');
     expect(live.sent.some((message) => message.type === 'compact' && message.destinationAttempt === true)).toBe(true);
     // The id ChatGPT gave the chat is reported like a worker's. The marker still commits the
     // continuation when the page finds it; this ACK commits it when the page does not — on
@@ -10332,7 +10413,7 @@ describe('the fresh chat the app opened', () => {
     await settle(400);
 
     expect(live.sent.filter((message) => message.type === 'redeem')).toHaveLength(1);
-    expect(live.document.querySelector('#prompt-textarea')!.textContent).toContain('Handoff: h-project');
+    expect(live.submitted.join('\n')).toContain('Handoff: h-project');
     expect(live.sent.some((message) => message.type === 'compact' && message.destinationAttempt === true)).toBe(true);
     // What proves the Project route was read is that the page can name the chat ChatGPT just
     // gave it, in the ACK that lets the app commit the continuation: with a `/c/` test of its
@@ -10588,7 +10669,7 @@ describe('the fresh chat the app opened', () => {
 
     await settle(400);
 
-    expect(live.document.querySelector('#prompt-textarea')!.textContent).toContain(task);
+    expect(live.submitted.join('\n')).toContain(task);
     expect(live.sent.filter((message) => message.type === 'ack')).toEqual([
       {
         type: 'ack',

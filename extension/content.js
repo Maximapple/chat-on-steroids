@@ -8639,6 +8639,10 @@
         renderControl();
         return;
       }
+      // The same gap as on the destination side: acceptance can be proven by the rendered
+      // user message or a generation starting rather than by the box emptying, and then the
+      // instruction is still mounted in the user's own composer. Exact-match only.
+      CLF_DOM.clearPromptExact(prompt);
       nativePhase = 'waiting';
       renderControl();
       void pullActivity();
@@ -10551,6 +10555,14 @@
       }
       return void (await fail('ChatGPT did not accept the bootstrap send'));
     }
+    // send() proves acceptance from a page-owned consequence, and the composer emptying is
+    // only one of them. The one a fresh chat always lands on is its own rendered user
+    // message, so on the editor builds that keep the rich-text value mounted while React
+    // starts the turn the whole brief stayed in the box under the message it had just been
+    // sent as (2026-09-07), for the rest of that chat's life. Every failure path around this
+    // send already clears; this is the accepted one. Exact-match only, so a draft the user
+    // started in the successor while the send was in flight is still theirs.
+    CLF_DOM.clearPromptExact(boot.text);
     agent = boot.agent || null;
     agentCommandId = agent && typeof boot.id === 'string' ? boot.id : null;
 

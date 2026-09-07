@@ -27,6 +27,14 @@ the app refuses the extension and asks you to reload the matching copy.
        branch's — the three refusal and parity fixes — are in Fixed below, where they belong. -->
 
 ### Fixed
+- **A handoff no longer leaves its own text sitting in the message box it was sent from.** The
+  Compact & Resume brief typed into a successor chat — and the handoff instruction typed into the
+  chat being compacted — stayed in the composer after ChatGPT had taken it, under the message it
+  had just been sent as. Acceptance is proven by a page-owned consequence, and a fresh chat's is
+  its rendered user message; editor builds that keep the value mounted while the turn starts
+  satisfy that without ever emptying the box, and nothing afterwards took the text out. Both
+  sends now clear what they inserted, matched character-for-character, so a draft begun after
+  the send is untouched.
 - **A link click that reaches nothing now says so, instead of reporting plain success.** Clicking a
   link could return `ok` with the page exactly where it was, and nothing in the answer could tell
   that apart from a link that simply does not navigate. `hit` and `covered` were the previous
