@@ -528,7 +528,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
         if (level === 'ERROR' || level === 'FATAL' || level === 'WARN') {
           const errText = event['error'] ? String(event['error']) : '';
           run.lastError = `${level} ${message}${errText ? `: ${errText}` : ''}`.slice(0, 400);
-          if (isUnreachableError(message) || isUnreachableError(errText)) {
+          if (isUnreachableError(`${message}: ${errText}`)) {
             // Retry chatter. noteUnreachable logs one plain line per run rather than a
             // socket dump per attempt, and the state it leads to is decided in `watch`.
             noteUnreachable(run, errText || message);
