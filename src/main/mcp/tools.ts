@@ -39,7 +39,7 @@ export function buildServer(ctx: ToolContext, surface: SurfaceId, observe?: (con
   const tools: PluginToolSchema[] = [];
   if (surface === 'plugins') {
     const declarations = registerPluginTools(server);
-    observe?.(definition.connectorName, APP_VERSION, serverInstructions(ctx, surface), declarations);
+    observe?.(definition.connectorName, BUILD_VERSION, serverInstructions(ctx, surface), declarations);
     return server;
   }
   const registrar = createRegistrar(server, ctx, surface, observe ? (name, config) => {

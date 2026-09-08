@@ -414,9 +414,9 @@ describe('visible Chat refresh', () => {
     initChat({ save: async () => undefined, state: () => ({ config: { sessions: { record: true, limitTokens: 533000 }, compaction: { auto: true, autoTokens: 400000 }, ui: { developerMode: true } } }) as any });
     chatVisible(true);
     await vi.waitFor(() => expect(listCalls).toHaveLength(1));
-    await vi.waitFor(() =>
-      expect(w.document.getElementById('sessionsFoot')?.textContent).toContain('60 of 65 retained sessions shown')
-    );
+    // 2.0.8 removed the retained-sessions footer this used to read. The first page landing is
+    // what this step actually needs, and the rendered rows say that just as well.
+    await vi.waitFor(() => expect(w.document.querySelectorAll('#sessionList .sess')).toHaveLength(60));
 
     // Scroll to start the older-page request; it stays pending (resolveOlderPage captured).
     const pane = w.document.getElementById('sessionList')!.closest('.scroll') as HTMLElement;

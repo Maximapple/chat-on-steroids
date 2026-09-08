@@ -1720,10 +1720,6 @@ async function readMetaCheckpoint(id: string): Promise<MetaCheckpoint | null> {
   return null;
 }
 
-async function readMeta(id: string): Promise<SessionSummary | null> {
-  return (await readMetaCheckpoint(id))?.summary ?? null;
-}
-
 /**
  * A cold sidebar needs metadata, not every retained message body. A validated modern
  * checkpoint can prove that its projection follows all history writes: the journal and
@@ -1889,33 +1885,6 @@ async function ensureAttachmentCatalog(): Promise<AttachmentCatalog> {
   }
 }
 
-/**
- * Every readable session, newest first. Live summaries win over what is on disk.
- *
- * Legacy/model-facing bounded list. Do not use this for correctness properties that promise
- * to see every retained session; identity, latest-handoff recovery and retention use the
- * uncapped process catalog instead.
- */
-async function readAllSummaries(): Promise<SessionSummary[]> {
-  assertReady();
-  let names: string[];
-  try {
-    names = await fs.readdir(root);
-  } catch {
-    return [];
-  }
-  const summaries: SessionSummary[] = [];
-  const candidates = names.filter(name => /^[0-9a-z-]{8,64}$/i.test(name));
-  if (candidates.length > MAX_SCANNED_SESSIONS)
-    logWarn(`session store: more than ${MAX_SCANNED_SESSIONS} session folders; older ones were not scanned`);
-  for (let offset = 0; offset < Math.min(candidates.length, MAX_SCANNED_SESSIONS); offset += ATTACHMENT_CATALOG_READ_CONCURRENCY) {
-    const rows = await Promise.all(candidates.slice(offset, Math.min(offset + ATTACHMENT_CATALOG_READ_CONCURRENCY, MAX_SCANNED_SESSIONS))
-      .map(async name => open.get(name)?.summary ?? await readMeta(name)));
-    for (const summary of rows) if (summary) summaries.push({ ...summary });
-  }
-  summaries.sort((a, b) => b.updatedAt - a.updatedAt);
-  return summaries;
-}
 
 /**
  * Every valid session summary, with no maintenance/UI scan cap.
