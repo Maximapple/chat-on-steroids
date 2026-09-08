@@ -27,6 +27,20 @@ the app refuses the extension and asks you to reload the matching copy.
        branch's — the three refusal and parity fixes — are in Fixed below, where they belong. -->
 
 ### Fixed
+- **A chat no longer ends on "Message delivery timed out" because one readiness probe was
+  missed.** The tunnel watcher asks the client's `/readyz` once every 15 seconds, with a
+  three-second timeout and no retry, and a single `false` terminated the client and started a
+  replacement. Every request in flight travels through that process: the tool call the model
+  was waiting on died with it, no answer could arrive any more, and ChatGPT ended the turn with
+  its own transport error and a Retry button. Longer tasks were hit hardest, simply for being
+  in flight more of the time.
+
+  A probe can miss without the client being broken — mid-transfer, a briefly loaded machine, a
+  slow downstream readiness check. The watcher now requires the failure to survive into a
+  second pass before replacing anything, which is the rule the offline caption has followed
+  since `UNREACHABLE_CONFIRM_MS` was introduced: one failed poll is not a verdict. It was
+  applied there to a caption, and not to the action that kills live work. A client that really
+  is unready is still replaced, one interval later.
 - **The composer fake in the test harness can now actually empty a box.** It implemented
   `insertText` and refused `selectAll`/`delete`, which made every `clearPromptExact()` in the
   content script a silent no-op under test and left an uncleared composer indistinguishable
