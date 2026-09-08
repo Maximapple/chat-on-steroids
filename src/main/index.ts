@@ -4,7 +4,7 @@ import { requestSessionFinishGoal, setFinishNotifier } from './session/finish.js
  */
 
 import path from 'node:path';
-import { app, Notification, BrowserWindow, Menu, Tray, nativeImage, nativeTheme, screen, session, shell } from 'electron';
+import { app, Notification, BrowserWindow, Menu, Tray, nativeImage, nativeTheme, screen, session } from 'electron';
 import { getConfig, initConfigPath, loadConfig } from './config.js';
 import { connect, disconnect, getStatus, onStatusChange, shutdownConnection } from './connection.js';
 import { registerIpc } from './ipc.js';
@@ -13,7 +13,7 @@ import { initLogFile, logError, logInfo, logWarn } from './logger.js';
 import { BUILD_VERSION } from './version.js';
 import { unifiedExecManager } from './codex/manager.js';
 import { initSecretsPath } from './secrets.js';
-import { setBrowserOpener, setBrowserWorkArea, shutdownBridge, startBridge } from './bridge.js';
+import { bridgeStatus, setBrowserOpener, setBrowserWorkArea, shutdownBridge, startBridge } from './bridge.js';
 import { flushSessions, initSessionStore, pruneSessions } from './session/store.js';
 import {
   flushRecorder,
@@ -71,6 +71,8 @@ import { applyStagedUpdate, startUpdateChecks } from './update.js';
 import { UI_BASE_ZOOM, windowLayoutForWorkArea } from './window-layout.js';
 import { openInPreferredBrowser } from './browser.js';
 import {
+  applyLoginStartup,
+  isBackgroundLaunch,
   createWindowActivationGate,
   ownsAppRuntime,
   registerNativeWindowActivation,
@@ -147,10 +149,12 @@ function createWindow(): void {
     event.preventDefault();
   });
 
-  // A tray close keeps this process alive. Warm the same account-owned catalog
-  // whenever the window actually becomes visible, not just on process startup.
+  // Observe once through an already open browser. Reopening a window never opens
+  // Chrome or refreshes a ready catalog; explicit Reload models owns that action.
   window.on('show', () => {
-    if (!quitting) void startChatModelDiscovery().catch(error => logWarn(`model discovery on window open: ${error.message}`));
+    if (!quitting) void bridgeStatus().then(status => {
+      if (!quitting && status.present) return startChatModelDiscovery(false);
+    }).catch(error => logWarn(`model discovery on window open: ${error.message}`));
   });
   window.once('ready-to-show', () => {
     // A renderer can finish loading after Cmd+Q has already entered bounded teardown. Never let
@@ -295,7 +299,9 @@ function refreshTray(): void {
   );
 }
 
-app.on('second-instance', windowActivation.request);
+app.on('second-instance', (_event, argv) => {
+  if (!isBackgroundLaunch(argv)) windowActivation.request();
+});
 
 /** Whether startup got as far as bringing up the bridge and connection. */
 let startedControlPlane = false;
@@ -336,6 +342,8 @@ void app.whenReady().then(async () => {
   initDurableStore(userData);
   await loadConfig();
   if (windowActivation.isDisabled()) return;
+  try { applyLoginStartup(app, getConfig().ui.startAtLogin === true); }
+  catch (error) { logWarn(`Windows login startup: ${error instanceof Error ? error.message : String(error)}`); }
   // The renderer has its own explicit light/dark palette, so native chrome must follow the same
   // user choice instead of Electron's default `system` theme. On macOS this controls the window
   // frame, application menus and OS dialogs; on Linux/Windows it covers Electron-native UI.
@@ -376,17 +384,8 @@ void app.whenReady().then(async () => {
   // a browser without this extension in it — from the one holding chat A. That decision belongs
   // to the browser that owns the source chat; see bridge.ts::offerPlacement.
   setBrowserOpener(async (url) => {
-    try {
-      const browser = await openInPreferredBrowser(url);
-      if (browser) return;
-    } catch (error) {
-      logWarn(`could not open ChatGPT in the preferred Chromium browser: ${(error as Error).message}`);
-    }
-    logWarn(
-      'Chrome/Chromium was not found for a browser-backed worker/resume command; falling back to the default browser. ' +
-        'If that browser does not have the Chat On Steroids extension loaded, open the generated ChatGPT URL in Chrome instead.'
-    );
-    await shell.openExternal(url);
+    // Let the command owner report launch failure; another browser may belong to another account.
+    await openInPreferredBrowser(url);
   });
 
   // Persistence is a process-lifetime dependency of the broker, not a feature-toggle
@@ -458,7 +457,7 @@ void app.whenReady().then(async () => {
     }
   );
   windowActivation.enable();
-  windowActivation.request();
+  if (!isBackgroundLaunch(process.argv)) windowActivation.request();
   // macOS `activate` can fire on first launch, so do not wire it at module load where it could
   // create a BrowserWindow before Electron is ready. Once the initial window path is established,
   // Dock activation/re-launch can safely recreate or focus it.

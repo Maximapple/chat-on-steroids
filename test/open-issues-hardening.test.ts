@@ -43,7 +43,11 @@ describe('open upstream issue hardening bundle', () => {
     const continuation = source('src/main/session/continuation.ts');
     expect(content).toContain('if (compactCapture || nativeBusy || pressedAt > 0 || localError) return;');
     expect(content).toContain('compactToken: compactCapture.token');
-    expect(continuation).toContain('export function touchContinuation');
+    // 2.0.7 replaced the poll-driven renewal this used to pin with a stricter one: only growth
+    // of the exact marked response moves the manual deadline, so a page that is merely polling
+    // buys no time. Pin that instead — the weaker rule must not come back.
+    expect(continuation).toContain('Only growth of this exact marked response renews');
+    expect(continuation).not.toContain('export function touchContinuation');
     expect(continuation).toContain('now - entry.touchedAt >= CONTINUATION_TTL_MS');
   });
 
