@@ -27,14 +27,14 @@ the app refuses the extension and asks you to reload the matching copy.
        branch's — the three refusal and parity fixes — are in Fixed below, where they belong. -->
 
 ### Fixed
-- **A handoff no longer leaves its own text sitting in the message box it was sent from.** The
-  Compact & Resume brief typed into a successor chat — and the handoff instruction typed into the
-  chat being compacted — stayed in the composer after ChatGPT had taken it, under the message it
-  had just been sent as. Acceptance is proven by a page-owned consequence, and a fresh chat's is
-  its rendered user message; editor builds that keep the value mounted while the turn starts
-  satisfy that without ever emptying the box, and nothing afterwards took the text out. Both
-  sends now clear what they inserted, matched character-for-character, so a draft begun after
-  the send is untouched.
+- **The composer fake in the test harness can now actually empty a box.** It implemented
+  `insertText` and refused `selectAll`/`delete`, which made every `clearPromptExact()` in the
+  content script a silent no-op under test and left an uncleared composer indistinguishable
+  from a cleared one. Six cases had settled on reading the leftover text as their proof of
+  what had been typed, so a handoff brief left sitting in the box after ChatGPT took it was
+  invisible to the whole suite. The delete half is implemented and those cases now assert on
+  what was submitted instead. No product behaviour changes here: the bug this exposed is
+  fixed upstream in 2.0.7, which retires the draft once it is proven to be the app's own.
 - **A link click that reaches nothing now says so, instead of reporting plain success.** Clicking a
   link could return `ok` with the page exactly where it was, and nothing in the answer could tell
   that apart from a link that simply does not navigate. `hit` and `covered` were the previous
