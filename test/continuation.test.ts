@@ -55,8 +55,8 @@ const {
   attachSummary,
   beginContinuationDestinationSendNow,
   beginContinuationSourceSendNow,
-  bindContinuationDestinationMessageNow,
   bindContinuationSourceMessageNow,
+  bindContinuationDestinationMessageNow,
   claimContinuationNow,
   commitContinuation,
   compactingConversation,
@@ -65,7 +65,7 @@ const {
   dispatchContinuationDestinationSendNow,
   dispatchContinuationSourceSendNow,
   openContinuationNow,
-  pendingAutomaticContinuations,
+  pendingContinuations,
   releaseContinuationDestinationSendNow,
   releaseContinuationSourceSendNow,
   repairPrimeFromResumeShadow,
@@ -909,7 +909,7 @@ describe('restart lifetime recovery', () => {
    * The test above is the backstop: an armed dispatch that nobody resolves is eventually given
    * up by the TTL. A 2026-09-04 QA run measured what that costs when the click simply did not
    * land — three phase pickups firing and expiring against a chat whose composer had never
-   * received the prompt, and, because `pendingAutomaticContinuations()` still named it and
+   * received the prompt, and, because `pendingContinuations()` still named it and
    * `inspectSilentChats()` skips those, no browser recovery for the whole window either.
    *
    * The page can say so: `send()` watches five acceptance signals and this flow settles the turn
@@ -932,7 +932,7 @@ describe('restart lifetime recovery', () => {
     expect(compactingConversation(CHAT_A)).toBeNull();
     expect(continuationForSession(summary.id)).toBeNull();
     expect(continuationByToken(opened.token)?.state).toBe('aborted');
-    expect(pendingAutomaticContinuations().some((entry) => entry.token === opened.token)).toBe(false);
+    expect(pendingContinuations().some((entry) => entry.token === opened.token)).toBe(false);
   });
 
   it('refuses to give up a source dispatch ChatGPT is proven to have taken', async () => {
@@ -1488,5 +1488,45 @@ describe('the window in which a replacement chat is expected', () => {
       conversationId: 'worker-old-owner',
       state: 'sleeping'
     });
+  });
+});
+
+/**
+ * Issue #21: a handoff that was still being written got declared dead at ten minutes.
+ *
+ * The deadline is a limit on *waiting*, but it was measured from the moment the transaction
+ * opened — so a brief ChatGPT was still generating looked exactly like one nobody had touched.
+ * On a 730k-token chat under Pro reasoning the generation took longer than that, and the reported
+ * consequence was worse than a lost handoff: once the running continuation expired,
+ * auto-compaction treated the compaction itself as an eligible turn, stopped it, and started
+ * another one on top.
+ *
+ * The renewal is deliberately not a longer timeout. A chat that has genuinely gone quiet still
+ * expires on the original clock, which the second test here is for.
+ */
+describe('an exact handoff response owns its waiting deadline', () => {
+  it('survives growing output and restart but expires after unchanged snapshots', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = await createSession({ title: 'long handoff', conversationId: CHAT_A });
+      const opened = await openContinuationNow(session.id, CHAT_A);
+      await beginContinuationSourceSendNow(opened.token);
+      await dispatchContinuationSourceSendNow(opened.token);
+      await bindContinuationSourceMessageNow(opened.token, 'exact-user-message');
+      vi.setSystemTime(Date.now() + CONTINUATION_TTL_MS - 60_000);
+      expect(await bindContinuationSourceMessageNow(opened.token, 'wrong-message', 500)).toBe(false);
+      expect(await bindContinuationSourceMessageNow('wrong-token', 'exact-user-message', 500)).toBe(false);
+      expect(await bindContinuationSourceMessageNow(opened.token, 'exact-user-message', 500)).toBe(true);
+      vi.setSystemTime(Date.now() + 2 * 60_000);
+      expect(continuationByToken(opened.token)?.state).toBe('awaiting-summary');
+      const snapshot = snapshotContinuations();
+      resetContinuationsForTests();
+      await restoreContinuations(snapshot);
+      expect(continuationByToken(opened.token)?.state).toBe('awaiting-summary');
+      expect(await bindContinuationSourceMessageNow(opened.token, 'exact-user-message', 500)).toBe(true);
+      vi.setSystemTime(Date.now() + CONTINUATION_TTL_MS);
+      expect(continuationByToken(opened.token)?.state).toBe('aborted');
+      expect(await bindContinuationSourceMessageNow(opened.token, 'exact-user-message', 1000)).toBe(false);
+    } finally { vi.useRealTimers(); }
   });
 });
