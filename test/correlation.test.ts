@@ -15,11 +15,54 @@ import {
   observeRequestCorrelations,
   requestCorrelation,
   restoreRequestCorrelations,
-  resetCorrelationRegistryForTests
+  resetCorrelationRegistryForTests,
+  awaitRequestCorrelation
 } from '../src/main/session/correlation.js';
 
 describe('request correlation ownership', () => {
   beforeEach(() => resetCorrelationRegistryForTests());
+
+  /**
+   * The evidence window is a turn's cost, not a call's.
+   *
+   * Every tool call of one ChatGPT turn carries the same request id, so a page that has stopped
+   * reporting made each of them wait the whole window again. Measured on 2026-09-08 against a
+   * worker chat that had reached its context ceiling: 30 seconds per call, repeatedly, until
+   * ChatGPT abandoned the turn with "Message delivery timed out". The wait was the cost, not
+   * the missing evidence — the calls were going to fail either way.
+   */
+  it('waits the evidence window once per request, not once per call', async () => {
+    const requestId = 'wfr_no_page_evidence';
+    const window = 60;
+
+    const first = Date.now();
+    expect(await awaitRequestCorrelation(requestId, window)).toBeNull();
+    const firstCost = Date.now() - first;
+    expect(firstCost, 'the first call still waits the full window').toBeGreaterThanOrEqual(window - 15);
+
+    // Same turn, next call. Nothing has changed, so there is nothing to wait for.
+    const second = Date.now();
+    expect(await awaitRequestCorrelation(requestId, window)).toBeNull();
+    expect(Date.now() - second, 'a later call in the same turn must not pay it again').toBeLessThan(window / 2);
+
+    // A different turn is unaffected: it has spent nothing yet.
+    const other = Date.now();
+    expect(await awaitRequestCorrelation('wfr_other_turn', window)).toBeNull();
+    expect(Date.now() - other).toBeGreaterThanOrEqual(window - 15);
+
+    // And evidence that does arrive later is still answered, immediately.
+    expect(
+      observeRequestCorrelation({
+        requestId,
+        conversationId: 'conv-late',
+        sessionId: 'session-late',
+        messageId: 'msg-late',
+        tool: 'read',
+        observedAt: Date.now()
+      })
+    ).toBe('stored');
+    expect((await awaitRequestCorrelation(requestId, window))?.conversationId).toBe('conv-late');
+  });
 
   it('keeps one turn-level request id owned across different MCP messages and tools', () => {
     const requestId = 'wfr_shared_turn';

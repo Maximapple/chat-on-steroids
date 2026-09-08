@@ -51,6 +51,33 @@ const CORRELATIONS_STATE_VERSION = 5;
 
 const byRequest = new Map<string, RequestCorrelation>();
 const waiters = new Map<string, Set<() => void>>();
+
+/**
+ * Requests whose evidence window has already gone by unanswered.
+ *
+ * The wait exists because a call can reach this app before the page that proves who made it —
+ * measured at about eight seconds late in the case it was written for. What it is not is a
+ * per-call cost: every tool call of one ChatGPT turn carries the same request id, so a page
+ * that has stopped answering makes each of them spend the whole window again. On 2026-09-08
+ * that was 30 seconds per call against a chat whose page could no longer report, and a handful
+ * of those is long enough for ChatGPT to abandon the turn with "Message delivery timed out" —
+ * the waiting, not the missing evidence, is what ends it.
+ *
+ * So the window is spent once per request id. Later calls still get the answer the moment it
+ * exists, because the immediate read below runs first and this is only consulted when it comes
+ * back empty; they simply do not wait for it a second time.
+ */
+const spentEvidenceWindows = new Set<string>();
+const MAX_SPENT_WINDOWS = 2_000;
+
+function noteEvidenceWindowSpent(requestId: string): void {
+  spentEvidenceWindows.add(requestId);
+  while (spentEvidenceWindows.size > MAX_SPENT_WINDOWS) {
+    const oldest = spentEvidenceWindows.values().next();
+    if (oldest.done) break;
+    spentEvidenceWindows.delete(oldest.value);
+  }
+}
 let restored = false;
 let restoring: Promise<void> | null = null;
 
@@ -145,6 +172,7 @@ function merge(input: RequestCorrelation): 'stored' | 'same' | 'refused' {
   const previous = byRequest.get(input.requestId);
   if (!previous) {
     byRequest.set(input.requestId, { ...input });
+    spentEvidenceWindows.delete(input.requestId);
     trim();
     wake(input.requestId);
     return 'stored';
@@ -299,6 +327,9 @@ export async function awaitRequestCorrelation(requestId: string | null | undefin
   if (!requestId) return null;
   const immediate = requestCorrelation(requestId);
   if (immediate || timeoutMs <= 0) return immediate;
+  // This request already spent one full window with nothing arriving. Spending another buys
+  // the same answer at the same price, and the price is charged to the turn.
+  if (spentEvidenceWindows.has(requestId)) return null;
 
   let timer: NodeJS.Timeout | null = null;
   await new Promise<void>((resolve) => {
@@ -313,12 +344,15 @@ export async function awaitRequestCorrelation(requestId: string | null | undefin
     timer.unref?.();
   });
   if (timer) clearTimeout(timer);
-  return requestCorrelation(requestId);
+  const settled = requestCorrelation(requestId);
+  if (!settled) noteEvidenceWindowSpent(requestId);
+  return settled;
 }
 
 /** A conversation being closed cannot invalidate an already issued request. */
 export function resetCorrelationRegistryForTests(): void {
   byRequest.clear();
+  spentEvidenceWindows.clear();
   restored = false;
   restoring = null;
   for (const requestId of [...waiters.keys()]) wake(requestId);

@@ -27,6 +27,21 @@ the app refuses the extension and asks you to reload the matching copy.
   applied there to a caption, and not to the action that kills live work. A client that really
   is unready is still replaced, one interval later.
 
+## Unreleased
+
+### Fixed
+- **A chat whose page has stopped reporting no longer spends half a minute per tool call finding
+  that out.** Every tool call of one ChatGPT turn carries the same request id, and the wait for
+  the page evidence that names the caller was charged to each of them separately. Against a chat
+  that could no longer report — a worker past its context ceiling, in the run this came from —
+  that was 30 seconds per call, repeatedly. A handful of those is long enough for ChatGPT to give
+  up on the turn with "Message delivery timed out", so the waiting ended the turn rather than the
+  missing evidence, which was going to fail those calls in any case.
+
+  The window is now spent once per request id. Nothing else changes: the first call still waits
+  it in full, a different turn is unaffected, and evidence that arrives late is still answered
+  immediately, because the already-known answer is read before any of this is consulted.
+
 ## [2.0.7] — 2026-09-07
 
 **plus = gpt 5.6; pro = astra**
