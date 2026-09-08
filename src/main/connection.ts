@@ -2,11 +2,8 @@
  * Owns the lifecycle: local MCP server up, then tunnel(s) up, then connected.
  * Everything the UI shows about connection state comes from here.
  *
- * There is one local server and one or two published connectors. The Core connector is
- * what the app is for and is always published; Desktop is optional, is published only
- * when the user has both granted desktop permissions and configured a way to reach it,
- * and its absence is never allowed to fail the connection — a user who never wants
- * desktop control should not see a broken app because of a connector they did not create.
+ * One local server publishes Core plus optional Desktop and Plugins connectors.
+ * Optional tunnel failures stay on their own Settings cards and cannot fail Core.
  */
 
 import type { ConnectionStatus, SurfaceStatus, TunnelSettings } from '../shared/types.js';
@@ -20,15 +17,18 @@ import { SURFACE_LIST, surfaceIsUseful, type SurfaceId } from './mcp/surfaces.js
 import { getSecret } from './secrets.js';
 import { startTunnel, TunnelError, type TunnelHandle } from './tunnel/index.js';
 import { desktopAutomationSupported } from './platform.js';
-import { publishPluginSurface, unpublishPluginSurface } from './plugin-refresh.js';
+import { publishPluginSurface, unpublishPluginSurface, pluginRefreshPublications } from './plugin-refresh.js';
+import { pluginManager } from './plugins/manager.js';
 
 let endpoint: McpEndpoint | null = null;
 /** The Core tunnel. Also the only tunnel on the cloudflared and manual paths. */
 let tunnel: TunnelHandle | null = null;
-/** The Desktop tunnel, on the OpenAI path only, and only when one is configured. */
-let desktopTunnel: TunnelHandle | null = null;
-/** The tunnel id `desktopTunnel` was started for, so a changed id is detectable. */
-let desktopTunnelId: string | null = null;
+/** Independent optional tunnel lifetimes on the OpenAI path. */
+type OptionalSurface = 'desktop' | 'plugins';
+const optionalTunnels = new Map<OptionalSurface, { handle: TunnelHandle | null; tunnelId: string }>();
+const optionalSurfaces: OptionalSurface[] = ['desktop', 'plugins'];
+const optionalTunnelId = (settings: TunnelSettings, id: OptionalSurface): string =>
+  (id === 'desktop' ? settings.desktopTunnelId : settings.pluginsTunnelId) ?? '';
 /** Core-affecting transport settings the current run actually started with. */
 let activeCoreTransport: Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath'> | null = null;
 let status: ConnectionStatus = {
@@ -142,6 +142,7 @@ function desktopUnavailableDetail(id: SurfaceId): string {
 
 /** The tools this surface would advertise right now, for the "what you get" list. */
 function toolsFor(id: SurfaceId): string[] {
+  if (id === 'plugins') return pluginManager.tools().map(tool => tool.name);
   const config = getConfig();
   const caps = effectiveCapabilities(config);
   if (id === 'desktop') {
@@ -176,7 +177,10 @@ function updateSurface(id: SurfaceId, next: Partial<SurfaceStatus>): void {
   if (next.state !== undefined && next.state !== before) refreshPluginPublication(id);
 }
 
-function refreshPluginPublication(id: SurfaceId): void {
+export function refreshPluginPublication(id: SurfaceId): void {
+  // Installing no external plugins must not create browser maintenance work for existing users.
+  // Once enrolled, an empty declaration still matters: it withdraws previously enabled tools.
+  if (id === 'plugins' && !pluginManager.tools().length && !pluginRefreshPublications().some(row => row.surface === id)) return;
   const surface = describeSurfaces().find(entry => entry.id === id);
   if (!endpoint || surface?.state !== 'live' || !surface.available) { unpublishPluginSurface(id); return; }
   endpoint.publication?.(id, (name, version, instructions, tools) => publishPluginSurface(id, name, version, instructions, tools));
@@ -308,10 +312,11 @@ async function connectImpl(): Promise<void> {
         // On a whole-origin transport the Desktop surface is already published by this
         // same tunnel; it just needs its own path on the URL the user was handed.
         if (config.tunnel.kind !== 'openai' && report.publicUrl !== undefined) {
-          const desktop = status.surfaces.find((entry) => entry.id === 'desktop');
-          if (desktop?.available) {
-            updateSurface('desktop', {
-              publicUrl: siblingPublicUrl(report.publicUrl, desktop.localUrl),
+          for (const id of optionalSurfaces) {
+            const optional = status.surfaces.find((entry) => entry.id === id);
+            if (!optional?.available) continue;
+            updateSurface(id, {
+              publicUrl: siblingPublicUrl(report.publicUrl, optional.localUrl),
               state: surfaceStateForConnection(report.state),
               detail: report.detail
             });
@@ -326,7 +331,7 @@ async function connectImpl(): Promise<void> {
     }
     tunnel = startedTunnel;
 
-    await startDesktopTunnel(generation, config.tunnel, apiKey);
+    for (const id of optionalSurfaces) await startOptionalTunnel(id, generation, config.tunnel, apiKey);
   } catch (err) {
     if (shutdownRequested || generation !== connectionGeneration) {
       await disconnectImpl(30_000);
@@ -343,40 +348,39 @@ async function connectImpl(): Promise<void> {
 }
 
 /**
- * Publishes the Desktop connector on the OpenAI path, when there is one to publish.
- *
- * Every failure here is contained. Desktop is optional, the user may not have created its
- * connector yet, and the coding connector must not go down because a second tunnel id was
- * mistyped — so this reports the problem on the Desktop card and leaves the connection up.
+ * Publishes one optional connector with its own report lifetime and failure state.
  */
-async function startDesktopTunnel(
+async function startOptionalTunnel(
+  id: OptionalSurface,
   generation: number,
   settings: TunnelSettings,
   apiKey: string | null
 ): Promise<void> {
   if (settings.kind !== 'openai') return;
-  const desktop = status.surfaces.find((entry) => entry.id === 'desktop');
-  if (!desktop?.available || !endpoint) return;
-  if (!settings.desktopTunnelId) {
-    updateSurface('desktop', {
+  const surface = status.surfaces.find((entry) => entry.id === id);
+  if (!surface?.available || !endpoint) return;
+  const tunnelId = optionalTunnelId(settings, id);
+  if (!tunnelId) {
+    updateSurface(id, {
       state: 'off',
-      detail: 'Not published yet. Create a second Secure Tunnel for it and paste its tunnel id in Settings.'
+      detail: 'Not published yet. Create a separate Secure Tunnel for it and paste its tunnel id in Settings.'
     });
     return;
   }
 
-  updateSurface('desktop', { state: 'starting', detail: 'Connecting…' });
+  updateSurface(id, { state: 'starting', detail: 'Connecting…' });
+  const lifetime = { handle: null as TunnelHandle | null, tunnelId };
+  optionalTunnels.set(id, lifetime);
   try {
-    desktopTunnelId = settings.desktopTunnelId;
-    const startedDesktopTunnel = await startTunnel({
-      localUrl: endpoint.urls.desktop,
-      settings: { ...settings, tunnelId: settings.desktopTunnelId },
+    const started = await startTunnel({
+      localUrl: endpoint.urls[id],
+      settings: { ...settings, tunnelId },
       apiKey,
       discoveryHeaders: tunnelProbeHeaders(),
-      label: 'desktop',
+      label: id,
       report: (report) => {
-        if (generation !== connectionGeneration) return;
-        updateSurface('desktop', {
+        if (generation !== connectionGeneration || optionalTunnels.get(id) !== lifetime) return;
+        updateSurface(id, {
           state: surfaceStateForConnection(report.state),
           detail: report.detail,
           ...(report.publicUrl === undefined ? {} : { publicUrl: report.publicUrl })
@@ -384,31 +388,29 @@ async function startDesktopTunnel(
       }
     });
     if (shutdownRequested || generation !== connectionGeneration) {
-      await startedDesktopTunnel.stop().catch(() => {});
-      desktopTunnelId = null;
+      await started.stop().catch(() => {});
       return;
     }
-    desktopTunnel = startedDesktopTunnel;
+    lifetime.handle = started;
   } catch (err) {
+    if (optionalTunnels.get(id) === lifetime) optionalTunnels.delete(id);
     if (shutdownRequested || generation !== connectionGeneration) {
-      desktopTunnelId = null;
       return;
     }
     const message = err instanceof TunnelError ? err.message : (err as Error).message;
-    logWarn(`desktop connector not published: ${message}`);
-    desktopTunnelId = null;
-    updateSurface('desktop', { state: 'error', detail: message });
+    logWarn(`${id} connector not published: ${message}`);
+    updateSurface(id, { state: 'error', detail: message });
   }
 }
 
-/** Stops the Desktop tunnel, if one is running, and says so on its card. */
-async function stopDesktopTunnel(detail: string): Promise<void> {
-  if (!desktopTunnel) return;
-  await desktopTunnel.stop().catch(() => {});
-  desktopTunnel = null;
-  desktopTunnelId = null;
-  logInfo('desktop connector unpublished');
-  updateSurface('desktop', { state: 'off', detail, publicUrl: null });
+/** Retires report authority before stopping the optional tunnel. */
+async function stopOptionalTunnel(id: OptionalSurface, detail: string): Promise<void> {
+  const current = optionalTunnels.get(id);
+  if (!current) return;
+  optionalTunnels.delete(id);
+  await current.handle?.stop().catch(() => {});
+  logInfo(`${id} connector unpublished`);
+  updateSurface(id, { state: 'off', detail, publicUrl: null });
 }
 
 /**
@@ -432,17 +434,17 @@ async function applySettingsImpl(): Promise<void> {
     return;
   }
   const caps = effectiveCapabilities(config);
-  const available = surfaceIsUseful('desktop', caps);
   if (desktopAutomationSupported() && (caps.screen || caps.control)) void prewarmComputerHelper();
   // Rebuild the cards first: permissions may have changed which tools each surface would
   // advertise, and on a whole-origin transport that is all there is to do.
   setStatus({ surfaces: describeSurfaces() });
 
   if (config.tunnel.kind !== 'openai') {
-    if (available) {
-      const desktop = status.surfaces.find((entry) => entry.id === 'desktop');
-      updateSurface('desktop', {
-        publicUrl: siblingPublicUrl(status.publicUrl, desktop?.localUrl ?? null),
+    for (const id of optionalSurfaces) {
+      if (!surfaceIsUseful(id, caps)) continue;
+      const surface = status.surfaces.find((entry) => entry.id === id);
+      updateSurface(id, {
+        publicUrl: siblingPublicUrl(status.publicUrl, surface?.localUrl ?? null),
         state: surfaceStateForConnection(status.state),
         detail: status.detail
       });
@@ -450,25 +452,21 @@ async function applySettingsImpl(): Promise<void> {
     return;
   }
 
-  if (!available) {
-    // Once published, the tunnel stays up even though the card now reads "off" (set above by
-    // describeSurfaces, from the live capabilities). Tearing it down here severed the
-    // *transport*: the local endpoint's own tools/list is deliberately monotonic and its
-    // handlers already return a clean TOOL_DISABLED while a capability is off (see server.ts),
-    // but a request cannot reach that answer once the tunnel relaying it has been stopped — it
-    // dies at the tunnel with the OpenAI/Cloudflare infrastructure's own tunnel_client_not_
-    // connected instead of this app's product-level explanation. QA found exactly that: the
-    // Desktop connector, mid-session, gave a raw transport error instead of the promised one.
-    // Only skip *starting* a tunnel that was never published in the first place — never
-    // un-publish a live one just because every desktop permission happens to be off right now.
-    if (!desktopTunnel) {
-      await stopDesktopTunnel('Turn a desktop permission back on to publish this connector.');
+  for (const id of optionalSurfaces) {
+    if (!surfaceIsUseful(id, caps)) {
+      // Deliberately not unpublished. The card already reads "off" — describeSurfaces set it
+      // above from the live capabilities — and the local handlers already answer TOOL_DISABLED
+      // while a capability is off. But that answer cannot travel over a transport that has been
+      // stopped: the request dies at the tunnel with the infrastructure's own
+      // tunnel_client_not_connected instead of this app's explanation. QA met exactly that, the
+      // Desktop connector returning a raw transport error mid-session. A surface that was never
+      // published stays unpublished; a live one keeps its transport.
+      continue;
     }
-    return;
+    if (optionalTunnels.get(id)?.tunnelId === optionalTunnelId(config.tunnel, id)) continue;
+    await stopOptionalTunnel(id, 'Reconnecting with the new tunnel…');
+    await startOptionalTunnel(id, connectionGeneration, config.tunnel, await getSecret('openaiApiKey'));
   }
-  if (desktopTunnel && desktopTunnelId === config.tunnel.desktopTunnelId) return;
-  await stopDesktopTunnel('Reconnecting with the new tunnel…');
-  await startDesktopTunnel(connectionGeneration, config.tunnel, await getSecret('openaiApiKey'));
 }
 
 /** Applies a settings change to a live connection. Safe to call while disconnected. */
@@ -490,11 +488,8 @@ async function disconnectImpl(endpointForceAfterMs?: number): Promise<void> {
     if (endpointForceAfterMs === undefined) await stopping.stop().catch(() => {});
     else await stopping.stop({ forceAfterMs: endpointForceAfterMs }).catch(() => {});
   }
-  if (desktopTunnel) {
-    await desktopTunnel.stop().catch(() => {});
-    desktopTunnel = null;
-  }
-  desktopTunnelId = null;
+  for (const { handle } of optionalTunnels.values()) await handle?.stop().catch(() => {});
+  optionalTunnels.clear();
   if (tunnel) {
     await tunnel.stop().catch(() => {});
     tunnel = null;
