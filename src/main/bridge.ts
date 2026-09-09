@@ -5015,6 +5015,21 @@ interface ActivityGrant {
 
 const activeUntil = new Map<string, ActivityGrant>();
 
+/**
+ * Resume tickets this run took over from the previous one, by token.
+ *
+ * `inspectSilentChats` walks `activeUntil`, and startup clears that map: a chat enters it only
+ * once a live page has reported. A handoff restored from disk is the one case where the
+ * obligation is durable and the page is exactly what is missing, so it can never appear there
+ * on its own — and `compactionStillChased()` declines it too, deliberately, for sitting below
+ * the watch floor. Both halves then answer "not mine" about the same ticket.
+ *
+ * These are not strangers to this process. The app logs them itself as "restored N chat
+ * command(s) from the previous run"; it is holding them, and this is what lets the one pass
+ * that could release them see that it is.
+ */
+const restoredResumeTokens = new Set<string>();
+
 /** Chats reloaded by the app whose page has given no sign of life since. */
 const awaitingReturn = new Set<string>();
 
@@ -5949,11 +5964,29 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
       .filter((entry) => compactionStillChased(entry))
       .map((entry) => entry.from)
   );
-  for (const [conversationId, grant] of activeUntil) {
+  // A restored ticket has no grant and never will get one, so it is added as a candidate whose
+  // silence is already measured: its evidence is the durable continuation, and the moment it
+  // was opened is the last thing anything knew about that chat. Only tickets this run took over
+  // qualify, which is the difference between answering for an obligation and lowering the floor.
+  const restored: Array<[string, ActivityGrant]> = [];
+  if (restoredResumeTokens.size > 0) {
+    for (const entry of pendingContinuations()) {
+      // Automatic only, as before: a manual resume that never reports back is aborted rather
+      // than kept, so it is not the ticket this rescue is about.
+      if (!entry.automatic || !restoredResumeTokens.has(entry.token)) continue;
+      if (activeUntil.has(entry.from) || compacting.has(entry.from)) continue;
+      restored.push([
+        entry.from,
+        { sessionId: entry.sessionId, evidenceAt: entry.openedAt, until: entry.openedAt, turnId: null, model: 'other' }
+      ]);
+    }
+  }
+  for (const [conversationId, grant] of [...activeUntil, ...restored]) {
     if (compacting.has(conversationId)) continue;
     if (grant.until > now) continue;
     const pro = await extendedSilenceWindowFor(conversationId, grant.sessionId);
-    if (activeUntil.get(conversationId) !== grant) continue;
+    // A real grant arriving mid-await supersedes either kind of candidate.
+    if (activeUntil.has(conversationId) && activeUntil.get(conversationId) !== grant) continue;
     // A blocked chat never gets the reload, so it can never get the confirmation this pass
     // otherwise waits for, and it would sit measured-silent in the ledger — and in the live set
     // the UI paints — for the rest of the process. Its silence is spent the moment it is
@@ -7330,7 +7363,8 @@ function describe(command: Command, client: string | null, claimedSummary?: stri
 
 function drop(command: Command, why: string): boolean {
   if (!commands.includes(command)) return false;
-  const automaticEntry = command.spec.type === 'resume' ? continuationByToken(command.spec.token) : null;
+  const resumeToken = command.spec.type === 'resume' ? command.spec.token : null;
+  const automaticEntry = resumeToken ? continuationByToken(resumeToken) : null;
   const automaticResume =
     automaticEntry?.automatic === true && automaticEntry.state !== 'committing' && automaticEntry.state !== 'committed';
   if (automaticResume) {
@@ -7340,6 +7374,26 @@ function drop(command: Command, why: string): boolean {
     logWarn(`bridge: released ${specKey(command.spec)} browser attempt without closing its ticket — ${why}`);
     changed();
     persistCommands();
+    // The claim goes with the command, exactly as it does when a page reports the loss itself.
+    //
+    // Redeeming is what claims the brief, and the claim names *this* command. Keeping the
+    // ticket while retiring the command it is claimed by leaves a ticket no later pickup can
+    // ever redeem: every pickup is a fresh id, `claimedBy` never matches one again, and
+    // `claimContinuationNow` refuses for the rest of the six-hour TTL. Observed on 2026-09-09
+    // as four pickups, four opened tabs and four pages that stopped without typing, without an
+    // ack and without a log line — the retry this branch exists to allow, made impossible by
+    // the same branch.
+    //
+    // `destinationLost` takes this transition already, but only a page that survived its send
+    // sends it; a page that dies before one never does. Gated on `not-attempted` so this can
+    // only ever release a brief that provably was not submitted — releasing a dispatched one
+    // is the double-send that `releaseContinuationDestinationSendNow` refuses for `sent`.
+    if (resumeToken && automaticEntry?.destinationSend?.state === 'not-attempted') {
+      void releaseContinuationDestinationSendNow(resumeToken)
+        .catch(() => undefined)
+        .finally(() => scheduleDeliver());
+      return true;
+    }
     scheduleDeliver();
     return true;
   }
@@ -7887,6 +7941,10 @@ export async function restoreCommands(): Promise<void> {
   commands = plan.commands;
   commandReceipts = plan.receipts;
   for (const token of plan.resumeTokens) rememberToken(token.sessionId, token.token);
+  // Resolved to conversations later, not here: the continuation store is restored on its own
+  // schedule and may not have loaded yet when commands are published.
+  restoredResumeTokens.clear();
+  for (const token of plan.resumeTokens) restoredResumeTokens.add(token.token);
   rearmRetainedCommandDeadlines();
   if (plan.restored > 0) {
     logInfo(`bridge: restored ${plan.restored} chat command(s) from the previous run`);
