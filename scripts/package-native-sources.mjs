@@ -46,7 +46,15 @@ await Promise.all(Array.from({ length: 8 }, async () => {
     try { bytes = await fs.readFile(destination); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (!bytes) {
-      const response = await fetch(source.url, { signal: AbortSignal.timeout(180_000) });
+      // Named explicitly rather than left to the runtime. gitlab.gnome.org answers a request
+      // with no User-Agent `406 Not Acceptable`, and whether one is sent by default is a
+      // property of the Node build: v24 sends one, the v22 this job pins does not, so the
+      // corresponding-source archive failed for a header nobody chose. Verified against the
+      // live host: no User-Agent 406, any User-Agent 200.
+      const response = await fetch(source.url, {
+        headers: { 'user-agent': 'chat-on-steroids corresponding-source archiver' },
+        signal: AbortSignal.timeout(180_000)
+      });
       if (!response.ok) throw new Error(`Native source download failed: ${source.file}: HTTP ${response.status}`);
       const chunks = [];
       let size = 0;
