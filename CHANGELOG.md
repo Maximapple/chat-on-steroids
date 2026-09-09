@@ -27,6 +27,13 @@ the app refuses the extension and asks you to reload the matching copy.
        branch's — the three refusal and parity fixes — are in Fixed below, where they belong. -->
 
 ### Fixed
+- **A compaction whose replacement chat dies before it types can be retried again.** Redeeming a
+  handoff claims it for the redeeming command, and an automatic ticket deliberately outlives a
+  failed attempt so a later pickup can try again — but the claim was retired with neither. Every
+  later pickup carries a fresh command id, which can never match the claim the dead one left
+  behind, so the app opened tab after tab and each page stopped without typing, without an ack
+  and without a log line, for the ticket's whole six-hour life. The claim is now released with
+  the command that held it, and only when nothing was submitted under it.
 - **A link click that reaches nothing now says so, instead of reporting plain success.** Clicking a
   link could return `ok` with the page exactly where it was, and nothing in the answer could tell
   that apart from a link that simply does not navigate. `hit` and `covered` were the previous
