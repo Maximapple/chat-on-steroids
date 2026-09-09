@@ -2363,7 +2363,24 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           origin
         );
       }
-      if (!aborted) return json(res, 409, { error: 'source_send_not_releasable' }, origin);
+      if (!aborted) {
+        // Upstream ends the transaction only from the two pre-Send states. A dispatch that
+        // was armed and then proved unaccepted - none of send()'s five acceptance signals
+        // inside its window, on a chat this flow had already stopped and settled - falls
+        // through to here, and refusing it leaves the ticket armed until the six-hour TTL
+        // with the chat kept out of browser recovery the whole time. Nothing is re-offered
+        // either way; the prompt may still be with ChatGPT and the arming fence exists
+        // precisely not to gamble on that. Only the transaction ends.
+        const released = await releaseContinuationSourceSendNow(
+          checkpointToken,
+          'ChatGPT did not take the handoff instruction, and an armed dispatch is never sent twice'
+        );
+        if (!released) return json(res, 409, { error: 'source_send_not_releasable' }, origin);
+        compactionWatch.delete(id);
+        if (repairsInFlight.get(id)?.reason === 'compaction') repairsInFlight.delete(id);
+        changed();
+        return json(res, 200, { released: true, sessionId: entry.sessionId }, origin);
+      }
       compactionWatch.delete(id);
       if (repairsInFlight.get(id)?.reason === 'compaction') repairsInFlight.delete(id);
       changed();
@@ -2376,21 +2393,6 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       if (!entry || entry.from !== id) return json(res, 409, { error: 'no_such_continuation' }, origin);
       const armed = await dispatchContinuationSourceSendNow(checkpointToken);
       return json(res, armed ? 200 : 409, armed ? { armed: true } : { error: 'source_send_reclaimed' }, origin);
-    }
-    // The click was armed and ChatGPT took nothing: none of send()'s five acceptance signals
-    // fired within its window, on a chat whose generation this flow had already stopped and
-    // settled. Nothing is re-offered — the prompt may still be with ChatGPT, and that is exactly
-    // what the arming fence refuses to gamble on — but the transaction ends here instead of
-    // sitting armed until the six-hour TTL, which also kept the chat out of browser recovery.
-    if (body['sourceLost'] === true) {
-      const entry = continuationByToken(checkpointToken);
-      if (!entry || entry.from !== id) return json(res, 409, { error: 'no_such_continuation' }, origin);
-      const released = await releaseContinuationSourceSendNow(
-        checkpointToken,
-        'ChatGPT did not take the handoff instruction, and an armed dispatch is never sent twice'
-      );
-      if (released) changed();
-      return json(res, 200, { released }, origin);
     }
     if (body['sourceAttempt'] === true) {
       const entry = continuationByToken(checkpointToken);
