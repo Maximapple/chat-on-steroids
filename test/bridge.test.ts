@@ -192,6 +192,30 @@ async function compactedSession(from: string, brief: string): Promise<{ sessionI
   return { sessionId, token: await readyContinuation(sessionId, brief, from) };
 }
 
+/**
+ * The same, but the ticket the app files for itself rather than one the user asked for.
+ *
+ * Automatic tickets take a different failure path: a manual resume that never reports back is
+ * aborted, an automatic one keeps its ticket for a later pickup. Only the automatic one can
+ * reach the state this file's claim test is about.
+ */
+async function automaticCompactedSession(from: string, brief: string): Promise<{ sessionId: string; token: string }> {
+  const reply = await request('POST', '/events', {
+    body: {
+      conversationId: from,
+      events: [{ kind: 'user_message', time: Date.now(), text: 'do the work', messageId: `m-${from}` }]
+    }
+  });
+  const sessionId = reply.body.sessionId as string;
+  expect(sessionId, 'the chat was not recorded, so there is no session to compact').toBeTruthy();
+  const ticket = await openContinuationNow(sessionId, from, true);
+  const stored = await attachSummary(ticket.token, `${brief}
+
+${SAMPLE_BRIEF}`);
+  expect(stored, 'the brief was not stored, so there is no resume to queue').not.toBeNull();
+  return { sessionId, token: ticket.token };
+}
+
 /** Every URL the app asked the OS to open, in order. Stands in for Electron's shell. */
 const opened: string[] = [];
 let anonymousRedeemIndex = 0;
@@ -4521,6 +4545,58 @@ describe('targeted open', () => {
     }
   });
 
+  /**
+   * The claim outliving the command that made it.
+   *
+   * Redeeming is what claims the brief: the app records the redeeming command as `claimedBy` so
+   * a second tab on the same marker cannot be handed the same handoff twice. An *automatic*
+   * ticket deliberately survives a failed attempt — `drop()` retires the command and keeps the
+   * ticket, so a later pickup can try again — but the claim was never released with it, and
+   * every later pickup is a *new* command id which can therefore never equal `claimedBy`.
+   *
+   * `claimContinuationNow` then returns null for the rest of the ticket's six-hour life, the
+   * command is handed out with an empty brief, and the page stops without typing, without an
+   * ack and without a log line. Observed on 2026-09-09: four pickups, four opened tabs, four
+   * silent stops, `claimedBy` still naming the first tab's command hours after it was closed.
+   *
+   * Nothing here was ever submitted — `destinationSend` never leaves `not-attempted` — so
+   * releasing the claim cannot re-send anything.
+   */
+  it('lets the next pickup claim a brief whose first chat died before typing anything', async () => {
+    vi.useFakeTimers();
+    try {
+      setBrowserOpener(async (url) => {
+        opened.push(url);
+      });
+      await pair();
+      const { sessionId, token } = await automaticCompactedSession(
+        '55555555-6666-7777-8888-999999999999',
+        'the wedged brief'
+      );
+      const first = queueResume(sessionId, token)!;
+      await waitForOpened(1);
+
+      // The chat opens and its page redeems, which is the act that claims the brief. Then the
+      // tab is closed: nothing is typed, nothing is acked, nothing is reported.
+      expect((await redeem(first.id, 'tab-1')).text).toContain('the wedged brief');
+      expect(continuationByToken(token)?.destinationSend.state).toBe('not-attempted');
+
+      // The command's own deadline passes with nothing reported.
+      await vi.advanceTimersByTimeAsync(16 * 60_000);
+
+      // An automatic ticket is kept on purpose — this is the state a later pickup exists for.
+      expect(continuationByToken(token)?.state).not.toBe('aborted');
+      expect(pendingCommands().some((entry) => entry.id === first.id)).toBe(false);
+
+      // So the next pickup, whose id is necessarily different, has to be able to carry it.
+      const second = queueResume(sessionId, token)!;
+      expect(second.id).not.toBe(first.id);
+      expect((await redeem(second.id, 'tab-2')).text).toContain('the wedged brief');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('withdraws a cancelled resume so no tab opens for it afterwards', async () => {
     setBrowserOpener(async (url) => {
       opened.push(url);
@@ -4933,6 +5009,59 @@ describe('unattributed activity recovery', () => {
   /** The chat urls this app asked the browser to open, ignoring marked bootstrap commands. */
   const reopened = (conversationId: string): string[] =>
     opened.filter((url) => url === `https://chatgpt.com/c/${conversationId}`);
+
+  /**
+   * The rescue the watch floor is allowed to lean on, after the restart that needs it.
+   *
+   * `compactionStillChased()` answers false for a continuation restored from disk on purpose:
+   * it sits below `compactionWatchFloor`, this run never accepted that obligation through a
+   * pickup, and the comment above it names `inspectSilentChats()` as what releases the chat
+   * instead. So the floor is only safe if that pass can actually reach such a chat.
+   *
+   * It could not. The pass walks `activeUntil`, startup clears that map, and only a live page
+   * report refills it — so a chat wedged precisely because nothing loads it is in no map the
+   * pass iterates. Both halves declined and the ticket sat out its whole six-hour life unasked
+   * for: measured here as `maintenance()` answering null six hours after the restart.
+   *
+   * A restored command is not a stranger. The app logs these itself as "restored N chat
+   * command(s) from the previous run" — obligations this process did take over — so a chat one
+   * of them names is a chat this run is answerable for, grant or no grant.
+   */
+  it('rescues a compaction restored from the previous run, which no page will report', async () => {
+    vi.useFakeTimers();
+    try {
+      setBrowserOpener(async (url) => {
+        opened.push(url);
+      });
+      await pair();
+      const chat = 'dddddddd-1111-2222-3333-444444444444';
+      const { sessionId, token } = await automaticCompactedSession(chat, 'restored brief');
+      // A pickup had already run before the crash, which is what leaves a durable resume
+      // command behind for the next process to restore.
+      queueResume(sessionId, token);
+
+      // A real process restart: the durable state is on disk, memory starts empty, and the
+      // commands come back from the file. The floor moves to now, which puts the restored
+      // continuation below it, and activeUntil starts empty.
+      await flushDurable();
+      const continuations = await readDurable<ContinuationSnapshot>(CONTINUATIONS_STATE);
+      await vi.advanceTimersByTimeAsync(60_000);
+      resetBridgeForTests();
+      await restoreContinuations(continuations);
+      await restoreCommands();
+
+      // There is something to rescue: the ticket outlived the restart and still holds its brief.
+      expect(continuationByToken(token)?.state).toBe('awaiting-chat');
+
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 15_000);
+      // The sweep is driven directly: its timer belongs to the process that was replaced, and
+      // what is under test is what the pass does when it runs, not when it is scheduled.
+      await sweepStaleSwarm(Date.now());
+      expect(chatOf(await maintenance())).toBe(chat);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('waits fifteen seconds on a lone suspect, then hands the browser that one chat to reload', async () => {
     vi.useFakeTimers();

@@ -43,6 +43,20 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A compaction open across an app restart is no longer left for its whole six-hour life.**
+  A handoff restored from disk sits below the watch floor, so the pickup machinery correctly
+  declines it as an obligation this run never accepted, and the silence check was meant to
+  release it instead. That check only walked chats with a live activity grant, and startup
+  clears those — so the one chat that could not report was the one it could not see, and
+  nothing asked after it again. Chats named by the commands the app itself restores from the
+  previous run are now considered too.
+- **A compaction whose replacement chat dies before it types can be retried again.** Redeeming a
+  handoff claims it for the redeeming command, and an automatic ticket deliberately outlives a
+  failed attempt so a later pickup can try again — but the claim was retired with neither. Every
+  later pickup carries a fresh command id, which can never match the claim the dead one left
+  behind, so the app opened tab after tab and each page stopped without typing, without an ack
+  and without a log line, for the ticket's whole six-hour life. The claim is now released with
+  the command that held it, and only when nothing was submitted under it.
 - **A chat whose page has stopped reporting no longer spends half a minute per tool call finding
   that out.** Every tool call of one ChatGPT turn carries the same request id, and the wait for
   the page evidence that names the caller was charged to each of them separately. Against a chat
