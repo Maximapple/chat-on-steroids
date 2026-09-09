@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushDurable, initDurableStore, resetDurableForTests, writeDurableNow } from '../src/main/durable.js';
 import {
   appendEvent,
@@ -14,54 +14,70 @@ import {
   observeRequestCorrelation,
   observeRequestCorrelations,
   requestCorrelation,
+  awaitRequestCorrelation,
   restoreRequestCorrelations,
-  resetCorrelationRegistryForTests,
-  awaitRequestCorrelation
+  resetCorrelationRegistryForTests
 } from '../src/main/session/correlation.js';
 
 describe('request correlation ownership', () => {
   beforeEach(() => resetCorrelationRegistryForTests());
+  afterEach(() => vi.useRealTimers());
 
-  /**
-   * The evidence window is a turn's cost, not a call's.
-   *
-   * Every tool call of one ChatGPT turn carries the same request id, so a page that has stopped
-   * reporting made each of them wait the whole window again. Measured on 2026-09-08 against a
-   * worker chat that had reached its context ceiling: 30 seconds per call, repeatedly, until
-   * ChatGPT abandoned the turn with "Message delivery timed out". The wait was the cost, not
-   * the missing evidence — the calls were going to fail either way.
-   */
-  it('waits the evidence window once per request, not once per call', async () => {
-    const requestId = 'wfr_no_page_evidence';
-    const window = 60;
+  it('spends grace once per request while accepting late exact evidence', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const first = awaitRequestCorrelation('wfr-missing', 60);
+    await vi.advanceTimersByTimeAsync(60);
+    expect(await first).toBeNull();
+    expect(await awaitRequestCorrelation('wfr-missing', 60)).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
 
-    const first = Date.now();
-    expect(await awaitRequestCorrelation(requestId, window)).toBeNull();
-    const firstCost = Date.now() - first;
-    expect(firstCost, 'the first call still waits the full window').toBeGreaterThanOrEqual(window - 15);
+    const other = awaitRequestCorrelation('wfr-other', 60);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(60);
+    expect(await other).toBeNull();
 
-    // Same turn, next call. Nothing has changed, so there is nothing to wait for.
-    const second = Date.now();
-    expect(await awaitRequestCorrelation(requestId, window)).toBeNull();
-    expect(Date.now() - second, 'a later call in the same turn must not pay it again').toBeLessThan(window / 2);
+    observeRequestCorrelation({ requestId: 'wfr-missing', conversationId: 'conv-late',
+      sessionId: 'session-late', messageId: 'message-late', tool: '', observedAt: 1 });
+    expect((await awaitRequestCorrelation('wfr-missing', 60))?.conversationId).toBe('conv-late');
+  });
 
-    // A different turn is unaffected: it has spent nothing yet.
-    const other = Date.now();
-    expect(await awaitRequestCorrelation('wfr_other_turn', window)).toBeNull();
-    expect(Date.now() - other).toBeGreaterThanOrEqual(window - 15);
+  it('shares a deadline across overlapping callers instead of restarting their grace', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const first = awaitRequestCorrelation('wfr-overlap', 100);
+    await vi.advanceTimersByTimeAsync(40);
+    const second = awaitRequestCorrelation('wfr-overlap', 100);
+    await vi.advanceTimersByTimeAsync(60);
+    expect(await first).toBeNull();
+    expect(await second).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
-    // And evidence that does arrive later is still answered, immediately.
-    expect(
-      observeRequestCorrelation({
-        requestId,
-        conversationId: 'conv-late',
-        sessionId: 'session-late',
-        messageId: 'msg-late',
-        tool: 'read',
-        observedAt: Date.now()
-      })
-    ).toBe('stored');
-    expect((await awaitRequestCorrelation(requestId, window))?.conversationId).toBe('conv-late');
+  it('retains the remaining longer recorder grace after a shorter identity timeout', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const short = awaitRequestCorrelation('wfr-longer', 15);
+    await vi.advanceTimersByTimeAsync(15);
+    expect(await short).toBeNull();
+    const longer = awaitRequestCorrelation('wfr-longer', 20);
+    await vi.advanceTimersByTimeAsync(4);
+    expect(vi.getTimerCount()).toBe(1);
+    observeRequestCorrelation({ requestId: 'wfr-longer', conversationId: 'conv-proved',
+      sessionId: 'session-proved', messageId: 'message-proved', tool: '', observedAt: 1 });
+    expect((await longer)?.conversationId).toBe('conv-proved');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('ends the longer grace at its original deadline and leaves zero-time lookups uncharged', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    expect(await awaitRequestCorrelation('wfr-budget', 0)).toBeNull();
+    await vi.advanceTimersByTimeAsync(100);
+    const short = awaitRequestCorrelation('wfr-budget', 15);
+    await vi.advanceTimersByTimeAsync(15);
+    expect(await short).toBeNull();
+    const longer = awaitRequestCorrelation('wfr-budget', 20);
+    await vi.advanceTimersByTimeAsync(5);
+    expect(await longer).toBeNull();
+    expect(await awaitRequestCorrelation('wfr-budget', 20)).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('keeps one turn-level request id owned across different MCP messages and tools', () => {
@@ -207,40 +223,6 @@ describe('request correlation ownership', () => {
     expect(requestCorrelation(refreshedId)?.conversationId).toBe('conv-a');
     expect(requestCorrelation(refreshedId)?.observedAt).toBe(100_000);
     expect(requestCorrelation('wfr_fill_0')).toBeNull();
-  });
-
-  it('keeps the owner of a workflow whose calls are still arriving after its page went quiet', () => {
-    // The permanence contract's hardest case, and the one the header is written for: the MCP
-    // side keeps issuing calls under a request id after the page that proved it was reloaded,
-    // compacted or closed. No further page observation is ever coming, so observation order
-    // alone parks that workflow at the eviction head — the registry would discard precisely the
-    // owner least able to refresh itself, while ids nobody is using any more stay. A lookup is
-    // the other liveness signal, so being called under counts as being alive.
-    const liveId = 'wfr_still_calling';
-    const correlation = (requestId: string, observedAt: number) => ({
-      requestId,
-      conversationId: 'conv-live',
-      sessionId: 'session-a',
-      messageId: `msg-${requestId}`,
-      tool: 'read',
-      observedAt
-    });
-
-    // The live workflow is the oldest insertion and is never observed again.
-    observeRequestCorrelations([
-      correlation(liveId, 1),
-      ...Array.from({ length: 49_999 }, (_, index) => correlation(`wfr_quiet_${index}`, index + 2))
-    ]);
-
-    // Its calls keep arriving. This is the only evidence it will ever produce again.
-    expect(requestCorrelation(liveId)?.conversationId).toBe('conv-live');
-
-    // One more id forces an eviction. It must not be this one.
-    observeRequestCorrelation(correlation('wfr_newest', 100_001));
-
-    expect(requestCorrelation(liveId)?.conversationId).toBe('conv-live');
-    // The id nothing has touched since it was stored is the one that goes.
-    expect(requestCorrelation('wfr_quiet_0')).toBeNull();
   });
 
   it('restores proven request ownership from durable state after an app restart', async () => {

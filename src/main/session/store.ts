@@ -918,11 +918,27 @@ export function automaticCompactionAllowed(summary?: SessionSummary | null): boo
 
 export function autoCompactionReady(summary: SessionSummary | null | undefined): boolean {
   if (!summary) return false;
+  const refusal = summary.autoCompactionRefusal;
+  if (refusal?.conversationId === summary.conversationId &&
+      (!summary.activeTurnId || summary.activeTurnId === refusal.turnId)) return false;
   const config = getConfig().compaction;
   // Growth, not total. A resumed chat is already carrying its inherited brief; compacting that
   // again produces an equivalent brief and moves nothing forward. See resumeBaselineTokens.
   const own = Math.max(0, summary.contextTokens - (summary.resumeBaselineTokens ?? 0));
   return automaticCompactionAllowed(summary) && config.autoTokens > 0 && own >= config.autoTokens;
+}
+
+/** Persist eligibility before retiring the ticket, so a restart cannot refile the refused turn. */
+export async function refuseAutomaticCompactionNow(id: string, conversationId: string, turnId: string | null): Promise<void> {
+  const entry = await ensureOpen(id);
+  await enqueueSessionOperation(entry, 'automatic compaction refusal', async () => {
+    if (entry.summary.conversationId !== conversationId ||
+        (entry.summary.activeTurnId && entry.summary.activeTurnId !== turnId)) return;
+    const staged = { ...entry.summary, autoCompactionRefusal: { conversationId, turnId } };
+    await writeSummary(staged, entry.historySeq);
+    entry.summary = staged;
+    publishAttachmentSummary(staged);
+  });
 }
 
 /**
