@@ -15,14 +15,6 @@
  * solely because its browser evidence aged out. A proven owner therefore has no time TTL - and
  * no later observation can move or erase it either.
  *
- * One bound remains, and it is a memory bound rather than a lifetime one: the in-memory registry
- * holds MAX_CORRELATIONS ids, and past that the least recently used one is dropped. "Used" means
- * observed by the page *or* looked up by an arriving call, so an id is only ever a candidate once
- * nothing has touched it for 50,000 other request ids — which no workflow that is still running
- * can be. An id dropped that way is not necessarily gone either: restore rebuilds owners from
- * request_id-attributed tool calls in recorded history, which is where the join was written
- * down.
- *
  * A second conversation claiming a proven id is a page that is wrong about itself: a React tree
  * still mounted from the chat before it, a fresh chat whose client-side thread id has not yet
  * become the server's, an id the site reused. The answer to a page that is wrong is to refuse
@@ -59,33 +51,16 @@ const CORRELATIONS_STATE_VERSION = 5;
 
 const byRequest = new Map<string, RequestCorrelation>();
 const waiters = new Map<string, Set<() => void>>();
-
 /**
- * Requests whose evidence window has already gone by unanswered.
- *
- * The wait exists because a call can reach this app before the page that proves who made it —
- * measured at about eight seconds late in the case it was written for. What it is not is a
- * per-call cost: every tool call of one ChatGPT turn carries the same request id, so a page
- * that has stopped answering makes each of them spend the whole window again. On 2026-09-08
- * that was 30 seconds per call against a chat whose page could no longer report, and a handful
- * of those is long enough for ChatGPT to abandon the turn with "Message delivery timed out" —
- * the waiting, not the missing evidence, is what ends it.
- *
- * So the window is spent once per request id. Later calls still get the answer the moment it
- * exists, because the immediate read below runs first and this is only consulted when it comes
- * back empty; they simply do not wait for it a second time.
+ * Evidence grace belongs to the request, not each tool call in its workflow. All callers
+ * measure their allowance from its first wait, so sequential and overlapping calls cannot
+ * restart the clock. Keep the start rather than a spent flag: the recorder's longer grace
+ * must remain available after a shorter identity lookup expires. This is only wait accounting,
+ * never a negative ownership verdict; exact evidence always wins, even after every deadline.
+ * Process-local and bounded: a restart or eviction may grant fresh grace, never an owner.
  */
-const spentEvidenceWindows = new Set<string>();
-const MAX_SPENT_WINDOWS = 2_000;
-
-function noteEvidenceWindowSpent(requestId: string): void {
-  spentEvidenceWindows.add(requestId);
-  while (spentEvidenceWindows.size > MAX_SPENT_WINDOWS) {
-    const oldest = spentEvidenceWindows.values().next();
-    if (oldest.done) break;
-    spentEvidenceWindows.delete(oldest.value);
-  }
-}
+const evidenceWindowStarts = new Map<string, number>();
+const MAX_EVIDENCE_WINDOWS = 2_000;
 let restored = false;
 let restoring: Promise<void> | null = null;
 
@@ -180,7 +155,7 @@ function merge(input: RequestCorrelation): 'stored' | 'same' | 'refused' {
   const previous = byRequest.get(input.requestId);
   if (!previous) {
     byRequest.set(input.requestId, { ...input });
-    spentEvidenceWindows.delete(input.requestId);
+    evidenceWindowStarts.delete(input.requestId);
     trim();
     wake(input.requestId);
     return 'stored';
@@ -242,6 +217,10 @@ async function restoreRequestCorrelationsOnce(): Promise<void> {
   // is idempotent for the same conversation and still makes contradictions sticky.
   let sessions;
   try {
+    // Every retained session, not a capped page. This reconciliation decides who owns a
+    // request id, and `listAllSessions()` wrapped the bounded view whose own doc comment says
+    // never to use it for identity: past the cap it answers "no such session" for a session
+    // that exists, which here silently hands a request to the wrong conversation.
     sessions = await readEverySummary();
   } catch (error) {
     // A valid direct snapshot can be restored before the session store is initialized (some
@@ -320,28 +299,11 @@ export function observeRequestCorrelations(
   return results;
 }
 
-/**
- * Exact request-id lookup. An id no page has proved yet resolves to null.
- *
- * A hit also refreshes the id's place in the eviction order, because being called under is this
- * registry's other liveness signal and the more reliable one. `merge()` already moves a
- * re-observed id out of the eviction head; without the same treatment here, the workflow the
- * header is actually written for — one whose calls keep arriving after the page that proved it
- * was reloaded, compacted or closed — is the workflow that can never refresh itself again, and
- * so the first one a full registry discards. Eviction now follows use rather than page chatter.
- *
- * In memory only, deliberately. Below the cap the order is invisible: the durable snapshot keeps
- * every row and restore reconciles it against recorded history regardless. Persisting a
- * reordering on every lookup would clone the whole registry through the write debounce on the
- * hottest path there is, to record something nothing reads.
- */
+/** Exact request-id lookup. An id no page has proved yet resolves to null. */
 export function requestCorrelation(requestId: string | null | undefined): RequestCorrelation | null {
   if (!requestId) return null;
   const held = byRequest.get(requestId);
-  if (!held) return null;
-  byRequest.delete(requestId);
-  byRequest.set(requestId, held);
-  return { ...held };
+  return held ? { ...held } : null;
 }
 
 /**
@@ -352,9 +314,17 @@ export async function awaitRequestCorrelation(requestId: string | null | undefin
   if (!requestId) return null;
   const immediate = requestCorrelation(requestId);
   if (immediate || timeoutMs <= 0) return immediate;
-  // This request already spent one full window with nothing arriving. Spending another buys
-  // the same answer at the same price, and the price is charged to the turn.
-  if (spentEvidenceWindows.has(requestId)) return null;
+
+  const now = performance.now();
+  const startedAt = evidenceWindowStarts.get(requestId) ?? now;
+  if (!evidenceWindowStarts.has(requestId)) {
+    evidenceWindowStarts.set(requestId, startedAt);
+    if (evidenceWindowStarts.size > MAX_EVIDENCE_WINDOWS) {
+      evidenceWindowStarts.delete(evidenceWindowStarts.keys().next().value!);
+    }
+  }
+  const remainingMs = timeoutMs - (now - startedAt);
+  if (remainingMs <= 0) return null;
 
   let timer: NodeJS.Timeout | null = null;
   await new Promise<void>((resolve) => {
@@ -365,19 +335,17 @@ export async function awaitRequestCorrelation(requestId: string | null | undefin
       set.delete(resolve);
       if (set.size === 0) waiters.delete(requestId);
       resolve();
-    }, timeoutMs);
+    }, remainingMs);
     timer.unref?.();
   });
   if (timer) clearTimeout(timer);
-  const settled = requestCorrelation(requestId);
-  if (!settled) noteEvidenceWindowSpent(requestId);
-  return settled;
+  return requestCorrelation(requestId);
 }
 
 /** A conversation being closed cannot invalidate an already issued request. */
 export function resetCorrelationRegistryForTests(): void {
   byRequest.clear();
-  spentEvidenceWindows.clear();
+  evidenceWindowStarts.clear();
   restored = false;
   restoring = null;
   for (const requestId of [...waiters.keys()]) wake(requestId);
