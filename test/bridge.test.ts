@@ -5058,6 +5058,14 @@ describe('unattributed activity recovery', () => {
       // what is under test is what the pass does when it runs, not when it is scheduled.
       await sweepStaleSwarm(Date.now());
       expect(chatOf(await maintenance())).toBe(chat);
+
+
+      // One push is all this owes the ticket. The reload gives the chat an ordinary activity
+      // grant, so from here the normal silence machinery owns it on its usual terms — which is
+      // the handover, not a second mechanism running beside the first.
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+      await sweepStaleSwarm(Date.now());
+      expect((await maintenance())?.reason).toBe('silence');
     } finally {
       vi.useRealTimers();
     }
