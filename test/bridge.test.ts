@@ -4752,6 +4752,59 @@ describe('unattributed activity recovery', () => {
   const reopened = (conversationId: string): string[] =>
     opened.filter((url) => url === `https://chatgpt.com/c/${conversationId}`);
 
+  /**
+   * The rescue the watch floor is allowed to lean on, after the restart that needs it.
+   *
+   * `compactionStillChased()` answers false for a continuation restored from disk on purpose:
+   * it sits below `compactionWatchFloor`, this run never accepted that obligation through a
+   * pickup, and the comment above it names `inspectSilentChats()` as what releases the chat
+   * instead. So the floor is only safe if that pass can actually reach such a chat.
+   *
+   * It could not. The pass walks `activeUntil`, startup clears that map, and only a live page
+   * report refills it — so a chat wedged precisely because nothing loads it is in no map the
+   * pass iterates. Both halves declined and the ticket sat out its whole six-hour life unasked
+   * for: measured here as `maintenance()` answering null six hours after the restart.
+   *
+   * A restored command is not a stranger. The app logs these itself as "restored N chat
+   * command(s) from the previous run" — obligations this process did take over — so a chat one
+   * of them names is a chat this run is answerable for, grant or no grant.
+   */
+  it('rescues a compaction restored from the previous run, which no page will report', async () => {
+    vi.useFakeTimers();
+    try {
+      setBrowserOpener(async (url) => {
+        opened.push(url);
+      });
+      await pair();
+      const chat = 'dddddddd-1111-2222-3333-444444444444';
+      const { sessionId, token } = await automaticCompactedSession(chat, 'restored brief');
+      // A pickup had already run before the crash, which is what leaves a durable resume
+      // command behind for the next process to restore.
+      queueResume(sessionId, token);
+
+      // A real process restart: the durable state is on disk, memory starts empty, and the
+      // commands come back from the file. The floor moves to now, which puts the restored
+      // continuation below it, and activeUntil starts empty.
+      await flushDurable();
+      const continuations = await readDurable<ContinuationSnapshot>(CONTINUATIONS_STATE);
+      await vi.advanceTimersByTimeAsync(60_000);
+      resetBridgeForTests();
+      await restoreContinuations(continuations);
+      await restoreCommands();
+
+      // There is something to rescue: the ticket outlived the restart and still holds its brief.
+      expect(continuationByToken(token)?.state).toBe('awaiting-chat');
+
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 15_000);
+      // The sweep is driven directly: its timer belongs to the process that was replaced, and
+      // what is under test is what the pass does when it runs, not when it is scheduled.
+      await sweepStaleSwarm(Date.now());
+      expect(chatOf(await maintenance())).toBe(chat);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('waits fifteen seconds on a lone suspect, then hands the browser that one chat to reload', async () => {
     vi.useFakeTimers();
     try {
