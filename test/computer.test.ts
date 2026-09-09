@@ -24,7 +24,21 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
    * against the default, about its own subject.
    */
   beforeAll(async () => {
-    await listWindows();
+    // The helper's own deadline is shorter than this hook's budget, so a cold start that
+    // overruns it rejects here while most of the 120 s is still unspent — and a failed
+    // beforeAll skips all twenty tests and reports the block as failed, which is how a slow
+    // runner turned into a red check with nothing actually broken. Keep launching while the
+    // budget lasts, and only for the timeout: any other answer is real and still fails at once.
+    const deadline = Date.now() + 90_000;
+    for (;;) {
+      try {
+        await listWindows();
+        return;
+      } catch (error) {
+        const timedOut = /did not answer in time/i.test(String((error as Error)?.message ?? error));
+        if (!timedOut || Date.now() >= deadline) throw error;
+      }
+    }
   }, 120_000);
 
   // A hosted runner can have no visible desktop window at all, and getWindowState is right
