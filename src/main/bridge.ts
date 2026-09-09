@@ -5856,10 +5856,12 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
   // was opened is the last thing anything knew about that chat. Only tickets this run took over
   // qualify, which is the difference between answering for an obligation and lowering the floor.
   const restored: Array<[string, ActivityGrant]> = [];
+  const restoredTokenByChat = new Map<string, string>();
   if (restoredResumeTokens.size > 0) {
     for (const entry of pendingAutomaticContinuations()) {
       if (!restoredResumeTokens.has(entry.token)) continue;
       if (activeUntil.has(entry.from) || compacting.has(entry.from)) continue;
+      restoredTokenByChat.set(entry.from, entry.token);
       restored.push([
         entry.from,
         { sessionId: entry.sessionId, evidenceAt: entry.openedAt, until: entry.openedAt, turnId: null, model: 'other' }
@@ -5869,6 +5871,13 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
   for (const [conversationId, grant] of [...activeUntil, ...restored]) {
     if (compacting.has(conversationId)) continue;
     if (grant.until > now) continue;
+    // One chance per process, which is what the ordinary path gets: a live chat's grant is
+    // forgotten by `finishSilentChats` once its silence has been spent, and a restored
+    // candidate has no grant to forget. Retiring it here instead is the same bound. If the
+    // reload works the page reports and takes over normally; if it does not, an unbounded
+    // watchdog on a durable ticket is how a chat ends up reloading itself all night.
+    const restoredToken = restoredTokenByChat.get(conversationId);
+    if (restoredToken) restoredResumeTokens.delete(restoredToken);
     const pro = await extendedSilenceWindowFor(conversationId, grant.sessionId);
     // A real grant arriving mid-await supersedes either kind of candidate.
     if (activeUntil.has(conversationId) && activeUntil.get(conversationId) !== grant) continue;
