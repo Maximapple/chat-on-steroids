@@ -124,6 +124,22 @@ export function assertNoTrustBearingMacCodeSignature(file, codesignResult, hasCo
   const authority = /^Authority=/m.test(output);
   const teamMatch = output.match(/^TeamIdentifier=(.+)$/m);
   const trustedTeam = teamMatch != null && teamMatch[1].trim() !== 'not set';
+
+  // A build given a signing identity is signed on purpose, and asserting its absence would
+  // reject exactly what it was asked to produce. The policy that remains is the one that
+  // matters: no Apple team vouches for this, so a TeamIdentifier is still refused. Without the
+  // variable, nothing below changes.
+  const signedOnPurpose = (process.env.COS_MACOS_SIGN_IDENTITY ?? '').trim() !== '';
+  if (signedOnPurpose) {
+    if (!authority) {
+      throw new Error(`${file} was built with a signing identity but carries no Authority; the afterPack seal did not use it`);
+    }
+    if (trustedTeam) {
+      throw new Error(`${file} carries a TeamIdentifier; this release is not signed by an Apple team`);
+    }
+    return;
+  }
+
   if (!adHoc || authority || trustedTeam) {
     throw new Error(`${file} unexpectedly has a trust-bearing code signature; release metadata says unsigned`);
   }

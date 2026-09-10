@@ -112,6 +112,45 @@ jobs:
       - name: Prove native runner target
         run: node -e "if(process.platform!=='${{ matrix.platform }}'||process.arch!=='${{ matrix.arch }}')throw new Error('Expected ${{ matrix.platform }}-${{ matrix.arch }}, got '+process.platform+'-'+process.arch)"
 
+      # Optional, and absent by default: with no secret this does nothing and the afterPack seal
+      # stays ad-hoc, exactly as before. With one, the app is signed by a certificate that does not
+      # change between builds, which is what lets macOS recognise an updated copy as the same
+      # application and keep its Accessibility and Screen Recording grants instead of asking again.
+      #
+      # The certificate is not trusted by Gatekeeper and is not meant to be - this release is
+      # unsigned as far as any publisher identity goes, and the DMG itself stays unsigned. That is
+      # also why the identity is looked up by fingerprint: an untrusted one is never "valid", so
+      # `security find-identity -v` would not list it and a lookup by name would fail.
+      - name: Unlock the macOS signing identity
+        if: matrix.platform == 'darwin'
+        env:
+          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MACOS_SIGNING_P12:-}" ]; then
+            echo "No MACOS_SIGNING_P12 secret; the app will be sealed ad-hoc as before."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/cos-signing.keychain-db"
+          keychain_password="$(openssl rand -base64 24)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$MACOS_SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/cos-signing.p12"
+          security import "$RUNNER_TEMP/cos-signing.p12" -k "$keychain"             -P "${MACOS_SIGNING_P12_PASSWORD:-}" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cos-signing.p12"
+          # Without this codesign prompts for the key, and a hosted runner has nobody to answer.
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          fingerprint="$(security find-identity -p codesigning "$keychain" | awk 'match($0, /[0-9A-F]{40}/) { print substr($0, RSTART, RLENGTH); exit }')"
+          if [ -z "$fingerprint" ]; then
+            echo "The imported .p12 holds no code-signing identity" >&2
+            exit 1
+          fi
+          echo "COS_MACOS_SIGN_IDENTITY=$fingerprint" >> "$GITHUB_ENV"
+          echo "Signing with $fingerprint"
+
       - name: Package
         run: npm run ${{ matrix.script }}
 
