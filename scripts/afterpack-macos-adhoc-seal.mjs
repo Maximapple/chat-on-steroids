@@ -57,7 +57,14 @@ export default async function sealMacOsBundle(context) {
   // bundle would leave the same self-contradiction one level down. Apple discourages --deep for
   // *distribution* signing, where each nested component wants its own identity and entitlements;
   // for a uniform ad-hoc seal with no entitlements there is nothing to distinguish.
-  run('codesign', ['--force', '--deep', '--sign', '-', app]);
+  // Ad-hoc unless this build was given a signing identity. An ad-hoc signature carries no
+  // identity, so its designated requirement is the cdhash of these exact binaries: every build
+  // is a different one, and macOS reads that as a different application, which is why an
+  // installed copy loses its Accessibility and Screen Recording grants on every update. A
+  // signing identity gives a requirement that names the certificate instead, and that survives
+  // a replacement. Absent the variable this is byte-for-byte what it did before.
+  const identity = (process.env.COS_MACOS_SIGN_IDENTITY ?? '').trim() || '-';
+  run('codesign', ['--force', '--deep', '--sign', identity, app]);
 
   // The check the two broken releases did not have. --strict so a seal that merely exists is not
   // mistaken for a seal that is coherent, and --deep so a nested framework cannot be the one
