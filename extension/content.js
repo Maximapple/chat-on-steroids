@@ -10506,7 +10506,10 @@
     // Stop/composer-clear may acknowledge acceptance before the authored row mounts.
     // Keep the original draft lease through that receipt, exactly as desktop delivery does;
     // identical text alone must never erase a later trusted edit or a replacement editor.
-    const bootstrapDraft = CLF_DOM.captureComposerDraft(boot.text, () => !attempt?.cancelled && sendingBootstrap());
+    // followRemount: this draft is cleared only after the send is acknowledged and the chat
+    // named, so a composer ChatGPT rebuilt in between still holds a copy of a sent message
+    // rather than a draft. Ordinary desktop input has no such proof and keeps the strict rule.
+    const bootstrapDraft = CLF_DOM.captureComposerDraft(boot.text, () => !attempt?.cancelled && sendingBootstrap(), { followRemount: true });
     const priorBootstrapUser = CLF_DOM.messages().filter(message => message.role === 'user').at(-1)?.id;
     const clearAcknowledgedBootstrap = async acknowledged => {
       if (acknowledged?.ok !== true || acknowledged.data?.ok === false || !bootstrapDraft.current()) return;
