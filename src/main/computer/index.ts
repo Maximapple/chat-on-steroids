@@ -1424,79 +1424,85 @@ export async function actAndCapture(
       }
     }
     const result = await actLocked(actions, opts);
-    let verification: VerificationResult | null = null;
-    if (opts.verify) {
-      try {
-        verification = await verifyDesktopLocked(opts.verify);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new ComputerError(
-          `POSTCONDITION_FAILED: completed_count=${result.completedCount}. ${message}`,
-          { completedCount: result.completedCount, failedIndex: result.completedCount }
-        );
-      }
-    }
-    if (!opts.capture) return { ...result, screenshot: null, verification, captureFallback: null };
-
-    const { preferActiveWindow, ...capture } = opts.capture;
-    if (capture.window === undefined && capture.full !== true && capture.crop === undefined && result.targetWindow !== null) {
-      capture.window = result.targetWindow;
-    }
-    // Resolved here rather than by the caller: the actions may have changed which window
-    // is in front, and resolving it outside the lock would reopen the gap this closes.
-    if (preferActiveWindow && capture.window === undefined && capture.full !== true && capture.crop === undefined) {
-      capture.window = (await activeWindow()).window?.id;
-    }
-    let resultScreenshot: Screenshot;
-    let captureFallback: string | null = null;
+    let postActionPhase = 'POSTCONDITION_FAILED';
     try {
-      resultScreenshot = await screenshotLocked(capture, before);
-    } catch (err) {
-      const targetUnavailable =
-        capture.window !== undefined &&
-        err instanceof ComputerError &&
-        /WINDOW_NOT_FOUND|STALE_FRAME/.test(err.message);
-      if (!targetUnavailable) throw err;
-
-      const active = (await activeWindow()).window;
-      if (active) {
-        resultScreenshot = await screenshotLocked({ window: active.id, maxWidth: capture.maxWidth });
-        captureFallback = `target window ${capture.window} closed or changed before result capture; captured active window ${active.id} instead`;
-      } else {
-        resultScreenshot = await screenshotLocked({ maxWidth: capture.maxWidth });
-        captureFallback = `target window ${capture.window} closed or changed before result capture; captured the primary display instead`;
+      let verification: VerificationResult | null = null;
+      if (opts.verify) {
+        verification = await verifyDesktopLocked(opts.verify);
       }
+      if (!opts.capture) return { ...result, screenshot: null, verification, captureFallback: null };
+
+      postActionPhase = 'RESULT_CAPTURE_FAILED';
+      const { preferActiveWindow, ...capture } = opts.capture;
+      if (capture.window === undefined && capture.full !== true && capture.crop === undefined && result.targetWindow !== null) {
+        capture.window = result.targetWindow;
+      }
+      // Resolved here rather than by the caller: the actions may have changed which window
+      // is in front, and resolving it outside the lock would reopen the gap this closes.
+      if (preferActiveWindow && capture.window === undefined && capture.full !== true && capture.crop === undefined) {
+        capture.window = (await activeWindow()).window?.id;
+      }
+      let resultScreenshot: Screenshot;
+      let captureFallback: string | null = null;
+      try {
+        resultScreenshot = await screenshotLocked(capture, before);
+      } catch (err) {
+        const targetUnavailable =
+          capture.window !== undefined &&
+          err instanceof ComputerError &&
+          /WINDOW_NOT_FOUND|STALE_FRAME/.test(err.message);
+        if (!targetUnavailable) throw err;
+
+        const active = (await activeWindow()).window;
+        if (active) {
+          resultScreenshot = await screenshotLocked({ window: active.id, maxWidth: capture.maxWidth });
+          captureFallback = `target window ${capture.window} closed or changed before result capture; captured active window ${active.id} instead`;
+        } else {
+          resultScreenshot = await screenshotLocked({ maxWidth: capture.maxWidth });
+          captureFallback = `target window ${capture.window} closed or changed before result capture; captured the primary display instead`;
+        }
+      }
+      // Describe the pointer against the picture that is going back, not the one that was current
+      // before the actions ran. The cursor was computed inside actLocked, so a call that moved the
+      // pointer and then captured a window reported an image coordinate belonging to some earlier
+      // frame — true, and about a different image than the one in the caller's hands. QA read that
+      // as a regression, and it is at least an ambiguity worth removing.
+      const shotFrame = result.cursor ? frameById(resultScreenshot.frameId) : null;
+      const previous = result.cursor;
+      const cursor = shotFrame && previous
+        ? (() => {
+            const inFrame = {
+              x: Math.round((previous.screen.x - shotFrame.region.x) * shotFrame.scale),
+              y: Math.round((previous.screen.y - shotFrame.region.y) * shotFrame.scale)
+            };
+            const inside =
+              inFrame.x >= 0 && inFrame.y >= 0 && inFrame.x < shotFrame.width && inFrame.y < shotFrame.height;
+            return {
+              screen: previous.screen,
+              image: inside ? inFrame : null,
+              frameId: shotFrame.id,
+              imageSize: { width: shotFrame.width, height: shotFrame.height }
+            };
+          })()
+        : result.cursor;
+      return {
+        ...result,
+        cursor,
+        screenshot: resultScreenshot,
+        verification,
+        captureFallback
+      };
+    } catch (err) {
+      // Input has already completed. Preserve that fact for every observation failure,
+      // including active-window resolution and a failed fallback capture, so retries do not
+      // repeat the mutation. The failed index is the boundary after the last action.
+      const message = err instanceof Error ? err.message : String(err);
+      throw new ComputerError(
+        `${postActionPhase}: completed_count=${result.completedCount} failed_index=${result.completedCount} ` +
+          `routes=${result.routes.join('+') || 'none'}. Actions completed; do not repeat them. ${message}`,
+        { completedCount: result.completedCount, failedIndex: result.completedCount, completedRoutes: result.routes }
+      );
     }
-    // Describe the pointer against the picture that is going back, not the one that was current
-    // before the actions ran. The cursor was computed inside actLocked, so a call that moved the
-    // pointer and then captured a window reported an image coordinate belonging to some earlier
-    // frame — true, and about a different image than the one in the caller's hands. QA read that
-    // as a regression, and it is at least an ambiguity worth removing.
-    const shotFrame = result.cursor ? frameById(resultScreenshot.frameId) : null;
-    const previous = result.cursor;
-    const cursor = shotFrame && previous
-      ? (() => {
-          const inFrame = {
-            x: Math.round((previous.screen.x - shotFrame.region.x) * shotFrame.scale),
-            y: Math.round((previous.screen.y - shotFrame.region.y) * shotFrame.scale)
-          };
-          const inside =
-            inFrame.x >= 0 && inFrame.y >= 0 && inFrame.x < shotFrame.width && inFrame.y < shotFrame.height;
-          return {
-            screen: previous.screen,
-            image: inside ? inFrame : null,
-            frameId: shotFrame.id,
-            imageSize: { width: shotFrame.width, height: shotFrame.height }
-          };
-        })()
-      : result.cursor;
-    return {
-      ...result,
-      cursor,
-      screenshot: resultScreenshot,
-      verification,
-      captureFallback
-    };
   });
 }
 

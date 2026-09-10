@@ -809,6 +809,16 @@ private func assertInputTarget(_ id: CGWindowID) throws -> WindowRow {
     return row
 }
 
+private func assertPointerTarget(_ id: CGWindowID) throws -> WindowRow {
+    let row = try assertInputTarget(id)
+    // AX focus identifies the keyboard destination, not the window receiving global mouse
+    // events. Keep the stricter z-order fence for pointers, including same-process windows.
+    guard windowServerFrontWindowID() == id else {
+        throw fail("INPUT_TARGET_LOST", "target window \(id) is not the topmost pointer window; no further input was sent")
+    }
+    return row
+}
+
 private func setAXValueIfPossible(_ element: AXUIElement, _ attribute: CFString, _ value: CFTypeRef) {
     var settable = DarwinBoolean(false)
     guard AXUIElementIsAttributeSettable(element, attribute, &settable) == .success,
@@ -1161,10 +1171,10 @@ private func click(_ point: CGPoint, button: CGMouseButton, count: Int, targetWi
     try requirePointOnActiveDisplay(point)
     let (down, up, _) = mouseTypes(button)
     for clickIndex in 1...count {
-        if let targetWindow { _ = try assertInputTarget(targetWindow) }
+        if let targetWindow { _ = try assertPointerTarget(targetWindow) }
         try postMouse(down, point: point, button: button, clickState: Int64(clickIndex))
         do {
-            if let targetWindow { _ = try assertInputTarget(targetWindow) }
+            if let targetWindow { _ = try assertPointerTarget(targetWindow) }
             try postMouse(up, point: point, button: button, clickState: Int64(clickIndex))
         } catch {
             // Release the button even if focus changed after mouse-down; never leave a
@@ -1202,7 +1212,7 @@ private func drag(
     for point in points { try requirePointOnActiveDisplay(point, displays: displays) }
 
     func assertDragTarget() throws {
-        if let targetWindow { _ = try assertInputTarget(targetWindow) }
+        if let targetWindow { _ = try assertPointerTarget(targetWindow) }
         if let expectedDisplays {
             let currentDisplays = try activeDisplayRects()
             guard sameDisplayTopology(expectedDisplays, currentDisplays) else {
@@ -1895,7 +1905,7 @@ private func assertFrameTarget(_ frame: JSONObject) throws -> CGWindowID? {
         guard row.bounds.integral == expected.integral else {
             throw fail("STALE_FRAME", "target window \(windowID) moved or resized after the screenshot")
         }
-        _ = try assertInputTarget(windowID)
+        _ = try assertPointerTarget(windowID)
         return windowID
     }
     guard let expectedDisplays = displayTopology(frame["displays"]) else {
@@ -2494,6 +2504,7 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     }
                 case "move":
                     if let frame { _ = try assertFrameTarget(frame) }
+                    if let leasedWindow { _ = try assertPointerTarget(leasedWindow) }
                     try movePointer(CGPoint(x: int(action["x"]), y: int(action["y"])), verify: true)
                     routes.append("sendinput")
                 case "click", "double_click":
@@ -2501,7 +2512,7 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     guard let target = leasedWindow else {
                         throw fail("INPUT_TARGET_REQUIRED", "click input requires targetWindow")
                     }
-                    let clickRow = try assertInputTarget(target)
+                    let clickRow = try assertPointerTarget(target)
                     let clickAt = CGPoint(x: int(action["x"]), y: int(action["y"]))
                     try requirePointInWindow(clickAt, clickRow, type)
                     try click(
@@ -2516,12 +2527,12 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                     guard let target = leasedWindow else {
                         throw fail("INPUT_TARGET_REQUIRED", "scroll input requires targetWindow")
                     }
-                    let scrollRow = try assertInputTarget(target)
+                    let scrollRow = try assertPointerTarget(target)
                     let scrollAt = CGPoint(x: int(action["x"]), y: int(action["y"]))
                     try requirePointInWindow(scrollAt, scrollRow, "scroll")
                     try movePointer(scrollAt)
                     if let frame { _ = try assertFrameTarget(frame) }
-                    _ = try assertInputTarget(target)
+                    _ = try assertPointerTarget(target)
                     guard let event = CGEvent(
                         scrollWheelEvent2Source: nil,
                         units: .line,
@@ -2531,6 +2542,7 @@ private func handle(_ request: JSONObject) throws -> JSONObject {
                         wheel3: 0
                     ) else { throw fail("INPUT_FAILED", "could not create a scroll event") }
                     let before = pointerScrollState(scrollAt)
+                    _ = try assertPointerTarget(target)
                     event.post(tap: .cghidEventTap)
                     let after = settledScrollState(scrollAt, startedAt: before.fraction)
                     var evidence: JSONObject = [
