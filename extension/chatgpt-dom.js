@@ -585,15 +585,54 @@ var CLF_DOM = (() => {
   }
 
   /** A pre-Send draft lease lasts only for this operation and these exact DOM nodes. */
-  function captureComposerDraft(value, stillCurrent = () => true) {
-    const box = composer(), host = composerBox() || composerActions()?.host;
+  function captureComposerDraft(value, stillCurrent = () => true, { followRemount = false } = {}) {
+    let box = composer(), host = composerBox() || composerActions()?.host;
     const insertedText = box?.textContent;
     let touched = false;
     let files = [];
     const events = ['input', 'change', 'keydown', 'pointerdown', 'paste', 'drop'];
     const changed = event => { if (event.isTrusted) touched = true; };
-    for (const name of events) host?.addEventListener(name, changed, true);
-    const same = () => !touched && stillCurrent() && composer() === box && box?.isConnected && box.textContent === insertedText;
+    const watch = target => { for (const name of events) target?.addEventListener(name, changed, true); };
+    const unwatch = target => { for (const name of events) target?.removeEventListener(name, changed, true); };
+    watch(host);
+    /**
+     * Follow the draft when React rebuilds the editor underneath it.
+     *
+     * Identity of the editing host was the whole test, and a fresh chat is exactly where
+     * ChatGPT is most likely to remount its composer between the click and the acknowledgement.
+     * When it did, this capture no longer recognised its own box and declined, so a 44,000
+     * character handoff brief stayed in the composer of the chat it had just been sent to,
+     * underneath its own message, with nothing left that would ever empty it.
+     *
+     * Off by default, and deliberately. Ordinary desktop input inserts text the user may still
+     * mean to send themselves, so a replaced editor there is a box this code can no longer
+     * prove is its own and must not empty — `retires a late acknowledged desktop draft only
+     * while owned (replaced-editor)` holds exactly that. The bootstrap opts in because it has
+     * the proof that case lacks: it only clears after ChatGPT acknowledged the send and the
+     * replacement chat was named, so the text left behind is a copy of a message already sent,
+     * not a draft anyone is waiting to send.
+     *
+     * Even then this is not a relaxation of the rest. No trusted event may have been seen, the
+     * caller must still say this send is current, and the new host has to carry *exactly* the
+     * inserted text — a user's own draft differs by definition, and one typed into the
+     * replacement is a trusted event on it the moment it is watched. Attachments do not survive
+     * a remount: their nodes are gone, so `ownsAttachments` still refuses rather than guess.
+     */
+    const readopt = () => {
+      if (!followRemount || touched || !stillCurrent()) return;
+      const current = composer();
+      if (!current || current === box || !current.isConnected || current.textContent !== insertedText) return;
+      const nextHost = composerBox() || composerActions()?.host;
+      if (!nextHost) return;
+      unwatch(host);
+      box = current;
+      host = nextHost;
+      watch(host);
+    };
+    const same = () => {
+      if (composer() !== box) readopt();
+      return !touched && stillCurrent() && composer() === box && box?.isConnected && box.textContent === insertedText;
+    };
     const ownsAttachments = () => {
       if (!same() || !host) return false;
       const current = [...host.querySelectorAll('button[aria-label]')].filter(node => composerFileName(node));

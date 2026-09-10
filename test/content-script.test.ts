@@ -1347,6 +1347,46 @@ describe('the brief a successor chat is opened with', () => {
     // And the box the user types into is theirs again.
     expect(composerText(live.document)).toBe('');
   });
+
+  /**
+   * The same accepted send, with the editing host replaced the way React replaces it.
+   *
+   * The clear is deliberately not authorised by the receipt alone: `captureComposerDraft`
+   * refuses unless the box it inserted into is still the box on screen, still untouched, and
+   * still holding exactly what was inserted. That is what stops a later user draft being
+   * deleted, and it is right.
+   *
+   * But a fresh chat is exactly where ChatGPT is most likely to remount its composer between
+   * the click and the acknowledgement. When it does, the draft capture no longer recognises
+   * its own box, declines, and the whole brief stays in a composer nobody will empty.
+   */
+  it('still empties the composer when ChatGPT remounts it between send and acknowledgement', async () => {
+    const brief = '[[CLF-RESUME:0123456789abcdef0123456789abcdef]]\n\nContinue the previous ChatGPT session. Handoff: h-remount';
+    const assigned = 'cccccccc-dddd-eeee-ffff-000000000002';
+    live = await harness(
+      'https://chatgpt.com/?clf=cmd-remount#clf=cmd-remount',
+      {
+        redeem: () => ({ ok: true, command: { id: 'cmd-remount', type: 'resume', text: brief, agent: null } }),
+        ack: () => ({ ok: true })
+      },
+      (document, dom) => {
+        document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+          dom.reconfigure({ url: `https://chatgpt.com/c/${assigned}` });
+          userTurn(document, 'accepted-remount', brief, { sent: false });
+          // React rebuilds the editor: same id, same value, different node.
+          const old = document.querySelector('#prompt-textarea')!;
+          const fresh = old.cloneNode(true) as HTMLElement;
+          old.replaceWith(fresh);
+        });
+      }
+    );
+
+    await settle(400);
+
+    expect(live.submitted.join('\n')).toContain('Handoff: h-remount');
+    expect((live.window as any).CLF_DOM.conversationId()).toBe(assigned);
+    expect(composerText(live.document)).toBe('');
+  });
 });
 
 describe('activity feed cadence', () => {
