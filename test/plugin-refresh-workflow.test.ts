@@ -115,7 +115,10 @@ it.each([{ deny: true }, { navigateDuringClaim: true }])('never clicks after den
 });
 it('reuses one owned management tab and preserves unreachable helpers and user chats', async () => {
   const background = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf8');
-  const code = background.slice(background.indexOf('let pluginRefreshFlight = null;'), background.indexOf('async function catalogProbe('));
+  // Includes the one function the worker closes tabs through, so this exercises the real
+  // close boundary - including its refusal to touch a tab the user pinned.
+  const closer = background.slice(background.indexOf('async function closeUnpinnedTab('), background.indexOf('function isChatGptUrl('));
+  const code = closer + background.slice(background.indexOf('let pluginRefreshFlight = null;'), background.indexOf('async function catalogProbe('));
   let requests: object[] = [{ id }];
   const tabs = [{ id: 7, url: `https://chatgpt.com/?cos-plugin-refresh=${id}#settings/Plugins` }, { id: 8, url: 'https://chatgpt.com/c/user-conversation' }];
   const create = vi.fn(async () => ({ id: 9 }));

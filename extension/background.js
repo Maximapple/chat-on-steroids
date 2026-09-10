@@ -1252,7 +1252,7 @@ async function retireFailedCommandTab(entry) {
       failedCommand: { id: entry.id, client: entry.client } }, { documentId: source.documentId });
     const latest = await chrome.tabs.get(source.tab);
     if (proof?.safe === true && proof.conversationId === null && proof.navigationEpoch === source.navigationEpoch &&
-        latest && !latest.pendingUrl && latest.url === url && ownsDocument(source)) await chrome.tabs.remove(source.tab);
+        latest && !latest.pendingUrl && latest.url === url && ownsDocument(source)) await closeUnpinnedTab(source.tab);
   } catch { /* A busy, edited, replaced or unreadable page stays open. */ }
 }
 
@@ -1775,7 +1775,7 @@ async function deliverDesktopInputs(inputs, background, reusableConversations = 
         const current = await chrome.tabs.get(tab.id);
         const successor = replacement ? await chrome.tabs.get(replacement.id) : null;
         if (proof?.safe === true && ownsDocument(source) && String(current.url || '').includes(marker) &&
-            (input.retire === true || (successor && replacements.some(next => matchesInput(next, successor))))) await chrome.tabs.remove(tab.id);
+            (input.retire === true || (successor && replacements.some(next => matchesInput(next, successor))))) await closeUnpinnedTab(tab.id);
       } catch { /* only the exact still-owned temporary document may close */ }
       continue;
     }
@@ -1896,7 +1896,7 @@ function inspectRequestedPluginRefresh(publications, background, browserOnly = f
       let timer;
       const proof = await Promise.race([chrome.tabs.sendMessage(tab.id, { type: 'clf-plugin-refresh-state', id }).catch(() => null), new Promise(resolve => { timer = setTimeout(() => resolve(null), 3000); })]).finally(() => clearTimeout(timer));
       if (proof?.safe !== true) return;
-      if (pluginRefreshMarker(await chrome.tabs.get(tab.id).catch(() => null)) === id) await chrome.tabs.remove(tab.id);
+      if (pluginRefreshMarker(await chrome.tabs.get(tab.id).catch(() => null)) === id) await closeUnpinnedTab(tab.id);
     }
     if (!requests.length) return;
     const held = tabs.find(tab => requests.some(request => request.id === pluginRefreshMarker(tab)));
@@ -1981,7 +1981,7 @@ function inspectRequestedModels(request) {
           const latest = await chrome.tabs.get(candidate.id);
           if (proof?.safe !== true || proof.conversationId !== null || proof.navigationEpoch !== source.navigationEpoch || !ownsDocument(source) ||
             latest.pendingUrl || latest.url !== candidate.url) continue;
-          await chrome.tabs.remove(candidate.id);
+          await closeUnpinnedTab(candidate.id);
         } catch { /* Busy, drafting or changed documents keep their tab for ordinary maintenance. */ }
       }
     };
@@ -2105,7 +2105,7 @@ async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
       const latest = await chrome.tabs.get(tab.id);
       if (latest.pendingUrl || conversationFromUrl(latest.url) !== conversationId || !ownsDocument(source) || journalCountForConversation(conversationId) > 0) continue;
 
-      await chrome.tabs.remove(tab.id);
+      if (!(await closeUnpinnedTab(tab.id))) continue;
       remaining = remaining.filter(other => other.id !== tab.id);
     } catch { /* Missing document, navigation or unreadable draft state is not close permission. */ }
   }
@@ -2402,6 +2402,32 @@ function projectFromUrl(value) {
   }
 }
 
+/**
+ * Close a tab this app is cleaning up, unless the user has pinned it.
+ *
+ * Pinning is the one gesture Chrome offers for "this tab stays", and every close below is
+ * automatic — a retired conversation, a spent helper document, a duplicate. None of them is
+ * the user asking for anything, so none may take away a tab they explicitly kept. A pinned
+ * tab reported on 2026-09-10 vanished without appearing in Chrome's recently-closed list,
+ * because the final boundary looked at conversation identity, navigation and unsent work and
+ * never at `pinned`.
+ *
+ * Read fresh rather than from the caller's tab object, for the same reason every caller
+ * re-reads identity here: pinning can happen while the checks above are awaiting. The app
+ * may still retire, sleep or supersede the conversation — this governs the physical close
+ * and nothing else.
+ */
+async function closeUnpinnedTab(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab?.pinned === true) return false;
+  } catch {
+    return false;
+  }
+  await chrome.tabs.remove(tabId);
+  return true;
+}
+
 function isChatGptUrl(value) {
   try {
     const url = new URL(String(value || ''));
@@ -2530,7 +2556,7 @@ const HANDLERS = {
       // that navigated while the app durably committed the decision.
       try {
         const current = await chrome.tabs.get(source.tab);
-        if (ownsDocument(source) && conversationFromUrl(current.url) === conversationId) await chrome.tabs.remove(source.tab);
+        if (ownsDocument(source) && conversationFromUrl(current.url) === conversationId) await closeUnpinnedTab(source.tab);
       } catch { /* already closed; the accepted app-side answer remains authoritative */ }
     }
     return result;

@@ -3355,13 +3355,52 @@ describe('the goal opening, which waits on a model', () => {
 });
 
 
+/**
+ * The pruner plus the one function it closes through, so a test exercises the real boundary
+ * rather than a stub of it.
+ */
+function pruneSource(): string {
+  const at = (needle: string, from = 0) => backgroundSource.indexOf(needle, from);
+  const closer = backgroundSource.slice(at('async function closeUnpinnedTab('), at('function isChatGptUrl('));
+  const start = at('async function pruneManagedTabs(');
+  const pruner = backgroundSource.slice(start, at('function maintain(', start));
+  return closer + '\n' + pruner;
+}
+
+/**
+ * Pinning is Chrome's one gesture for "this tab stays", and every close in the worker is
+ * automatic — a retired conversation, a spent helper, a duplicate. The final boundary checked
+ * conversation identity, navigation and unsent work, and never `pinned`, so a tab the user had
+ * explicitly kept was closed and did not even appear in Chrome's recently-closed list.
+ */
+it.each([true, false])('never closes a tab the user pinned (pinned: %s)', async pinned => {
+  const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const tab = { id: 71, url: `https://chatgpt.com/c/${conversationId}`, active: false, pinned };
+  const tabsRemove = vi.fn();
+  const prune = vm.runInNewContext(`${pruneSource()}
+pruneManagedTabs`, {
+    cleanConversationId: (id: string) => id, conversationForTab: () => conversationId,
+    conversationFromUrl: (url: string) => url.split('/c/')[1], tabDocuments: { '71': 'doc' },
+    tabEpochs: { '71': 0 }, ownsDocument: () => true, journalCountForConversation: () => 0,
+    chrome: { tabs: { get: async () => tab,
+      sendMessage: async () => ({ safe: true, conversationId, navigationEpoch: 0 }), remove: tabsRemove } }
+  });
+
+  const remaining = await prune([tab], { managedConversations: [conversationId], retiredConversations: [conversationId] }, new Set(), new Set());
+
+  expect(tabsRemove).toHaveBeenCalledTimes(pinned ? 0 : 1);
+  // And a tab that stayed open is still reported as present, so nothing downstream treats it
+  // as closed and reopens the same conversation beside it.
+  expect(remaining.map((entry: { id: number }) => entry.id)).toEqual(pinned ? [71] : []);
+});
+
 it.each(['matching', 'wrong-document', 'unsafe-draft', 'newer-navigation'])('retires a cancelled helper only under its exact safe claim: %s', async scenario => {
   const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
   const tab = { id: 71, url: `https://chatgpt.com/c/${conversationId}`, active: false };
   const claims = [{ id: 'old-input', owner: '71:doc:0', conversationId }, { id: 'new-input', owner: '71:doc:0', conversationId }];
   const tabsRemove = vi.fn();
   const sendMessage = vi.fn(async (..._args: unknown[]) => ({ safe: scenario !== 'unsafe-draft', conversationId, navigationEpoch: 0 }));
-  const code = backgroundSource.slice(backgroundSource.indexOf('async function pruneManagedTabs('), backgroundSource.indexOf('\nfunction maintain(', backgroundSource.indexOf('async function pruneManagedTabs(')));
+  const code = pruneSource();
   const prune = vm.runInNewContext(`${code}\npruneManagedTabs`, {
     cleanConversationId: (id: string) => id, conversationForTab: () => conversationId,
     conversationFromUrl: (url: string) => url.split('/c/')[1], tabDocuments: { '71': scenario === 'wrong-document' ? 'replacement' : 'doc' },
