@@ -43,6 +43,15 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A handoff no longer fails because the replacement chat was still loading.** The fresh chat
+  redeems its brief and then asks the app for permission to send it — and the companion refused
+  that permission as a stale document whenever the tab had not finished loading yet, which for a
+  newly opened ChatGPT is the normal case. The refusal never reached the app: the page read it as
+  a denied permit, cleared the composer and stopped without an ack, and the app waited out its
+  whole deadline and gave up with "the chat this app opened did not report back in time" while
+  the message box sat empty and nothing anywhere said why. The route check now applies only to
+  checkpoints that name a chat; the two that come from a chat ChatGPT has not created yet are
+  judged on the document lease the worker already holds.
 - **A compaction open across an app restart is no longer left for its whole six-hour life.**
   A handoff restored from disk sits below the watch floor, so the pickup machinery correctly
   declines it as an obligation this run never accepted, and the silence check was meant to
