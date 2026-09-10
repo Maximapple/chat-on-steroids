@@ -2933,8 +2933,27 @@ const HANDLERS = {
     // ChatGPT assigns /c/B through an SPA transition. Read Chrome's current tab and
     // retain the exact document/epoch lease across that await before accepting its route.
     const tab = await chrome.tabs.get(source.tab).catch(() => null);
-    if (!ownsDocument(source) || !tab || tab.pendingUrl || tab.status === 'loading' ||
-        !isChatGptUrl(tab.url) || conversationFromUrl(tab.url) !== cleanConversationId(message.conversationId))
+    if (!ownsDocument(source) || !tab || !isChatGptUrl(tab.url || tab.pendingUrl))
+      return { ok: false, error: 'stale_document' };
+    const named = cleanConversationId(message.conversationId);
+    // A checkpoint that names a chat has a route to verify, and an unsettled tab cannot prove
+    // it: wait for the navigation rather than accept a message about a chat this tab may be
+    // leaving. A checkpoint that names none is the opposite case and has to be judged
+    // differently — the two destination checkpoints come from a replacement chat that ChatGPT
+    // has not created yet, so there is no id to compare and no navigation to lose.
+    //
+    // Refusing those on `loading` cost a whole handoff every time the fresh tab was slower than
+    // the page asking for its permit. Measured on 2026-09-10: the tab redeemed its brief at
+    // 04:39:55.218 and asked for `destinationAttempt` at 04:39:58.262, three seconds into a
+    // ChatGPT that was still loading. The refusal never reached the app, content.js read it as
+    // a denied permit, cleared the composer and returned without an ack, and the app waited out
+    // its deadline with nothing anywhere to say why.
+    //
+    // `ownsDocument` already proved this is the document the worker leased; all that is left to
+    // exclude is a tab that is actually showing some other conversation.
+    if (named
+      ? (tab.pendingUrl || tab.status === 'loading' || conversationFromUrl(tab.url) !== named)
+      : conversationFromUrl(tab.url) !== null)
       return { ok: false, error: 'stale_document' };
     const sourceUrl = tab.url;
     const result = await call('/compact', {
