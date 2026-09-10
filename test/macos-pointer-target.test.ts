@@ -7,7 +7,11 @@ import { expect, it } from 'vitest';
 it.runIf(process.platform === 'darwin')('keeps pointer authorization independent of keyboard focus', () => {
   const source = readFileSync('native/macos-desktop-helper/main.swift', 'utf8');
   const functions = ['frontWindowID', 'inputTargetMatches', 'assertInputTarget', 'assertPointerTarget', 'click']
-    .map((name) => source.match(new RegExp(`private func ${name}\\([\\s\\S]*?\\n\\}`))?.[0] ?? '').join('\n');
+    .map((name) => {
+      const extracted = source.match(new RegExp(`private func ${name}\\([\\s\\S]*?\\n\\}`))?.[0];
+      expect(extracted, `missing Swift function: ${name}`).toBeTruthy();
+      return extracted;
+    }).join('\n');
   // Execute production predicates and click ordering. Only OS observations/event posting are
   // replaced; these tests never activate a window or send input to the developer's desktop.
   const program = `

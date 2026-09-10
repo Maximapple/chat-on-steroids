@@ -3,7 +3,11 @@ import { expect, it } from 'vitest';
 import { HELPER_SCRIPT } from '../src/main/computer/helper.js';
 
 it.runIf(process.platform === 'win32')('enforces the window lease in the Windows dispatcher without native input', () => {
-  const dispatch = HELPER_SCRIPT.slice(HELPER_SCRIPT.indexOf('function Handle-Request('), HELPER_SCRIPT.indexOf('\nwhile (($line'));
+  const start = HELPER_SCRIPT.indexOf('function Handle-Request(');
+  expect(start, 'missing PowerShell Handle-Request function').toBeGreaterThanOrEqual(0);
+  const end = HELPER_SCRIPT.indexOf('\nwhile (($line', start);
+  expect(end, 'missing stdin loop after Handle-Request').toBeGreaterThan(start);
+  const dispatch = HELPER_SCRIPT.slice(start, end);
   // Run the actual PowerShell dispatcher with an inert Win32 boundary. No SendInput, focus
   // changes or desktop session are needed, including on headless Windows CI runners.
   const script = `
