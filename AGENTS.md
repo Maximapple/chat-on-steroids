@@ -2782,7 +2782,10 @@ coordinates named a window; otherwise an occluding app's pixels could be relabel
 window. Screen captures compare the exact active-display rectangles with ScreenCaptureKit's snapshot
 and re-check them through and after capture. Physical input revalidates the target, and a semantic or
 explicit focus step carries its proven window into later keyboard actions in the same batch instead
-of degrading to global HID input. Batches report partial completion and route evidence.
+of degrading to global HID input. macOS keyboard focus reconciliation never substitutes for the
+pointer's exact WindowServer z-order check. Windows checks a supplied/inferred HWND lease before
+each physical action. Batches report partial completion and route evidence; post-action verification
+and result-capture errors retain the completed action count/routes, including fallback failures.
 Image coordinates clamp to the frame's inclusive integer interior, and final text plus base64 image
 share one measured MCP result budget. The in-process Swift path sets a native AX messaging timeout and
 one aggregate bounded traversal deadline because a Node Worker timeout cannot pre-empt a synchronous

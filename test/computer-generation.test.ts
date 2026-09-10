@@ -20,6 +20,7 @@ const fake = vi.hoisted(() => {
     }
   }
   const requests: Array<Record<string, any>> = [];
+  const failures: Array<{ op: string; error_code: string }> = [];
   const children: Array<Transport> = [];
   class Transport extends Emitter {
     readonly pid = 9000 + children.length;
@@ -64,12 +65,15 @@ const fake = vi.hoisted(() => {
         cursor: { x: 20, y: 20 },
         routes: (request.actions ?? []).map(() => 'uia')
       };
+      if (failures[0]?.op === request.op) {
+        Object.assign(reply, { ok: false, ...failures.shift(), message: 'injected observation failure' });
+      }
       queueMicrotask(() => addon
         ? this.emit('message', { type: 'reply', reply })
         : this.stdout.emit('data', Buffer.from(`${JSON.stringify(reply)}\n`)));
     }
   }
-  return { requests, children, Transport, spawn: () => new Transport(false) };
+  return { requests, failures, children, Transport, spawn: () => new Transport(false) };
 });
 
 vi.mock('node:child_process', () => ({ spawn: fake.spawn }));
@@ -96,6 +100,7 @@ describe.each(['stdio', 'addon'] as const)('Desktop reply provenance (%s)', (tra
     vi.resetModules();
     fake.children.length = 0;
     fake.requests.length = 0;
+    fake.failures.length = 0;
     Object.defineProperty(process, 'platform', { ...platform, value: transport === 'addon' ? 'darwin' : 'linux' });
     vi.stubEnv('COS_MACOS_DESKTOP_HELPER', '');
     computer = await import('../src/main/computer/index.js');
@@ -111,6 +116,40 @@ describe.each(['stdio', 'addon'] as const)('Desktop reply provenance (%s)', (tra
     fake.children.at(-1)!.close();
     await computer.listWindows();
   };
+
+  it.each(['capture', 'fallback', 'active', 'verification'] as const)(
+    'preserves completed actions when post-action %s fails', async (stage) => {
+      fake.failures.push(...(stage === 'fallback'
+        ? [{ op: 'capture', error_code: 'WINDOW_NOT_FOUND' }, { op: 'capture', error_code: 'CAPTURE_FAILED' }]
+        : [{ op: stage === 'capture' ? 'capture' : 'active', error_code: 'CAPTURE_FAILED' }]));
+      // A local action has no inferred window, so privacy capture must resolve the active one.
+      const actions = stage === 'active'
+        ? [{ type: 'wait' as const, ms: 0 }]
+        : [{ type: 'type' as const, text: 'example' }];
+      await expect(computer.actAndCapture(actions, {
+        ...(stage === 'active' ? {} : { targetWindow: 77 }),
+        ...(stage === 'verification'
+          ? { verify: { until: 'foreground' as const, window: 77 } }
+          : { capture: stage === 'active' ? { preferActiveWindow: true } : { window: 77 } })
+      })).rejects.toMatchObject({
+        completedCount: 1, failedIndex: 1,
+        completedRoutes: [stage === 'active' ? 'local' : 'uia'],
+        message: expect.stringMatching(/completed_count=1.*routes=(local|uia).*CAPTURE_FAILED/)
+      });
+      expect(fake.requests.filter((request) => request.op === 'act')).toHaveLength(stage === 'active' ? 0 : 1);
+      expect(fake.failures).toHaveLength(0);
+    }
+  );
+
+  it('keeps a successful result-capture fallback', async () => {
+    fake.failures.push({ op: 'capture', error_code: 'WINDOW_NOT_FOUND' });
+    const result = await computer.actAndCapture([{ type: 'type', text: 'example' }], {
+      targetWindow: 77, capture: { window: 77 }
+    });
+    expect(result).toMatchObject({ completedCount: 1, routes: ['uia'], screenshot: { windowId: 77 } });
+    expect(result.captureFallback).toContain('captured active window 77 instead');
+    expect(fake.requests.filter((request) => request.op === 'act')).toHaveLength(1);
+  });
 
   it('keeps older frames and refs usable while the same helper remains active', async () => {
     const first = await computer.screenshot({ window: 77 });

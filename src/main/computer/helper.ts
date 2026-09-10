@@ -898,6 +898,12 @@ function Handle-Request($request) {
       $result.foreground = [Clf]::ForegroundId()
     }
     'act' {
+      $targetWindow = [int64]$request.targetWindow
+      $frameWindow = [int64]$request.frame.window
+      if ($targetWindow -and $frameWindow -and $targetWindow -ne $frameWindow) {
+        throw "TARGET_WINDOW_CONFLICT: frame and targetWindow name different windows"
+      }
+      if (-not $targetWindow) { $targetWindow = $frameWindow }
       $pointing = @($request.actions | Where-Object { $_.type -in @('move','click','double_click','scroll','drag') })
       if ($pointing.Count -gt 0 -and $request.frame) { Assert-CoordinateFrame $request.frame }
       $routes = @()
@@ -905,6 +911,19 @@ function Handle-Request($request) {
       for ($index = 0; $index -lt $request.actions.Count; $index++) {
         $a = $request.actions[$index]
         try {
+          if ($a.type -in @('focus','click_ui','set_value_ui')) {
+            if ($targetWindow -and $targetWindow -ne [int64]$a.window) {
+              throw "TARGET_WINDOW_CONFLICT: action targets a different window than this batch"
+            }
+            $targetWindow = [int64]$a.window
+          }
+          # A lease names a destination; it does not authorize silently activating it.
+          # Recheck each physical action, including after an explicit focus or UIA step.
+          if ($targetWindow -and $a.type -in @('move','click','double_click','scroll','drag','type','keypress')) {
+            if ([Clf]::ForegroundId() -ne $targetWindow) {
+              throw "INPUT_TARGET_LOST: window $targetWindow is not foreground; no input was sent for this action"
+            }
+          }
           switch ($a.type) {
             'click_ui' {
               $ui = Act-UiElement @{ id = $a.window; snapshotId = $a.snapshotId; runtimeKey = $a.runtimeKey; action = 'click' }
