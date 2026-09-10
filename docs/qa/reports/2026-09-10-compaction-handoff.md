@@ -2,9 +2,19 @@
 
 Field report and fix brief, 2026-09-09 / 2026-09-10. Written to be actioned directly.
 
-**Status:** defects 1 and 3 are fixed on pushed branches. Defect 2 is analysed and deliberately
-not patched — it needs a decision, see section 4. Defect 3 is the one that produced the visible
-symptom most often: a replacement chat that opens and stays empty.
+**Status, 2026-09-10 evening.** Five defects, found while chasing one symptom.
+
+| # | Defect | State |
+|---|---|---|
+| 1 | The claim outlives the command that made it | fixed, branch pushed |
+| 2 | A restart orphans an open compaction | analysed, **not patched** — needs a decision (§4) |
+| 3 | The replacement chat's permit is refused while its tab loads | fixed, **verified in production** (§4b) |
+| 4 | The silence watchdog never escalates | **open**, fully measured (§4c) |
+| 5 | The brief stays in the composer after a successful send | **open**, hypothesis only (§7) |
+
+Defect 3 was the one that produced the visible symptom most often — a replacement chat that opens
+and stays empty. Since the build carrying its fix, three consecutive handoffs have committed
+cleanly. Defects 4 and 5 are what is left.
 
 Identifiers below are abbreviated; conversation ids, session ids and absolute paths are
 redacted as `<chat-A>`, `<session>`, `<home>`. Command ids are app-internal and kept as-is
@@ -244,6 +254,23 @@ The brief was delivered in full and thrown away three seconds later. Four consec
 failed exactly this way. The timing explains why this is intermittent rather than total: whether
 the tab has finished loading when the permit is asked for depends on the machine and the network.
 
+### Verified in production
+
+Three consecutive handoffs on the build carrying this fix, same machine, same session:
+
+| Time (UTC) | Brief | Captured → committed |
+|---|---|---|
+| 08:41:58 → 08:42:06 | 43,636 chars | 8.1 s |
+| 10:25:18 → 10:25:26 | 56,202 chars | 8.2 s |
+| 12:38:08 → 12:38:14 | 40,414 chars | 6.9 s |
+
+The field that had been stuck on `not-attempted` through four failed attempts now reads:
+
+```json
+"state": "committed",
+"destinationSend": { "state": "sent", "conversationId": "…", "messageId": "…" }
+```
+
 ### Fix
 
 Branch `fix/replacement-chat-permit-while-loading`, commit `6b6834b`.
@@ -261,6 +288,82 @@ Note what the existing suite could not catch: every prior `/compact` test passes
 `conversationId` alongside the token, because every one of them is the *source* chat. The
 destination's shape — token and flag, no conversation — was untested, and it is the shape the
 whole handoff depends on.
+
+## 4c. Defect 4 — the silence watchdog never escalates (OPEN, fully measured)
+
+A chat whose turn breaks on ChatGPT's side is reloaded every three minutes, indefinitely, with
+no escalation and no stopping condition — including after the app has itself declared the turn
+dead.
+
+### Measurement
+
+Conversation wedged on ChatGPT's own `Connection interrupted. Waiting for the complete answer`.
+One hour of app log, one conversation:
+
+```
+13:49:16  silence-reload        two-minute watchdog fires
+13:49:48  transport-failure     the reloaded page reports the same error, 32 s later
+13:51:48  silence-reload
+13:52:18  transport-failure
+…
+14:45:35  silence-reload        still going
+```
+
+**16 silence reloads and 12 assistant-error reports in one hour.** The user's own view of the
+chat shows the matching pair repeating: `↻ Reloaded chat to recover an unresponsive open turn`
+followed seconds later by `! Connection interrupted`.
+
+The decisive detail: at 14:43 the app recorded
+
+```
+turn_end  outcome=stalled  "no visible output and no progress for ten minutes"
+```
+
+and reloaded again at 14:45:35. Its own verdict that the turn is dead does not stop the loop.
+
+### Why it does not stop
+
+Two triggers reach `queueBrowserRecovery`, and only one is bounded. The assistant-error path
+spends exactly one reload per turn:
+
+```ts
+if (reason === 'assistant-error') {
+  const spent = turnRepairSpent.get(conversationId);
+  if (spent && turnKeyFor(live) === spent.turnKey) return false;
+}
+```
+
+The silence watchdog has no such budget, deliberately — the comment above it argues that it asks
+the chat-level question, is the answer to a stuck turn-scoped repair, and is "not something one
+may mute". Only `BROWSER_RECOVERY_COOLDOWN_MS` (3 minutes) paces it. That is exactly the observed
+cadence.
+
+The intent is sound; the outcome is a livelock. The remedy is provably ineffective after the
+first attempt — the state being recovered from is ChatGPT's, not the page's — and there is no
+next step after it fails sixteen times.
+
+### What to decide before patching
+
+Do **not** simply cap the silence watchdog: the comment explains what that breaks, and a muted
+liveness check is how a wedged chat went unnoticed before. The missing piece is an escalation,
+not a limit. Options, in the order they seem worth testing:
+
+1. **Notice repetition.** N consecutive silence reloads that each end in the same assistant
+   error is a different state from N unrelated silences. `turnRepairSpent` already models
+   "this remedy is spent for this turn"; the analogous per-chat concept does not exist.
+2. **Escalate rather than stop.** A chat proven unrecoverable is precisely what Compact & Resume
+   exists for. Filing a ticket would move the work to a fresh chat instead of reloading a dead
+   one — but note it needs ChatGPT to write the brief, and in this state ChatGPT is what is
+   broken, so this cannot be the only path.
+3. **Surface it.** Sixteen silent retries with no user-visible verdict is its own defect. The
+   app knew at 14:43 that the turn was dead and said so only to its log.
+
+### Recovering a chat sitting in this state
+
+`isChatBlocked` refuses every recovery trigger — all of them converge on `queueBrowserRecovery` —
+so blocking the chat stops the loop. The work itself has to move to a new chat by hand: automatic
+compaction will not fire below `compaction.autoTokens` (310,845 against 400,000 when this was
+measured), and a manual one needs the very ChatGPT turn that is broken.
 
 ## 5. Reproducing on Windows
 
@@ -319,22 +422,78 @@ The fix prevents the state; it does not clear one that exists. For a machine sit
 Clearing `claimedBy` in `state/continuations.json` by hand also works, but only with the app
 quit, and it does not help while defect 2 keeps the ticket from being picked up again.
 
-## 7. Related, separate
+## 7. Defect 5 — the brief stays in the composer after a successful send (OPEN, hypothesis only)
 
-`fix/handoff-composer-residue` fixes a fourth defect found in the same area: after a *successful*
-handoff send, neither the replacement chat nor the source chat cleared the composer, so the whole
-brief stayed in the message box under the message it had just been sent as. Independent of the
-three above.
+After a handoff commits, the whole brief is still sitting in the replacement chat's message box,
+underneath the message it was just sent as. Confirmed by the user on 2026-09-10, on the build
+where the handoff itself works.
+
+**Correction to an earlier version of this report.** `fix/handoff-composer-residue` no longer
+fixes this. That branch received `c7e7344` — *"Drop the composer clear that 2.0.7 supersedes,
+keep the test that found it"* — and is already contained in the current tip. The
+`clearPromptExact` call it added is gone, replaced by `clearAcknowledgedBootstrap`. **Do not
+reinstate the old fix**: it would defeat what the replacement protects, namely that a draft the
+user typed after the send is never erased.
+
+The replacement clears only against a receipt:
+
+```js
+const clearAcknowledgedBootstrap = async acknowledged => {
+  if (acknowledged?.ok !== true || acknowledged.data?.ok === false || !bootstrapDraft.current()) return;
+  const receipt = await waitPageView(() => {
+    const latest = CLF_DOM.messages().filter(m => m.role === 'user').at(-1);
+    return latest?.id !== priorBootstrapUser && matchesSubmittedUser(latest, boot.text);
+  }, …, 15000);
+  if (receipt) await bootstrapDraft.clear();
+};
+```
+
+and `matchesSubmittedUser` compares the *entire* rendered text against what was sent:
+
+```js
+return typeof actual === 'string' && actual.length <= 256000 &&
+       sendText(actual) === sendText(expected);
+```
+
+**Hypothesis, unproven:** at ~44,000 characters ChatGPT clamps the user message in the DOM, so
+`actual` is truncated, the comparison fails, `waitPageView` times out after 15 s, and the draft is
+deliberately kept. That would also explain why short worker bootstraps are unaffected.
+
+**Verify before changing anything.** Either drive the real content script through the jsdom
+harness in `test/content-script.test.ts` with a long resume bootstrap whose rendered user message
+is clamped, or measure it on the running extension using the method in §2b. A tracer for exactly
+this decision — ack ok, draft held, receipt landed, `actualLen` against `expectedLen` — was left
+installed at `<home>/Library/Application Support/chat-on-steroids/extension/content.js`, with the
+original at `~/Downloads/content.js.backup2-2026-09-10`; it records nothing until the extension is
+reloaded in `chrome://extensions`, and any new build overwrites that folder.
+
+If the hypothesis holds, the direction is to stop hanging the receipt on a full-text comparison
+the page provably cannot satisfy — the stable message id plus a prefix, or Fiber's `rawText`
+rather than the bubble. What is *not* an option is dropping the comparison: it is what stops an
+unrelated draft from being deleted.
 
 ## 8. Branches
 
 | Branch | Covers | State |
 |---|---|---|
-| `fix/replacement-chat-permit-while-loading` | defect 3 | pushed, tests green |
-| `fix/wedged-compaction-recovery` | defect 1 | pushed, tests green |
-| `fix/handoff-composer-residue` | section 7 | pushed, tests green |
-| — | defect 2 | not started, see section 4 |
+| `fix/replacement-chat-permit-while-loading` | defect 3 | pushed, tests green, **verified in production** |
+| `fix/wedged-compaction-recovery` | defect 1 | pushed, tests green, not yet in a build |
+| `fix/handoff-composer-residue` | superseded | its fix was dropped by `c7e7344`; see §7 |
+| — | defect 2 | not started, see §4 |
+| — | defect 4 | not started, see §4c |
+| — | defect 5 | not started, see §7 |
 
-All three are based on `origin/integrate/browser-and-desktop-064733`. None has been merged, and
-none is in any installed build: reproducing any of these defects on a running install is expected
-until a build carries the fix.
+Branches are based on `origin/integrate/browser-and-desktop-064733`. Only defect 3's fix is known
+to be in an installed build; reproducing defects 1, 2, 4 or 5 on a running install is expected.
+
+## 9. Order of work
+
+1. **Defect 5** — a live tracer is already installed and needs one handoff to answer it. Cheapest
+   evidence available, and it is the defect the user sees on every successful handoff.
+2. **Defect 4** — fully measured, no further evidence needed. It needs a design decision (§4c),
+   not an investigation.
+3. **Defect 2** — needs a measurement before anything is changed, and the behaviour it resembles
+   is intentional. Least urgent: it only bites after an app restart during an open compaction.
+
+Defect 1's fix is written and green but has never run in a build. Whatever else happens, getting
+it into one is worth more than another round of analysis.
