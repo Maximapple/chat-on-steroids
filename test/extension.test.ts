@@ -778,8 +778,27 @@ function loadWorker(options: {
     alarmCreate,
     alarmClear,
     async fireAlarm(name = 'clf-bridge-drain') {
+      // Wait until the pass stops doing anything, instead of guessing how many event-loop
+      // turns it needs. The alarm listener starts a void promise chain and returns undefined,
+      // so there is nothing to await, and a fixed count is a duration wearing a condition’s
+      // clothes. It made this whole block fail under a full run, a different test each time,
+      // because a pass that has not reached tabsRemove yet is indistinguishable from one that
+      // decided to remove nothing. Measured on the fixed count: twelve turns pass, two fail
+      // exactly two of these tests, one fails all nine.
+      //
+      // Re-arming the alarm is the chain’s own last statement, but it is not usable as the
+      // signal: a worker still finishing load() re-arms on that path first, and the wait ends
+      // before the pass has begun. Quiet is the honest condition.
+      const spies = [tabsCreate, tabsQuery, tabsUpdate, tabsSendMessage, tabsRemove, tabsReload,
+        windowsUpdate, scriptingExecuteScript, scriptingInsertCSS, alarmCreate, alarmClear];
+      const work = () => spies.reduce((total, spy) => total + spy.mock.calls.length, 0);
       for (const fn of alarmListeners) fn({ name });
-      for (let turn = 0; turn < 12; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+      for (let turn = 0, idle = 0, seen = -1; turn < 600 && idle < 12; turn += 1) {
+        const now = work();
+        idle = now === seen ? idle + 1 : 0;
+        seen = now;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
     },
     async installed(reason = 'update') {
       for (const fn of installedListeners) fn({ reason });
