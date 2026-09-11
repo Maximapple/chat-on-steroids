@@ -1391,9 +1391,26 @@
       for (let up = 0; fiber && up < 24; up++, fiber = fiber.return) {
         const props = fiber.memoizedProps;
         if (!props) continue;
-        if (props.reportEntity?.entityType === 'connector' && props.reportEntity.id === route[1] &&
-            Array.isArray(props.details) && props.details.some(detail => detail.value === route[1]) &&
-            button.getClientRects().length > 0) {
+        // Two accepted shapes for "this connector's settings card is rendered", because
+        // ChatGPT replaced the first with the second. Measured on the live page 2026-09-11,
+        // fourteen readings: `reportEntity` and `headerTrailingContent` are absent from every
+        // props form in the panel, while the tools still read. Keeping only the old shape made
+        // the snapshot unreachable, and because this path reports nothing, the app's refresh
+        // row stayed pending instead of falling through to its manual branch.
+        //
+        // The point of the condition is unchanged: prove the *card* is on screen, not merely
+        // that some fiber carries the connector id — a list row or a prefetch cache does that
+        // too. A row does not carry this connector's own mutations, so three of them are the
+        // proof. Counting rather than naming two keeps a renamed handler from costing the card.
+        const CARD_ACTIONS = ['onRemove', 'onDelete', 'onDisconnect', 'onReconnect',
+          'onEditName', 'onEditLogo', 'onEditDescription', 'onDisableSync'];
+        let cardActions = 0;
+        if (props.connectorId === route[1] && props.plugin && typeof props.plugin === 'object') {
+          for (const name of CARD_ACTIONS) if (typeof props[name] === 'function') cardActions++;
+        }
+        const legacyCard = props.reportEntity?.entityType === 'connector' && props.reportEntity.id === route[1] &&
+          Array.isArray(props.details) && props.details.some(detail => detail.value === route[1]);
+        if ((legacyCard || cardActions >= 3) && button.getClientRects().length > 0) {
           if (observedCard && observedCard !== props) return null;
           observedCard = props;
           if (props.headerTrailingContent) {
