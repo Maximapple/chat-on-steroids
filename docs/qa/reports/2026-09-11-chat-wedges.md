@@ -121,7 +121,7 @@ question in any case.
 **The user's recollection that this did not happen in 2.0.2 could not be tested.** The app log
 only reaches back to 2026-09-09, and the one comparatively clean window in it was idle.
 
-## 5. Current hypothesis — the load profile, UNPROVEN
+## 5. The load-profile hypothesis — REFUTED
 
 Stated as a hypothesis, not a finding.
 
@@ -131,9 +131,33 @@ minutes, spawns three worker agents and runs dozens of connector calls, several 
 seconds long. They wedge after two to four requests.
 
 A chat that starts at that size and immediately drives that much traffic may simply be a harder
-thing for ChatGPT's transport than a conversation that grew normally. If so, the user's
-impression about 2.0.2 can be right without any single commit being at fault: 2.0.2 had neither
-Compact & Resume in this form, nor worker swarms, nor the browser tool.
+thing for ChatGPT's transport than a conversation that grew normally.
+
+**Measured, and it does not hold.** Every handoff in every stored session was matched against the
+outcome of the turn that followed it — 62 pairs:
+
+| Brief size | bad outcomes (failed / stalled / interrupted) | rate |
+|---|---|---|
+| < 50,000 chars | 3 / 32 | 9.4 % |
+| ≥ 50,000 chars | 6 / 30 | 20.0 % |
+
+Fisher exact, two-sided: **p = 0.294**. The direction matches the hypothesis and the sample does
+not support it — a split like this arises by chance in roughly one experiment in three. A single
+data point argues against it directly: the smallest failure sits at 41,330 characters, in the
+middle of the unremarkable range, carrying exactly the same message as the one at 67,266.
+
+Two things the same measurement does establish:
+
+- **9 of 62 handoffs — one in seven — are followed by a turn that fails, stalls or is
+  interrupted.** That is the rate worth quoting, and it is not size-dependent.
+- **The failures are two distinct kinds**, which earlier sections wrongly lumped together:
+  `Message delivery timed out. Please try again.` (3 cases, at 41k / 61k / 67k) and `no visible
+  output and no progress for ten minutes` (4 cases, at 51k / 51k / 61k / 69k). The first is
+  ChatGPT's delivery; the second is an answer that never arrives. Separated, the counts are too
+  small for any claim at all.
+
+A further observation against the load framing: the wedge measured on 2026-09-11 at 12:32 hit a
+session **two chats old**, started that morning. Not a long chain.
 
 ## 6. What would settle it
 
@@ -297,6 +321,89 @@ Do not simply add a clear to the fall-through. It would tidy the symptom and lea
 failing to bind its own conversation — and the earlier `clearPromptExact` fix was already removed
 once, in `c7e7344`, for being the wrong layer.
 
+## 9c. Why the receipt fails — MEASURED, and it is neither of the two candidates as stated
+
+`matchesSubmittedUser` was instrumented in the shipped extension, recording six values per call
+and no text content. One resume handoff, 2026-09-11 12:58.
+
+### Raw lines
+
+Successor chat, 120 calls:
+
+```
+{"at":"12:58:43.366","exit":"compared","turnFound":false,"conversationSame":null,"authored":0,
+ "branch":"message.text","actualLen":69504,"expectedLen":60425,"squeezedEqual":false,
+ "result":false,"path":"/c/WEB:153a2e6b-…"}
+{"at":"12:58:43.533","exit":"fiber-conversation-mismatch","turnFound":true,
+ "conversationSame":false,"expectedLen":60425,"result":false,"path":"/c/WEB:153a2e6b-…"}
+{"at":"12:58:44.370","exit":"fiber-conversation-mismatch","turnFound":true,
+ "conversationSame":false,"expectedLen":60425,"result":false,"path":"/c/WEB:153a2e6b-…"}
+… 116 further fiber-conversation-mismatch, path "/c/6aa3fb02-…"
+```
+
+Totals: `fiber-conversation-mismatch` **119**, `compared` **1**, spanning 12:58:43.533 to
+12:59:21.515 — **38 seconds**, i.e. the 80 × 500 ms poll window running to exhaustion.
+
+Control, from the established chat in the same store:
+
+```
+{"at":"12:54:26.493","exit":"compared","turnFound":false,"authored":0,"branch":"message.text",
+ "actualLen":5758,"expectedLen":5801,"squeezedEqual":true,"result":true,"path":"/c/6aa3e67c-…"}
+```
+
+The function works normally in a chat that already exists.
+
+### What the lines say
+
+**Candidate (a) is the cause, but not in the form it was proposed.** The proposal was Fiber's
+*provisional* thread id — a transitional state. The measurement shows it is not transitional:
+
+```
+path "/c/WEB:153a2e6b-…"          4 calls
+path "/c/6aa3fb02-…"            116 calls
+```
+
+Only the first four calls happen while the address still carries the `WEB:` client-side thread id.
+The remaining **116 mismatches occur after the route has settled on the real conversation id** —
+`CLF_DOM.conversationId()` returns the real one, and the Fiber turn keeps returning the
+provisional one. They never converge, and the guard
+
+```js
+if (turn && turn.conversationId !== CLF_DOM.conversationId()) return false;
+```
+
+therefore refuses for the rest of the window.
+
+**Candidate (b) is refuted, in the opposite direction to the one proposed.** The single call that
+reached the text comparison did so before any Fiber turn existed, and fell back to `message.text`:
+
+```
+actualLen 69504   expectedLen 60425   diff +9079   squeezedEqual false
+```
+
+The rendered bubble is **9,079 characters longer** than what was sent, after whitespace is
+squeezed out of both. Not a clamped bubble — a longer one. What those extra characters are was
+not measured and is the obvious next question, but truncation is excluded.
+
+### Consequences
+
+Both symptoms follow from this single refusal, as predicted:
+
+- `send()`'s only admissible proof in a brand-new chat is this function, so it returns false and
+  `content.js` takes its silent return — the composer keeps the brief.
+- The ack loop polls the same failing probe for 40 s, exhausts, and sends the bare ack that clears
+  nothing.
+- The page never binds its own conversation, so the commit arrives from the server-authored marker
+  instead — which the log shows for every handoff — and `rememberResumeGoalPending` never runs.
+
+### What this does not settle
+
+Whether the Fiber turn's provisional id ever updates, or whether the branch is permanently
+detached for a resumed chat. 120 calls over 38 seconds say it does not update within the window
+that matters; they say nothing about a minute later. That is one more instrumented handoff away,
+and it decides whether the fix is "wait longer" (it is not, the window is already 40 s) or "stop
+comparing against the Fiber turn's conversation id in a chat this page just created".
+
 ## 10. What not to do
 
 - **Do not compare two time windows without normalising by load.** §4.2 is what that looks like.
@@ -304,3 +411,6 @@ once, in `c7e7344`, for being the wrong layer.
 - **Do not cap the silence watchdog further.** It is already capped at three, and the comment
   above it explains why muting it is worse than the loop was.
 - **Do not treat `meta.errors` as a wedge count.** It counts tool errors.
+- **Do not quote a rate difference without testing it.** §5's 9.4 % against 20.0 % looks like a
+  finding and is `p = 0.294`. Three of the seven hypotheses this investigation discarded died to
+  a control that was run after the aggregate had already been believed.
