@@ -9,8 +9,10 @@ Field report and fix brief, 2026-09-09 / 2026-09-10. Written to be actioned dire
 | 1 | The claim outlives the command that made it | fixed, branch pushed |
 | 2 | A restart orphans an open compaction | analysed, **not patched** — needs a decision (§4) |
 | 3 | The replacement chat's permit is refused while its tab loads | fixed, **verified in production** (§4b) |
-| 4 | The silence watchdog never escalates | **open**, fully measured (§4c) |
+| 4 | The silence watchdog never escalates | **fixed** — verified 2026-09-11 (§4c) |
 | 5 | The brief stays in the composer after a successful send | **open**, hypothesis only (§7) |
+| 6 | Unwedging a broken chat is left to the user, though the app can already do it | **open** (§4d) |
+| 7 | Session asset quota exceeded — evidence silently dropped | **open** (§4e) |
 
 Defect 3 was the one that produced the visible symptom most often — a replacement chat that opens
 and stays empty. Since the build carrying its fix, three consecutive handoffs have committed
@@ -289,7 +291,7 @@ Note what the existing suite could not catch: every prior `/compact` test passes
 destination's shape — token and flag, no conversation — was untested, and it is the shape the
 whole handoff depends on.
 
-## 4c. Defect 4 — the silence watchdog never escalates (OPEN, fully measured)
+## 4c. Defect 4 — the silence watchdog never escalates (FIXED 2026-09-11)
 
 A chat whose turn breaks on ChatGPT's side is reloaded every three minutes, indefinitely, with
 no escalation and no stopping condition — including after the app has itself declared the turn
@@ -364,6 +366,86 @@ not a limit. Options, in the order they seem worth testing:
 so blocking the chat stops the loop. The work itself has to move to a new chat by hand: automatic
 compaction will not fire below `compaction.autoTokens` (310,845 against 400,000 when this was
 measured), and a manual one needs the very ChatGPT turn that is broken.
+
+### Fixed, and verified in production
+
+A later build caps the loop and explains itself. Measured 2026-09-11 on the same wedged shape:
+
+```
+05:33:50  silent for two minutes — asking the browser to reload 6aa3865c…
+05:34:09  assistant transport failure
+05:36:09  silent for two minutes — reload
+05:36:39  assistant transport failure
+05:38:39  silent for two minutes — reload
+05:39:08  assistant transport failure
+05:41:08  ⚠ answered 3 silence reloads with the same failure — not reloading it again
+```
+
+Three attempts instead of sixteen, and a note written into the session the user can read:
+
+> Stopped reloading this chat: 3 reloads each came back with the same failure — "Connection
+> interrupted. Waiting for the complete answer". The turn is broken on ChatGPT's side, which a
+> reload cannot repair. Continue in a new chat, or send a message here to start a fresh turn.
+
+All three options from this section are implemented: repetition is noticed, the verdict is
+surfaced, and the user is told what to do. What is *not* implemented is doing it — see §4d.
+
+## 4d. Defect 6 — unwedging is left to the user, though the app can already write the message (OPEN)
+
+The note above ends with the remedy: *"send a message here to start a fresh turn."* Confirmed by
+the user on 2026-09-11: pressing Stop in ChatGPT and typing anything does resume the work, and the
+session picks straight back up — 05:46:55 attribution, 05:47:12 a tool call, running again.
+
+That is the complaint, and it is a fair one: a session that runs for days across twenty-five chats
+now needs a human to notice a stall and type a line, every time. The app diagnoses the state
+correctly and then stops one step short of fixing it.
+
+**The machinery already exists.** `src/main/goal.ts` writes the next user message into a chat by
+itself — that is the whole Goal loop, and `GOAL_SYSTEM_TRAILER` is literally the instruction for
+producing one:
+
+> *That was the conversation. Now write the next message as the user: name what they asked for
+> that is still not done, and tell ChatGPT to keep going.*
+
+So the missing piece is a wiring decision, not a new capability: when the silence watchdog gives
+up on a chat, hand that chat to the same drafting path instead of only writing a note. Points to
+settle before building it:
+
+- **Is the turn stoppable from the page?** The user has to press Stop first. Whether the content
+  script can do that reliably in the `Connection interrupted` state is unverified and is the first
+  thing to measure.
+- **How many times?** This needs its own budget, or a chat that breaks every turn becomes an
+  expensive loop of generated messages. The `turnRepairSpent` pattern is the model.
+- **Does the user want it?** Automatically typing into someone's chat is exactly what the rest of
+  this codebase is careful about. It likely belongs behind the same switch as the Goal loop.
+
+## 4e. Defect 7 — session assets are dropped once the quota is hit (OPEN)
+
+Every `browser` tool result since 05:17 on 2026-09-11:
+
+```
+warn  session asset not stored: Session asset quota exceeded
+warn  session 2026-09-06-067c31da: overflow text not stored: Session asset quota exceeded
+```
+
+Twenty-plus in the sampled window, one per browser call, each of which had taken 10–45 seconds to
+produce. Screenshots and overflow text are silently discarded while the run continues as if they
+had been kept.
+
+Two consequences worth separating. The evidence for *this* investigation gets thinner the longer a
+session runs — which is precisely when it is needed. And a compaction brief is written from what
+the session holds, so a quota-exhausted session hands its successor a poorer brief than it could.
+
+Not investigated: what the quota is, whether it is per session or global, and whether anything
+prunes it. A session at twenty-five chats and 106 errors reaching it may be working as designed;
+reaching it *silently*, and continuing to pay for work whose output is thrown away, is not.
+
+### Minor, same area: the worker badge says less than it knows
+
+`extension/content.js` shows `A worker needs attention` whenever `workers.active === 0` and
+`workers.failed > 0`. The signal is real — a worker did fail — but the label names neither which
+worker nor why, and the user reports seeing it often. Worth a sentence of detail from the same
+`summary` the branch already builds.
 
 ## 5. Reproducing on Windows
 
@@ -480,7 +562,9 @@ unrelated draft from being deleted.
 | `fix/wedged-compaction-recovery` | defect 1 | pushed, tests green, not yet in a build |
 | `fix/handoff-composer-residue` | superseded | its fix was dropped by `c7e7344`; see §7 |
 | — | defect 2 | not started, see §4 |
-| — | defect 4 | not started, see §4c |
+| — | defect 4 | **fixed in a later build**, see §4c |
+| — | defect 6 | not started, see §4d |
+| — | defect 7 | not started, see §4e |
 | — | defect 5 | not started, see §7 |
 
 Branches are based on `origin/integrate/browser-and-desktop-064733`. Only defect 3's fix is known
@@ -488,12 +572,16 @@ to be in an installed build; reproducing defects 1, 2, 4 or 5 on a running insta
 
 ## 9. Order of work
 
-1. **Defect 5** — a live tracer is already installed and needs one handoff to answer it. Cheapest
+1. **Defect 6** — the one the user actually feels: a long-running session now stalls until a human
+   types a line. The capability exists (§4d); what is missing is a decision about stopping the
+   broken turn, a budget, and a switch.
+2. **Defect 5** — a live tracer is already installed and needs one handoff to answer it. Cheapest
    evidence available, and it is the defect the user sees on every successful handoff.
-2. **Defect 4** — fully measured, no further evidence needed. It needs a design decision (§4c),
-   not an investigation.
-3. **Defect 2** — needs a measurement before anything is changed, and the behaviour it resembles
+3. **Defect 7** — cheap to scope, and it quietly degrades every other investigation here.
+4. **Defect 2** — needs a measurement before anything is changed, and the behaviour it resembles
    is intentional. Least urgent: it only bites after an app restart during an open compaction.
+
+Defect 4 is fixed and verified; defects 1 and 3 are fixed, 3 verified in production.
 
 Defect 1's fix is written and green but has never run in a build. Whatever else happens, getting
 it into one is worth more than another round of analysis.
