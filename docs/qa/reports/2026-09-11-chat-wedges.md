@@ -207,7 +207,51 @@ it. Reaching it may be by design; reaching it *silently* is not.
 and the user reports seeing it often. The branch already builds a `finished · running · failed`
 summary one line above.
 
-## 9. What not to do
+## 9. Unmerged work that touches this — check it first
+
+Two branches exist on `origin` and are **not** in
+`origin/integrate/browser-and-desktop-064733`. Both are directly relevant to this report, and
+both should be verified and merged before any new investigation starts — it is entirely possible
+that part of what §2 measures is already addressed.
+
+### `fix/restored-compaction-silence-check` — commit `61078a1`
+
+*"Push a restored ticket once, then let the ordinary machinery own it."* Its own message describes
+a repeating reload:
+
+> The candidate this pass synthesises for a restored ticket has no grant to forget, so nothing
+> retired it: it was rebuilt on every sweep and the chat was reloaded again an hour later, and an
+> hour after that.
+
+That is a second, slower reload loop than the one in §3, on a different trigger, and it is also
+the hypothesis §4 of `2026-09-10-compaction-handoff.md` asked someone to measure before patching.
+`src/main/bridge.ts` +9, `test/bridge.test.ts` +8.
+
+**To verify:** revert only `src/main/bridge.ts` to the branch point, keep the test, and confirm it
+fails. Then check whether its bound really is the same one the live path has, since that is the
+claim the fix rests on.
+
+### `fix/checkpoint-relay-allowlist` — commit `6d1bc37`
+
+*"Carry `destinationLost` across the relay it was being dropped in."* The page proves the brief
+never left it, the app retires the lease at once instead of waiting out the quarter hour — and
+`background.js` never listed the field, so it was dropped in between while both ends looked
+correct.
+
+This is the third instance of a failure mode the codebase has already hit twice, and the comment
+in `bridge.ts` above the `/compact` start-request log line names it as open at the time of
+writing. `extension/background.js` +69/−25, `test/extension.test.ts` +33.
+
+**To verify:** the relay is an allowlist, so check that the new shape cannot drop a *future* field
+silently the way the old one did — that is the property worth a test, more than this one field.
+
+### Also worth checking
+
+Whether either of these explains part of the wedge rate in §2. The measurement in §7 run before
+and after a merge, normalised by load, answers that — and it is a much cheaper experiment than
+the control run in §6.2.
+
+## 10. What not to do
 
 - **Do not compare two time windows without normalising by load.** §4.2 is what that looks like.
 - **Do not read a per-day aggregate as a mechanism.** §4.1 is what that looks like.
