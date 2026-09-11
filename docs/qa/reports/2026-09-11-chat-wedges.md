@@ -414,3 +414,70 @@ comparing against the Fiber turn's conversation id in a chat this page just crea
 - **Do not quote a rate difference without testing it.** §5's 9.4 % against 20.0 % looks like a
   finding and is `p = 0.294`. Three of the seven hypotheses this investigation discarded died to
   a control that was run after the aggregate had already been believed.
+
+## 11. Defect 8 — the connector card ChatGPT no longer renders the old way (FIXED)
+
+Separate from the wedges, found while chasing a tab that kept reopening. Two defects, one branch:
+`fix/connector-card-without-report-entity` (`d013681`, `0e7df3d`, `777f9f1`).
+
+### Measurement
+
+`pluginSnapshot()` in `extension/fiber.js` was instrumented in the shipped extension — it runs in
+the page's MAIN world, which is the same place a console one-liner would run, so no browser
+automation was needed. `content.js` persisted what it recorded. Fourteen readings, seven minutes
+apart, every one identical:
+
+```
+panels=1 buttons=9 resultBuilt=true toolCount=7 observedCard=false controlFound=false
+
+button 1, level 23, via connectorId   reportEntity=false  headerTrailing=false
+  connectorId, plugin, publishConnectorHref, legacyRemovalAction, deleteDisabledTooltip,
+  isConnectionStateUnavailable, isDeleting, isInstalledByDefault, isPending,
+  isUninstallDisabled, onDelete, onDisableSync, onDisconnect, onEditDescription,
+  onEditLogo, onEditName, onReconnect, onRemove, showDisconnect, showReconnect,
+  showUninstall, showUninstallAllAccountsWarning
+
+button 2, level  7, via connector.id  actions=7   { actions, connector, isLoadingActions, link }
+button 2, level  9, via connector.id  actions=null { connector, isLoadingConnector, link }
+```
+
+`reportEntity` and `headerTrailingContent` are gone from every props form in the panel. The tools
+read perfectly — `resultBuilt`, seven of them. The snapshot was complete and failed only on
+`if (!result || !observedCard) return null;`.
+
+### The two fixes
+
+**The card.** It is now also accepted in the shape above. The condition's purpose is unchanged —
+prove the *card* is rendered, not that some fiber carries the connector id, which a list row or a
+prefetch cache does too — so the new shape proves it through that connector's own mutations:
+three of `onRemove`, `onDelete`, `onDisconnect`, `onReconnect`, `onEditName`, `onEditLogo`,
+`onEditDescription`, `onDisableSync`, alongside `connectorId` and a `plugin` object. Counted
+rather than named, so a renamed handler does not cost the card. The old shape still works and the
+existing test pinning the refusal without a card is untouched.
+
+With the card recognised and `headerTrailingContent` absent, the snapshot reports
+`refreshAvailable: false` — the manual branch that existed all along, which ends the request and
+tells the user.
+
+**The silence.** `refreshManagedPlugin` returned false without reporting when the view could not
+be read, which is why the durable row carried no `error` after thirty hours. It now reports —
+gated on still owning the page, because `waitPageView` also yields null when this document stops
+being the one the request belongs to, and a navigation is not the page failing to render a card.
+The existing navigation case caught that: the first attempt at this fix broke it.
+
+### Two corrections to the original report of this defect
+
+- **The 30-second cadence is not confirmed in the field.** Chrome's history shows clusters at app
+  starts — 12:51, then 03:58, then 19:11 the previous day. Six tabs over thirty hours, not a
+  per-minute loop. `RETRY_PERIOD_MIN = 0.5` is read correctly in the source but does not produce
+  that cadence in practice.
+- **`refreshManagedPlugin` never runs on page load**, only on a service-worker message
+  (`content.js:11297`). A plain reload of the affected tab therefore triggers nothing, which is
+  why the diagnostic had to post `clf-plugin-ask` itself.
+
+### Still open, needs a real click
+
+Whether "Refresh" now lives in the menu behind the `Plugin actions` button. A synthetic click does
+not open it (`aria-expanded` stays false), and calling page callbacks is out of bounds. That
+decides whether the feature returns or simply ends cleanly through the manual branch — which now
+works either way.
