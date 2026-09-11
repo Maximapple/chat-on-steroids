@@ -207,49 +207,95 @@ it. Reaching it may be by design; reaching it *silently* is not.
 and the user reports seeing it often. The branch already builds a `finished · running · failed`
 summary one line above.
 
-## 9. Unmerged work that touches this — check it first
+## 9. The two branches from an earlier draft — CORRECTED, do not merge
 
-Two branches exist on `origin` and are **not** in
-`origin/integrate/browser-and-desktop-064733`. Both are directly relevant to this report, and
-both should be verified and merged before any new investigation starts — it is entirely possible
-that part of what §2 measures is already addressed.
+An earlier version of this report asked for `fix/restored-compaction-silence-check` and
+`fix/checkpoint-relay-allowlist` to be merged. **That was wrong and has been verified as wrong.**
 
-### `fix/restored-compaction-silence-check` — commit `61078a1`
+Neither branch is an ancestor of `origin/integrate/browser-and-desktop-064733` — they hang off a
+much older base, and diffing them against the tip shows thousands of deletions, i.e. the tip is far
+ahead. But their *content* is in, as of `fa12c17`:
 
-*"Push a restored ticket once, then let the ordinary machinery own it."* Its own message describes
-a repeating reload:
+```
+restoredResumeTokens in src/main/bridge.ts:        6 occurrences
+compactCheckpointFields in extension/background.js: 2 occurrences
+destinationLost in COMPACT_CHECKPOINT_FLAGS:        present
+```
 
-> The candidate this pass synthesises for a restored ticket has no grant to forget, so nothing
-> retired it: it was rebuilt on every sweep and the chat was reloaded again an hour later, and an
-> hour after that.
+Merging them would drag an old tree back over a newer one. Don't.
 
-That is a second, slower reload loop than the one in §3, on a different trigger, and it is also
-the hypothesis §4 of `2026-09-10-compaction-handoff.md` asked someone to measure before patching.
-`src/main/bridge.ts` +9, `test/bridge.test.ts` +8.
+*(Note on method: the first attempt at this check returned all zeros and appeared to contradict
+the claim. The cause was the shell, not the repository — zsh applies history-style modifiers to
+`$T:src/...` and `$T:extension/...`, silently mangling the ref. Brace the variable: `${T}:path`.)*
 
-**To verify:** revert only `src/main/bridge.ts` to the branch point, keep the test, and confirm it
-fails. Then check whether its bound really is the same one the live path has, since that is the
-claim the fix rests on.
+## 9b. The brief left in the composer — MEASURED, cause located
 
-### `fix/checkpoint-relay-allowlist` — commit `6d1bc37`
+Reported repeatedly by the user: after a handoff commits and the new chat is working, the whole
+brief is still sitting in that chat's message box, under the message it was sent as. An earlier
+report carried a hypothesis about the receipt comparison failing on a clamped 44,000-character
+bubble. **That hypothesis is wrong.** The cleanup is not failing its comparison — it is never
+reached.
 
-*"Carry `destinationLost` across the relay it was being dropped in."* The page proves the brief
-never left it, the app retires the lease at once instead of waiting out the quarter hour — and
-`background.js` never listed the field, so it was dropped in between while both ends looked
-correct.
+### Measurement
 
-This is the third instance of a failure mode the codebase has already hit twice, and the comment
-in `bridge.ts` above the `/compact` start-request log line names it as open at the time of
-writing. `extension/background.js` +69/−25, `test/extension.test.ts` +33.
+`clearAcknowledgedBootstrap` in `extension/content.js` was wrapped to record every entry into
+`chrome.storage.local` (method in §7 of `2026-09-10-compaction-handoff.md`). During the window the
+tracer was live:
 
-**To verify:** the relay is an allowlist, so check that the new shape cannot drop a *future* field
-silently the way the old one did — that is the property worth a test, more than this one field.
+| | count |
+|---|---|
+| `resume` handoffs that committed | **3** (22:48:16, 04:41:03, 05:57:09) |
+| `resume` entries recorded by the tracer | **0** |
+| `worker` / `revive` entries recorded in the same window | 9 |
 
-### Also worth checking
+The tracer demonstrably worked — nine worker and revival bootstraps recorded, each showing the
+healthy shape `ackOk: true, draftHeld: false → gate-refused`, meaning the composer was already
+empty and there was nothing to clear. Not one resume.
 
-Whether either of these explains part of the wedge rate in §2. The measurement in §7 run before
-and after a merge, normalised by load, answers that — and it is a much cheaper experiment than
-the control run in §6.2.
+### Where it goes
+
+`extension/content.js`, the ack loop after a bootstrap send:
+
+```js
+for (let tries = 0; tries < 80; tries++) {
+  await sleep(500);
+  const found = boot.type === 'resume' ? bootstrapConversation() : CLF_DOM.conversationId();
+  if (found) {
+    …
+    const acknowledged = await ask({ type: 'ack', … conversationId: found … });
+    await clearAcknowledgedBootstrap(acknowledged);   // ← the only clear
+    return;
+  }
+}
+// Sent, but this tab never saw an id …
+await ask({ type: 'ack', id: boot.id, status: 'sent', agent, client: RUN_ID });   // ← no clear
+```
+
+For a resume the loop polls `bootstrapConversation()` for 80 × 500 ms = 40 s. If it never returns
+an id the loop falls through to a bare ack, and the draft is never considered.
+
+That the loop does exhaust is corroborated independently. Every commit in the log reads:
+
+```
+bridge: resume:… is done — the marked replacement message committed the continuation
+```
+
+Six consecutive handoffs, all committed **from the server-authored marker, never from the page's
+ACK** — which is exactly what a page that never obtained an id would produce. The handoff succeeds
+anyway, which is why the failed half went unnoticed.
+
+### What is still unknown
+
+Why `bootstrapConversation()` returns nothing for 40 s in a chat that demonstrably has an id —
+the app is committing against it seconds later. That is the thing to measure next, and it matters
+beyond the composer: a resume whose page never binds its id also never runs
+`rememberResumeGoalPending`, so whatever depends on that is silently skipped too.
+
+### What not to do
+
+Do not simply add a clear to the fall-through. It would tidy the symptom and leave the page still
+failing to bind its own conversation — and the earlier `clearPromptExact` fix was already removed
+once, in `c7e7344`, for being the wrong layer.
 
 ## 10. What not to do
 
