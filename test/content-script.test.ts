@@ -2547,6 +2547,34 @@ describe('recording authored message text', () => {
   });
 
   /**
+   * One authored block that contains another.
+   *
+   * `messageText` collects `.whitespace-pre-wrap` with `querySelectorAll`, which also
+   * returns matches nested inside an earlier match, and `text()` reads a node's whole
+   * subtree. So an inner block was read twice: once as part of its container and once on
+   * its own account. The recorded message then carried a second copy of that passage, and
+   * every reader that compares authored text against what was submitted — the send receipt
+   * and `matchesSubmittedUser` above all — saw a message longer than the one it sent and
+   * refused to recognise it.
+   */
+  it('reads a nested authored block once, not once per enclosing block', async () => {
+    live = await harness();
+    const section = userTurn(live.document, 'turn-user-nested', 'the opening passage');
+    const body = section.querySelector('.whitespace-pre-wrap')!;
+    const nested = live.document.createElement('div');
+    nested.className = 'whitespace-pre-wrap';
+    nested.textContent = 'the quoted passage';
+    body.append(nested);
+
+    live.hook.observe();
+    await settle();
+
+    const messages = emitted(live.sent, 'user_message');
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.event.text).toBe('the opening passagethe quoted passage');
+  });
+
+  /**
    * A turn that streamed commentary and called tools but never produced authored prose.
    *
    * The preferred path reads `.markdown`, which excludes commentary by construction. The

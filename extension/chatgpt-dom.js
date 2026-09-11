@@ -145,7 +145,19 @@ var CLF_DOM = (() => {
     return safe(() => {
       if (!node) return '';
       if (role === 'user') {
+        // Only blocks that nothing else here already contains. `querySelectorAll` also
+        // returns a match nested inside an earlier match, and `text()` reads a whole
+        // subtree, so an inner block was read twice: once as part of its container and
+        // once on its own. The recorded message then carried that passage twice, and every
+        // reader comparing authored text against what was submitted saw a message longer
+        // than the one it sent. `node` itself never counts as a container: the query cannot
+        // return it, and treating it as one would empty this preferred path.
         const parts = [...node.querySelectorAll('.whitespace-pre-wrap')]
+          .filter((part) => {
+            const outer = part.parentElement && part.parentElement.closest &&
+              part.parentElement.closest('.whitespace-pre-wrap');
+            return !outer || outer === node || !(node.contains && node.contains(outer));
+          })
           .map((part) => text(part))
           .filter(Boolean);
         if (parts.length > 0) return parts.join('\n');
