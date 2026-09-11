@@ -5711,6 +5711,63 @@ describe('unattributed activity recovery', () => {
   });
 
   /**
+   * The verdict has to outlive the turn it was reached on.
+   *
+   * The budget above is documented as bounded per chat, "because a wedged turn never ends and
+   * so never releases a turn-scoped budget" — but it compared `turnKeyFor(live)`, which changes
+   * the moment the turn does end. A wedged turn that finally gives up therefore handed the
+   * chat a fresh three reloads, on a page that had already answered three the same way.
+   *
+   * Measured on 2026-09-11: the cap fired at 18:38:41, the turn ended `failed` at 18:40:49, and
+   * the chat was reloaded again at 18:42:49. One extra round rather than the sixteen before the
+   * cap existed, but the verdict was still discarded by the event that most confirms it.
+   *
+   * A genuinely new turn is a different matter and still gets its own budget; that is the case
+   * below this one.
+   */
+  it('keeps refusing a chat whose wedged turn ended without a successor', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      // Its own conversation: the verdict this rule records now outlives the turn, so a chat
+      // another case already wedged would arrive here already refused.
+      const chat = 'cccccccc-1111-2222-3333-444444444444';
+      await events(chat, [openTurn('turn-wedged')]);
+
+      const reloads: string[] = [];
+      const round = async () => {
+        await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 15_000);
+        const repair = await maintenance();
+        if (repair) {
+          reloads.push(repair.reason);
+          await maintenance(repair.token);
+        }
+        await events(chat, [{
+          kind: 'chat_error',
+          time: Date.now(),
+          text: 'Connection interrupted. Waiting for the complete answer',
+          turnId: 'turn-wedged',
+          recoverable: true
+        }]);
+      };
+      for (let i = 0; i < 4; i++) await round();
+      expect(reloads.filter(reason => reason === 'silence')).toHaveLength(3);
+
+      // The wedged turn gives up. No new turn starts — the chat is simply done failing.
+      await events(chat, [{ kind: 'turn_end', time: Date.now(), turnId: 'turn-wedged', outcome: 'failed' }]);
+
+      // No further silence reload. The one `assistant-error` round that still gets through is
+      // that path's own per-turn budget, which is documented as per-turn on purpose — a new
+      // turn key legitimately buys it one reload, and this test is not about that rule.
+      const after = reloads.length;
+      for (let i = 0; i < 3; i++) await round();
+      expect(reloads.slice(after).filter(reason => reason === 'silence')).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
    * The other half of the same rule: only a remedy proven useless is withheld.
    *
    * A chat that goes quiet three times for three unrelated reasons has not answered anything
