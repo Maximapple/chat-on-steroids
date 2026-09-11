@@ -10685,7 +10685,14 @@ describe('truthful quiet operation status', () => {
     const view = (workers: unknown) => live!.hook.stageView({ now: 10000, changedAt: 0, progress: { workers } });
     expect(view({ active: 1, finished: 2, failed: 0, names: ['Repository audit'] })).toMatchObject({ stage: 'Worker still running: Repository audit', detail: '2 finished · 1 running' });
     expect(view({ active: 2, finished: 1, failed: 1 })).toMatchObject({ stage: '2 workers still running', detail: '1 finished · 2 running · 1 failed' });
-    expect(view({ active: 0, finished: 2, failed: 1 })).toMatchObject({ stage: 'A worker needs attention' });
+    // Named, the way the running caption beside it is. "A worker needs attention" was true and
+    // unactionable on a run with three workers; the label was already in this payload.
+    expect(view({ active: 0, finished: 2, failed: 1, failedNames: ['Repository audit'] }))
+      .toMatchObject({ stage: 'Worker failed: Repository audit', detail: '2 finished · 0 running · 1 failed' });
+    expect(view({ active: 0, finished: 1, failed: 2, failedNames: ['Repository audit', 'Docs pass'] }))
+      .toMatchObject({ stage: '2 workers failed: Repository audit, Docs pass' });
+    // A payload from an older extension build carries no names, and still says what it knows.
+    expect(view({ active: 0, finished: 2, failed: 1 })).toMatchObject({ stage: 'Worker failed: Worker' });
     expect(view({ active: 0, finished: 3, failed: 0 })).toBeNull(); // no invented consolidation
   });
   it('waits through short pauses and clears the status when real output resumes', async () => {

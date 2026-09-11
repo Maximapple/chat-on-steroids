@@ -7959,7 +7959,11 @@
       const summary = `${workers.finished} finished · ${workers.active} running${workers.failed ? ` · ${workers.failed} failed` : ''}`;
       // Running siblings are not proof that the prime is blocked on them.
       return frame(workers.active === 1 ? `Worker still running: ${workers.names?.[0] || 'Worker'}` : workers.active > 1
-        ? `${workers.active} workers still running` : 'A worker needs attention', summary);
+        ? `${workers.active} workers still running`
+        // Name it, the way the running caption beside it does. "A worker needs attention" was
+        // true and unactionable: the label was already in this payload.
+        : workers.failed === 1 ? `Worker failed: ${workers.failedNames?.[0] || 'Worker'}`
+        : `${workers.failed} workers failed${workers.failedNames?.length ? `: ${workers.failedNames.join(', ')}` : ''}`, summary);
     }
     const exec = input.backgroundExec;
     const unread = Number(exec && exec.exitedUnread);
