@@ -75,3 +75,41 @@ it('observes an exact installed card without a refresh action through the real F
   delete (dom.window.document.getElementById('schema') as any).__reactFiber$fixture.return;
   expect(await api.pluginRefreshView('Chat On Steroids Core', [tool])).toBeNull();
 });
+
+/**
+ * The settings card ChatGPT renders today.
+ *
+ * Measured against the live page on 2026-09-11, fourteen readings seven minutes apart, all
+ * identical: `reportEntity` and `headerTrailingContent` are gone from every props form in the
+ * panel, while the tools still read cleanly. The card that remains names the connector through
+ * `connectorId` and carries that connector's own mutations — the thing a list row never has.
+ *
+ * Without a card the snapshot refuses, which is why the loop above it could not end: the page
+ * reported nothing at all rather than "no refresh action here", and the app kept the row
+ * pending for thirty hours.
+ */
+it('observes the installed card ChatGPT renders without reportEntity, and reports no refresh action', async () => {
+  const { api } = page();
+  const modern = {
+    connectorId: 'asdk_app_synthetic',
+    plugin: { id: 'asdk_app_synthetic' },
+    publishConnectorHref: '/admin/connectors/asdk_app_synthetic',
+    isPending: false,
+    showUninstall: true,
+    onRemove() {}, onDelete() {}, onDisconnect() {}, onEditName() {}
+  };
+  (dom.window.document.getElementById('schema') as any).__reactFiber$fixture.return = { memoizedProps: modern };
+  (dom.window.document.getElementById('refresh') as any).remove();
+  expect(await api.pluginRefreshView('Chat On Steroids Core', [tool]))
+    .toMatchObject({ appId: 'asdk_app_synthetic', tools: [tool], refresh: null });
+});
+
+/** A list row names the connector too, and must still not count as the rendered card. */
+it('refuses a props form that names the connector without being its card', async () => {
+  const { api } = page();
+  (dom.window.document.getElementById('schema') as any).__reactFiber$fixture.return = {
+    memoizedProps: { connectorId: 'asdk_app_synthetic', plugin: { id: 'asdk_app_synthetic' }, onSelect() {} }
+  };
+  (dom.window.document.getElementById('refresh') as any).remove();
+  expect(await api.pluginRefreshView('Chat On Steroids Core', [tool])).toBeNull();
+});

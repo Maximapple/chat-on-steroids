@@ -43,6 +43,13 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **The connector settings card is recognised again after ChatGPT rebuilt that page.** The card
+  was identified through a `reportEntity` prop that no longer exists, so the companion could read
+  the tools perfectly and still refuse the page — and because that refusal reported nothing, the
+  app's refresh request stayed pending indefinitely with no reason recorded anywhere. The card is
+  now also accepted in the shape ChatGPT renders today, proved by that connector's own mutations
+  rather than by a prop name, and a page whose card cannot be read says so instead of returning in
+  silence.
 - **A handoff no longer fails because the replacement chat was still loading.** The fresh chat
   redeems its brief and then asks the app for permission to send it — and the companion refused
   that permission as a stale document whenever the tab had not finished loading yet, which for a
