@@ -5535,6 +5535,17 @@ const turnRepairSpent = new Map<string, { sessionId: string; turnKey: string }>(
 const SILENCE_RELOAD_ATTEMPTS = 3;
 const silenceProvenUseless = new Map<string, { turnKey: string; error: string; attempts: number; told: boolean }>();
 
+/**
+ * Whether a recorded silence verdict still describes what the chat is doing.
+ *
+ * It holds while the chat is on the same turn, and it keeps holding while no turn is running at
+ * all — a wedged turn that finally ends has not become a working chat. Only a turn actually
+ * running again is a new question, and that gets its own budget.
+ */
+function silenceEpisodeHolds(recorded: string, live: { activeTurnId: string | null; endedTurns: number } | undefined): boolean {
+  return recorded === turnKeyFor(live) || !live?.activeTurnId;
+}
+
 /** The identity of the turn a chat is on right now, for the error reload's budget. */
 function turnKeyFor(live: { activeTurnId: string | null; endedTurns: number } | undefined): string {
   return live?.activeTurnId ?? `ended:${live?.endedTurns ?? 0}`;
@@ -5604,7 +5615,11 @@ function queueBrowserRecovery(
   if (reason === 'silence') {
     const proven = silenceProvenUseless.get(conversationId);
     const live = liveConversations().find((entry) => entry.conversationId === conversationId);
-    if (proven && proven.turnKey === turnKeyFor(live) && proven.attempts >= SILENCE_RELOAD_ATTEMPTS) {
+    // A turn *ending* is not a new episode. `turnKeyFor` changes the moment `activeTurnId`
+    // clears, so comparing it alone handed a chat that had just given up a fresh budget — the
+    // event that most confirms the verdict was the one discarding it. Only a turn actually
+    // running again makes this a different question.
+    if (proven && silenceEpisodeHolds(proven.turnKey, live) && proven.attempts >= SILENCE_RELOAD_ATTEMPTS) {
       if (!proven.told) {
         proven.told = true;
         // Sixteen silent retries with no user-visible verdict was its own half of this defect:
@@ -5814,7 +5829,9 @@ async function noteRecoveryObservations(
       const turnKey = turnKeyFor(live);
       const error = (item.text ?? '').slice(0, 240);
       const proven = silenceProvenUseless.get(conversationId);
-      if (proven && proven.turnKey === turnKey && proven.error === error) proven.attempts += 1;
+      // Counted under the same rule the refusal reads, or the count resets itself the moment
+      // the turn ends and the budget is silently refilled.
+      if (proven && proven.error === error && silenceEpisodeHolds(proven.turnKey, live)) proven.attempts += 1;
       else silenceProvenUseless.set(conversationId, { turnKey, error, attempts: 1, told: false });
     }
     // Auto-compaction owns this chat's recovery clock until its ticket commits or is cancelled.
