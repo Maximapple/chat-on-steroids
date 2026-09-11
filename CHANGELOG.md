@@ -43,6 +43,12 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A chat that has stopped answering is not reloaded again just because its turn gave up.** The
+  budget that stops reloading a chat whose every reload comes back the same way is documented as
+  bounded per chat, but it compared the turn it was reached on — so the moment the wedged turn
+  finally ended, the verdict was discarded and the chat earned a fresh set of reloads. The verdict
+  now keeps holding while no turn is running; only a turn actually running again is a new
+  question.
 - **A handoff no longer fails because the replacement chat was still loading.** The fresh chat
   redeems its brief and then asks the app for permission to send it — and the companion refused
   that permission as a stale document whenever the tab had not finished loading yet, which for a
