@@ -51,12 +51,12 @@ import { composeCommandBatch, parseCommandBatchSections } from '../codex/command
 import { formatExecOutputForModel, newStreamOutput } from '../codex/exec-output.js';
 import { DEFAULT_TRUNCATION_POLICY, EXEC_OUTPUT_CEILING_POLICY, unifiedExecManager } from '../codex/manager.js';
 import {
+  MAX_UNREAD_EXEC_RESULTS_PER_CONVERSATION,
   backgroundExecObligations,
   execOwnershipDenied,
   execProcessIdsForConversation,
   execTrackedProcessIds,
   forgetExecOwner,
-  MAX_UNREAD_EXEC_RESULTS_PER_CONVERSATION,
   noteExecAttended,
   noteExecOwner,
   provenConversation,
