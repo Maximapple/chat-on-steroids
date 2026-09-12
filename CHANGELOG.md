@@ -43,6 +43,13 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A wedged chat is no longer reloaded forever because ChatGPT rephrases the same failure.** The
+  budget that stops reloading a chat nothing is reviving counted per error message, and ChatGPT
+  reports this one state as both "Connection interrupted" and "Message delivery timed out" —
+  switching between them mid-episode, and even between two variants of the second. Every switch
+  refilled the budget, so the limit could never actually be reached. The per-message count stays,
+  because a chat whose trouble is genuinely different each time still deserves its attempts; a
+  second, wording-blind ceiling now bounds the episode.
 - **The connector settings card is recognised again after ChatGPT rebuilt that page.** The card
   was identified through a `reportEntity` prop that no longer exists, so the companion could read
   the tools perfectly and still refuse the page — and because that refusal reported nothing, the
