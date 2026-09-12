@@ -48,6 +48,14 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A compaction that never started now says what stopped it.** When the message box in a chat
+  already held a draft, ChatGPT refused the handoff instruction, and the app gave the ticket up
+  rather than reloading into the same refusal forever — correctly, because a draft survives
+  reloads. But the timeline said only `Failed — handoff_never_sent`, while the companion already
+  knew the sentence that makes it a five-second fix: clear the message box. The page now names
+  which barrier it hit, from a closed set, and the app writes the explanation. The durable state
+  is unchanged, an unrecognised name falls back to the plain code, and the sweep that gives up
+  after five unanswered pickups says that instead.
 - **A resumed chat recognises its own first message again.** After Compact & Resume opened the
   successor chat and sent the brief, the page could not accept that message as its own send
   receipt: it compared the conversation named by the page's React tree against the one in the
