@@ -4,19 +4,23 @@ import { JSDOM } from 'jsdom';
 import { expect, it, vi } from 'vitest';
 
 const source = readFileSync(new URL('../extension/content.js', import.meta.url), 'utf8');
-it.each([false, true])('tab retirement preserves a document whose plugin refresh is active (%s)', async pluginRefreshBusy => {
+it.each([
+  { pluginRefreshBusy: false, pendingTools: 0 },
+  { pluginRefreshBusy: true, pendingTools: 0 },
+  { pluginRefreshBusy: false, pendingTools: 1 }
+])('tab retirement preserves active plugin refresh or local tools (%j)', async ({ pluginRefreshBusy, pendingTools }) => {
   const start = source.indexOf("      if (message.type === 'clf-tab-close-check')");
   const section = source.slice(start, source.indexOf("      if (message.type === 'clf-close-temporary-planner')", start));
   let resolve!: (value: any) => void;
   const response = new Promise<any>(done => { resolve = done; });
   const context = vm.createContext({ message: { type: 'clf-tab-close-check', conversationId: null }, sendResponse: resolve,
     startupCommandId: null, RUN_ID: 'document', OPENED_CONVERSATION: null, conversationId: null, commandsHandled: new Set(),
-    alive: true, epoch: 1, desktopDecision: null, fiberTerminalMessageId: null, generating: false,
+    alive: true, epoch: 1, desktopDecision: null, fiberTerminalMessageId: null, generating: false, pendingTools,
     desktopInputBusy: false, modelCatalogBusy: false, pluginRefreshBusy, commandAttempt: null, commandJournalGate: false,
     queue: [], flushWork: null, CLF_DOM: { conversationId: () => null, generating: () => false, composer: () => ({ textContent: '' }), hasComposerAttachments: () => false }
   });
   vm.runInContext(`(function () { ${section} })()`, context);
-  expect(await response).toMatchObject({ safe: !pluginRefreshBusy });
+  expect(await response).toMatchObject({ safe: !pluginRefreshBusy && pendingTools === 0 });
 });
 it('defers desktop delivery while catalog inspection owns the provider picker', async () => {
   const context = vm.createContext({ desktopInputBusy: false, modelCatalogBusy: true });
@@ -84,6 +88,23 @@ it('inspects an idle existing conversation without clearing or sending its compo
   expect(f.clear).not.toHaveBeenCalled();
   expect(f.ask).toHaveBeenCalledWith(expect.objectContaining({ type: 'model_catalog' }));
 });
+it('reads a running Pro tab passively without clearing its draft or opening the picker', async () => {
+  const composer = { textContent: 'Unsent follow-up' };
+  const models = [{ id: '6', label: 'GPT-6 Pro', efforts: ['pro'], aliases: ['gpt-6-pro'] }];
+  const ask = vi.fn(async () => ({ ok: true })), prepare = vi.fn(), inspect = vi.fn(), clear = vi.fn();
+  const context = vm.createContext({ URL, Date, alive: true, epoch: 1, conversationId: 'existing-chat', generating: true,
+    desktopInputBusy: false, modelCatalogBusy: false, location: { pathname: '/c/existing-chat', href: 'https://chatgpt.com/c/existing-chat' }, ask,
+    CLF_DOM: { composerVisible: () => true, composer: () => composer, generating: () => true, hasComposerAttachments: () => false,
+      inspectVisibleModelSettings: async (current: () => boolean) => current() ? models : null,
+      prepareChatModelSurface: prepare, inspectModelSettings: inspect, clearPromptExact: clear }
+  });
+  vm.runInContext(`${section}\nglobalThis.run = inspectAppModelCatalog;`, context);
+  expect(await (context.run as Function)({ nonce, expiresAt: Date.now() + 10000 })).toBe(true);
+  expect(ask).toHaveBeenCalledWith({ type: 'model_catalog', nonce, models });
+  expect(prepare).not.toHaveBeenCalled(); expect(inspect).not.toHaveBeenCalled(); expect(clear).not.toHaveBeenCalled();
+  expect(composer.textContent).toBe('Unsent follow-up');
+});
+
 it('binds discovery to the Chat composer after Work replaces its composer', async () => {
   let composer = { textContent: '' };
   const old = composer, ask = vi.fn(async () => ({ ok: true }));

@@ -15,10 +15,14 @@ const blockedText = [
   { label: 'private maintainer email', value: ['totec448', 'gmail.com'].join('@') },
   { label: 'Claude session trailer', value: ['Claude', 'Session:'].join('-') },
   { label: 'Claude session URL', value: ['https://claude.ai/code/', 'session_'].join('') },
-  { label: 'private Windows user path', value: ['C:', 'Users', 'totec'].join('\\') },
+  ...['\\', '\\\\', '/'].map(separator => ({
+    label: 'private Windows user path', value: ['C:', 'Users', 'totec'].join(separator),
+  })),
   { label: 'private macOS user path', value: ['', 'Users', 'maxim', ''].join('/') },
   { label: 'private machine hostname', value: ['Maxims', 'MacBook', 'Pro'].join('-') },
 ];
+
+const privateEvidence = ['outputs/', '.codex-remote-attachments/', 'docs/audit-user-requests-20260905-06.md'];
 
 function runGit(args, { allowFailure = false, encoding = 'utf8' } = {}) {
   const result = spawnSync('git', args, {
@@ -60,6 +64,14 @@ function parseGitIdent(ident) {
 
 function checkIndexedOrCommittedFiles(treeish) {
   const failures = [];
+  const names = String(runGit(treeish === '--cached'
+    ? ['ls-files', '--cached', '-z']
+    : ['ls-tree', '-r', '--name-only', '-z', treeish]).stdout).split('\0');
+  for (const excluded of privateEvidence) {
+    if (names.some(name => excluded.endsWith('/') ? name.startsWith(excluded) : name === excluded)) {
+      failures.push(`${treeish} tracks private evidence excluded from publication (${excluded})`);
+    }
+  }
   for (const { label, value } of blockedText) {
     const args = ['grep', '-q', '-I', '-i', '-F', '-e', value];
     if (treeish === '--cached') args.push('--cached');

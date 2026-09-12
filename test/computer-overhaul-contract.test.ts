@@ -13,7 +13,11 @@ describe('desktop helper overhaul contract', () => {
 
   it('keeps observation coalesced and window capture background-first', () => {
     expect(HELPER_SCRIPT).toContain("'snapshot'");
-    expect(HELPER_SCRIPT).toContain('CaptureWindow');
+    expect(HELPER_SCRIPT).toContain('[CosWindowsCapture]::Capture');
+    // The call, not the word: the C# that paints the pointer still names PrintWindow in its
+    // comment when explaining what does not composite a cursor.
+    expect(HELPER_SCRIPT).not.toMatch(/PrintWindow\s*\(/);
+    expect(HELPER_SCRIPT).not.toContain("$mode = 'screen_fallback'");
     expect(HELPER_SCRIPT).toContain("$mode = 'window'");
     expect(HELPER_SCRIPT).not.toContain('$root.FindAll(');
     expect(HELPER_SCRIPT).toContain('TreeWalker]::ControlViewWalker');
@@ -104,11 +108,26 @@ describe('desktop helper overhaul contract', () => {
    * letters/digits all resolve, and an unknown name is still refused.
    */
   it('accepts the button and key names computer use emits', () => {
-    expect(HELPER_SCRIPT).toContain("'ARROWUP'=0x26; 'ARROWDOWN'=0x28; 'ARROWLEFT'=0x25; 'ARROWRIGHT'=0x27;");
-    expect(HELPER_SCRIPT).toContain("'WIN'=0x5B; 'SUPER'=0x5B; 'CMD'=0x5B; 'META'=0x5B;");
-    expect(HELPER_SCRIPT).toContain("'CTRL'=0x11; 'CONTROL'=0x11; 'ALT'=0x12; 'OPTION'=0x12; 'SHIFT'=0x10;");
+    // The table moved from a PowerShell hashtable into the compiled key source; the names it
+    // has to accept are the same, so they are asserted by name and code rather than by syntax.
+    for (const entry of ['{"ARROWUP",Extended|0x26}', '{"ARROWDOWN",Extended|0x28}',
+      '{"ARROWLEFT",Extended|0x25}', '{"ARROWRIGHT",Extended|0x27}']) {
+      expect(HELPER_SCRIPT, entry).toContain(entry);
+    }
+    for (const entry of ['{"WIN",Extended|0x5B}', '{"SUPER",Extended|0x5B}',
+      '{"CMD",Extended|0x5B}', '{"META",Extended|0x5B}']) {
+      expect(HELPER_SCRIPT, entry).toContain(entry);
+    }
+    for (const entry of ['{"CTRL",0x11}', '{"CONTROL",0x11}', '{"ALT",0x12}',
+      '{"OPTION",0x12}', '{"SHIFT",0x10}']) {
+      expect(HELPER_SCRIPT, entry).toContain(entry);
+    }
     // An unrecognised name must still fail rather than resolving to something arbitrary.
-    expect(HELPER_SCRIPT).toContain('throw "BAD_KEY: Unknown key: $name.');
+    // Fails closed and says what it would have taken. The refusal moved into the compiled key
+    // source with the table; the QA finding it answers is unchanged — a helper that only says
+    // "unsupported" leaves the model nothing to correct itself from.
+    expect(HELPER_SCRIPT).toContain('BAD_KEY: unsupported key ');
+    expect(HELPER_SCRIPT).toContain('Accepted: one printable character, F1-F24');
 
     const swift = readFileSync(path.join(process.cwd(), 'native/macos-desktop-helper/main.swift'), 'utf8');
     expect(swift).toContain('case "arrowleft": return "left"');
@@ -174,13 +193,18 @@ describe('the Windows drag is paced like a real one', () => {
     expect(HELPER_SCRIPT).toContain('const int DragDropDwellMs');
     expect(HELPER_SCRIPT).toContain('const double DragMaxStep');
     expect(HELPER_SCRIPT).toMatch(
-      /Mouse\(down[\s\S]*Sleep\(DragPressHoldMs\)[\s\S]*Sleep\(DragStepMs\)[\s\S]*Sleep\(DragDropDwellMs\)[\s\S]*Mouse\(up/
+      // The step pause is budgeted against a stopwatch now rather than slept at a fixed size,
+      // so what is pinned is the order and that DragStepMs still governs it: press, settle,
+      // travel in paced steps, dwell, release.
+      /Mouse\(down[\s\S]*Sleep\(DragPressHoldMs\)[\s\S]*DragStepMs[\s\S]*Sleep\(DragDropDwellMs\)[\s\S]*Mouse\(up/
     );
     // Bounded for the whole path, not per hop, so the cost of a drag does not grow with the
     // number of waypoints it happens to name — and cannot outlast the deadline that would kill
     // the helper before it releases the button.
-    expect(HELPER_SCRIPT).toContain('const int DragMaxTotalSteps = 180;');
-    expect(HELPER_SCRIPT).toContain('steps = (int)System.Math.Round(DragMaxTotalSteps * distance / total);');
+    // The bound is now derived from the requested duration and capped outright, rather than
+    // apportioned from a total-step budget. Same guarantee: one ceiling for the whole path, so
+    // the cost of a drag does not grow with the number of waypoints it happens to name.
+    expect(HELPER_SCRIPT).toContain('int steps = Math.Min(256, Math.Max(2, (int)Math.Ceiling(durationMs / 10.0)));');
     expect(HELPER_SCRIPT).not.toContain('if (steps > 240) steps = 240;');
   });
 });
@@ -206,7 +230,7 @@ describe('the Windows drag is paced like a real one', () => {
  * the ref was not from the most recent observation, which is true and unactionable.
  */
 describe('a browser batch offers only refs that still resolve', () => {
-  const tool = readFileSync(path.join(process.cwd(), 'src/main/mcp/tools-desktop.ts'), 'utf8');
+  const tool = readFileSync(path.join(process.cwd(), 'src/main/mcp/tools-browser.ts'), 'utf8');
 
   it('drops every observation but the last from what it prints', () => {
     expect(tool).toContain('const newestObservation = blocks.reduce(');
@@ -219,7 +243,7 @@ describe('a browser batch offers only refs that still resolve', () => {
 
 describe('the pointer never reports a position outside the image', () => {
   const source = readFileSync(path.join(process.cwd(), 'src/main/computer/index.ts'), 'utf8');
-  const tool = readFileSync(path.join(process.cwd(), 'src/main/mcp/tools-desktop.ts'), 'utf8');
+  const tool = readFileSync(path.join(process.cwd(), 'src/main/mcp/tools-desktop-macos.ts'), 'utf8');
 
   it('bounds the image coordinate by the frame it names', () => {
     expect(source).toContain('const inFrame = current');
