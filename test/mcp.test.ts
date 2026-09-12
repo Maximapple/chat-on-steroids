@@ -1728,13 +1728,13 @@ describe('desktop capabilities', () => {
     const config = { ...defaultConfig('win32'), capabilities: withCaps({ screen: true, control: true }) };
 
     ctx.readOnly = true;
-    ctx.caps = effectiveCapabilities({ ...config, readOnly: true }, 'win32');
+    ctx.caps = effectiveCapabilities({ ...config, readOnly: true }, platform);
     expect(ctx.caps.screen).toBe(true);
     expect(ctx.caps.control).toBe(false);
     expect(toolNames(await desktop('tools/list'))).toEqual(IS_WINDOWS ? [...WINDOWS_COMPUTER_READ_METHODS, 'exec'].sort() : ['exec', 'observe']);
 
     ctx.readOnly = false;
-    ctx.caps = effectiveCapabilities({ ...config, readOnly: false }, 'win32');
+    ctx.caps = effectiveCapabilities({ ...config, readOnly: false }, platform);
     expect(toolNames(await desktop('tools/list'))).toContain(IS_WINDOWS ? 'click' : 'computer');
   });
 
@@ -1766,7 +1766,11 @@ describe('desktop capabilities', () => {
   // it, not because the checkbox is off, so the refusal must name Read-only and not send the
   // user hunting for a permission that may already be granted.
   it('blames Read-only by name instead of the individual permission it overrode', async () => {
-    const config = { ...defaultConfig('win32'), capabilities: withCaps({ screen: true, control: true }) };
+    // The host's own platform, not a hardcoded one: the tools registered on this surface come
+    // from `process.platform`, so computing capabilities for a different one publishes Windows
+    // methods against a macOS registrar and the refusal that comes back is the wrong refusal.
+    const platform = process.platform;
+    const config = { ...defaultConfig(platform), capabilities: withCaps({ screen: true, control: true }) };
     // Expose the mutating tool first, the same way a real session would have before Read-only
     // was switched on mid-run — exposedCaps only ever widens, so a fresh context that starts in
     // read-only mode never registers it at all and there is nothing to call. Which tool that is
