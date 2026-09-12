@@ -5768,6 +5768,57 @@ describe('unattributed activity recovery', () => {
   });
 
   /**
+   * ChatGPT changing its wording is not a new problem.
+   *
+   * The budget keyed itself on the error text, so a chat that alternates between the two
+   * messages ChatGPT uses for this state refilled it every time the wording changed — and it
+   * does change, reliably. Measured on 2026-09-12, one chat, one turn:
+   *
+   *   07:24:19  "Connection interrupted. Waiting for the complete answer"
+   *   07:26:49  "Connection interrupted. …"
+   *   07:29:19  "Connection interrupted. …"
+   *   07:31:19  stopped: three reloads, same failure
+   *   07:32:19  "Connection interrupted. …"                        refused, correctly
+   *   07:36:25  "Message delivery timed out. Please try again."    record replaced, budget full
+   *   07:38:33  reloaded again
+   *
+   * The same pair appeared the evening before. Two variants of one message — with and without
+   * a trailing "Retry" — already count as different episodes, which is how brittle keying on
+   * the text is. What the verdict is about is not which words the page shows: it is that
+   * reloading this chat did not bring it back.
+   */
+  it('keeps refusing when the page starts reporting the same wedge with different words', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const chat = 'dddddddd-1111-2222-3333-555555555555';
+      await events(chat, [openTurn('turn-two-errors')]);
+
+      const reloads: string[] = [];
+      const round = async (text: string) => {
+        await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 15_000);
+        const repair = await maintenance();
+        if (repair) {
+          reloads.push(repair.reason);
+          await maintenance(repair.token);
+        }
+        await events(chat, [{ kind: 'chat_error', time: Date.now(), text, turnId: 'turn-two-errors', recoverable: true }]);
+      };
+      for (let i = 0; i < 4; i++) await round('Connection interrupted. Waiting for the complete answer');
+      expect(reloads.filter(reason => reason === 'silence')).toHaveLength(3);
+
+      // ChatGPT switches wording for the same wedge. The per-failure count resets, as it must
+      // for a chat whose trouble really is different — but the episode has already spent its
+      // ceiling, so nothing more is tried. Before this, every switch refilled the budget.
+      const after = reloads.length;
+      for (let i = 0; i < 5; i++) await round('Message delivery timed out. Please try again.');
+      expect(reloads.slice(after).filter(reason => reason === 'silence')).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
    * The other half of the same rule: only a remedy proven useless is withheld.
    *
    * A chat that goes quiet three times for three unrelated reasons has not answered anything
