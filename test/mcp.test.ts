@@ -1750,7 +1750,10 @@ describe('desktop capabilities', () => {
       arguments: IS_WINDOWS ? { window: { app: 'fixture.exe', id: 1 }, x: 5, y: 5 } : { actions: [{ type: 'click', x: 5, y: 5 }] }
     });
     expect(clicked.body.result?.isError).toBe(true);
-    expect(textOf(clicked)).toContain(IS_WINDOWS ? 'TOOL_DISABLED' : 'mouse and keyboard control is disabled');
+    // Both platforms refuse through the shared message now, which names the tool and the
+    // setting rather than restating the capability in its own words.
+    expect(textOf(clicked)).toContain('TOOL_DISABLED');
+    expect(textOf(clicked)).toContain('Control mouse and keyboard');
 
     const written = await desktop('tools/call', {
       name: IS_WINDOWS ? 'write_clipboard' : 'computer',
