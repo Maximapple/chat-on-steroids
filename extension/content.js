@@ -8787,7 +8787,7 @@
         // durable checkpoint still proves no Send happened (`not-attempted` or
         // `attempted-unresolved`). If another page crossed sourceDispatch meanwhile, this refuses
         // and the ambiguous attempt remains alive rather than being cancelled underneath it.
-        const lost = await ask({ type: 'compact', conversationId: forId, token, sourceLost: true }).catch(() => null);
+        const lost = await ask({ type: 'compact', conversationId: forId, token, sourceLost: true, reason: 'composer_occupied' }).catch(() => null);
         if (lost && lost.ok === true && lost.data && lost.data.aborted === true) job = null;
         else localError = replyError(lost) || 'The blocked handoff could not be safely retired; it was not sent twice.';
       }
@@ -8871,7 +8871,7 @@
         // one of them at once. Left unreported, this exact state sat armed for the six-hour TTL
         // with no pickup able to re-ask — and kept the chat out of browser recovery the whole
         // time. The app ends the transaction; nothing is re-sent, here or anywhere.
-        void ask({ type: 'compact', conversationId: forId, token, sourceLost: true }).catch(() => undefined);
+        void ask({ type: 'compact', conversationId: forId, token, sourceLost: true, reason: 'send_refused' }).catch(() => undefined);
         localError = 'ChatGPT did not take the handoff instruction. Nothing was sent twice, and this attempt has been given up; compaction will be offered again.';
         renderControl();
         return;

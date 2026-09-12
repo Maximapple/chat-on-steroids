@@ -10786,7 +10786,12 @@ describe('the Compact & resume control', () => {
 
     const compacts = live.sent.filter((message) => message.type === 'compact');
     expect(compacts[0]).toMatchObject({ ticket: true, automatic: true });
-    expect(compacts).toContainEqual(expect.objectContaining({ token: 'tok-auto-page-error', sourceLost: true }));
+    // Named, not just reported: the app turns this into the one sentence the timeline shows,
+    // and without it a person sees `handoff_never_sent` and no way to act on it. The pill on
+    // this page already says the useful thing; this is what carries it to the app.
+    expect(compacts).toContainEqual(
+      expect.objectContaining({ token: 'tok-auto-page-error', sourceLost: true, reason: 'composer_occupied' })
+    );
     expect(compacts.some((message) => message.cancel === true)).toBe(false);
     expect(live.sent.some((message) => message.type === 'compact' && message.sourceAttempt === true)).toBe(false);
     expect(composerText(live.document)).toBe('draft that makes prompt insertion fail');
