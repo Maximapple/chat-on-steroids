@@ -231,6 +231,25 @@ it. Reaching it may be by design; reaching it *silently* is not.
 and the user reports seeing it often. The branch already builds a `finished · running · failed`
 summary one line above.
 
+### 8.4 A checkpoint the page reported does not reach the app — OBSERVED, not investigated
+
+Seen once, in the same instrumented handoff that settled §9c, twelve seconds before the brief was
+captured:
+
+```
+11:45:20.904 warn  bridge: /compact carried token _sIPjqfp but matched no checkpoint.
+                   A checkpoint the page reported is not reaching the app; check the service
+                   worker forwards it.
+```
+
+The handoff then succeeded: the brief was captured at 11:45:20.905, the replacement chat opened,
+and the continuation committed at 11:45:32. So this is not a failure the user would notice, which
+is the same shape as the defect in §9b — a half that quietly does not work behind one that does.
+
+Nothing beyond the warning is known. It was not reproduced, not counted across runs, and the
+forwarding path the message points at was not read. Recorded here so it is not rediscovered from
+scratch; it needs its own measurement before anyone changes the service worker.
+
 ## 9. The two branches from an earlier draft — CORRECTED, do not merge
 
 An earlier version of this report asked for `fix/restored-compaction-silence-check` and
