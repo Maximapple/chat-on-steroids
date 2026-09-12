@@ -53,6 +53,7 @@ function fixture() {
   const state = { bucketSelections: selections[0]!, currentBucket: 2, selectedVersionEntry: versions[0]!, currentSelection: selections[0]![1]! };
   const props = { modelsData: { versions }, composerIntelligencePickerState: state, modelSwitcherDenialsBySlug: {}, conversation: { privateSecret: 'must-never-cross' } };
   const trigger = doc.querySelector('button')!;
+  (trigger as any).__reactFiber$test = { memoizedProps: props, return: null };
   const actions = vi.fn();
   let frozen = false;
   const render = () => {
@@ -152,9 +153,58 @@ it('invalidates mounted selection proof when provider state becomes unrecognized
   f.state.currentSelection.thinkingEffort = 'unknown-provider-value';
   expect(await read()).toBeNull();
 });
+it('observes direct Chrome selection with the picker closed and invalidates another route', async () => {
+  const f = fixture();
+  page.window.document.querySelector('[data-testid="composer-trailing-actions"]')!.removeAttribute('data-testid');
+  const plus = page.window.document.createElement('button');
+  plus.id = 'composer-plus-btn'; plus.setAttribute('aria-haspopup', 'menu');
+  page.window.document.querySelector('form')!.append(plus);
+  const trigger = page.window.document.querySelector('button')!;
+  trigger.textContent = 'Extra High';
+  (trigger as any).__reactFiber$test = { memoizedProps: {}, return: { memoizedProps: { currentModelId: 'gpt-5-6-thinking' }, return: null } };
+  const scan = () => new Promise<void>(resolve => {
+    const receive = (event: MessageEvent) => { if (event.data?.source === 'clf-fiber-reply') { page.window.removeEventListener('message', receive as any); resolve(); } };
+    page.window.addEventListener('message', receive as any);
+    page.window.postMessage({ source: 'clf-fiber-ask', nonce: 'passive-test' }, page.window.location.origin);
+  });
+  await scan();
+  expect(page.window.document.querySelector('[data-testid="composer-intelligence-picker-content"]')).toBeNull();
+  expect(f.actions).not.toHaveBeenCalled();
+  expect(f.api.visibleModelSelection()).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' });
+  const owner = (trigger as any).__reactFiber$test.return;
+  owner.return = { memoizedProps: { currentModelId: 'different-model' }, return: null };
+  await scan();
+  expect(f.api.visibleModelSelection()).toBeNull();
+  owner.return = null;
+  await scan();
+  page.window.history.pushState({}, '', '/c/other');
+  expect(f.api.visibleModelSelection()).toBeNull();
+  trigger.textContent = 'Unrecognized effort';
+  await scan();
+  page.window.history.pushState({}, '', '/');
+  expect(f.api.visibleModelSelection()).toBeNull();
+});
 it('keeps an explicit model denial unavailable even when the preset is visible', async () => {
   const f = fixture(); (f.props.modelSwitcherDenialsBySlug as any)['future-model'] = { reason: 'workspace_policy' };
   expect(await f.api.inspectModelSettings()).toEqual([{ id: 'gpt-5-6-thinking', label: 'GPT-5.6 Sol', efforts: ['medium', 'high'], aliases: ['gpt-5-6-thinking'] }]);
+});
+it('reads the September closed 6 Pro dropdown without opening or changing a working composer', async () => {
+  const f = fixture(), doc = page.window.document, trigger = doc.querySelector('button')!;
+  const pro = f.selections[0]![2]!;
+  pro.availability.status = 'available';
+  f.state.currentBucket = pro.bucket; f.state.currentSelection = pro;
+  trigger.innerHTML = '<span>6</span><span>Pro</span>';
+  (trigger as any).__reactFiber$test = { memoizedProps: { dropdownContent: { props: f.props } }, return: null };
+  doc.querySelector('#prompt-textarea')!.textContent = 'Unsent user draft';
+  doc.querySelector('[data-testid="send-button"]')!.setAttribute('data-testid', 'stop-button');
+  expect(await f.api.inspectVisibleModelSettings()).toContainEqual({ id: 'gpt-6-pro', label: 'GPT-6 Pro', efforts: ['pro'], aliases: ['gpt-6-pro'] });
+  expect(f.api.visibleModelSelection()).toEqual({ model: 'gpt-6-pro', reasoningEffort: 'pro' });
+  expect(doc.querySelector('[data-testid="composer-intelligence-picker-content"]')).toBeNull();
+  expect(f.actions).not.toHaveBeenCalled();
+  expect(doc.querySelector('#prompt-textarea')!.textContent).toBe('Unsent user draft');
+  (f.props.modelSwitcherDenialsBySlug as any)['gpt-6-pro'] = { reason: 'workspace_policy' };
+  expect(await f.api.inspectVisibleModelSettings()).not.toContainEqual(expect.objectContaining({ id: 'gpt-6-pro' }));
+  expect(f.api.visibleModelSelection()).toBeNull();
 });
 it('recognizes the provider min effort as Low without invalidating the account catalog', async () => {
   const f = fixture(); f.selections[0]![0]!.thinkingEffort = 'min';

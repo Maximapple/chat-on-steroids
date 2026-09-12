@@ -13,7 +13,7 @@ import { effectiveCapabilities, getConfig } from './config.js';
 import { logError, logInfo, logWarn } from './logger.js';
 import { lastRequestAt, startMcpServer, tunnelProbeHeaders, type McpEndpoint } from './mcp/server.js';
 import { lastToolCallAt } from './mcp/tools.js';
-import { SURFACE_LIST, surfaceIsUseful, type SurfaceId } from './mcp/surfaces.js';
+import { SURFACE_LIST, surfaceIsUseful, desktopToolNames, type SurfaceId } from './mcp/surfaces.js';
 import { getSecret } from './secrets.js';
 import { startTunnel, TunnelError, type TunnelHandle } from './tunnel/index.js';
 import { desktopAutomationSupported } from './platform.js';
@@ -146,17 +146,7 @@ function toolsFor(id: SurfaceId): string[] {
   const config = getConfig();
   const caps = effectiveCapabilities(config);
   if (id === 'desktop') {
-    const computer = caps.control || caps.clipboardRead || caps.clipboardWrite;
-    // `browser` was added to this surface and never added here, so the app undercounted its own
-    // tools — "9 total" where the server serves ten. It gates on control exactly as the
-    // registration does, and getting the two out of step is how a display disagrees with a
-    // server about what exists.
-    return [
-      ...(caps.screen ? ['observe'] : []),
-      ...(computer ? ['computer'] : []),
-      ...(caps.control ? ['browser'] : [])
-    ];
-  }
+    return desktopToolNames(caps);  }
   const tools: string[] = [];
   if (caps.read || caps.browse || caps.metadata) tools.push('read');
   if (caps.read) tools.push('view_image');

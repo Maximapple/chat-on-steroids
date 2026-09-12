@@ -1,4 +1,5 @@
 import { applyLoginStartup, supportsLoginStartup } from './window-lifecycle.js';
+import { prepareSessionPrompt } from './session/prompt.js';
 import { noteChatOrigin } from './session/recorder.js';
 import { REASONING_EFFORTS } from '../shared/session.js';
 import { safeExternalLink } from '../shared/external-link.js';
@@ -49,7 +50,7 @@ import { forgetExposedSurface } from './mcp/server.js';
 import { runDiagnostics } from './diagnostics.js';
 import { formatLogAsJson, formatLogForClipboard, getLog, logInfo, onLog } from './logger.js';
 import { RESERVED_ROOT_NAMES, uniqueRootName, validateNewRoot, SandboxError, resolvePath } from './sandbox.js';
-import { addProject, listProjects } from './projects.js';
+import { addProject, listProjects, removeProject } from './projects.js';
 import { hasSecret, isEncryptionAvailable, secureStorageStatus, setSecret } from './secrets.js';
 import { bundledVersion, locateBinary } from './tunnel/locate.js';
 import { TUNNEL_ID_PATTERN } from './tunnel/index.js';
@@ -518,6 +519,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   });
 
   handle('projects:list', () => listProjects());
+  handle('projects:remove', async (payload) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(payload);
+    const project = await removeProject(id);
+    push('session:changed');
+    return project;
+  });
   handle('projects:add', async () => {
     const window = getWindow();
     if (!window) throw new Error('No window');
@@ -811,8 +818,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   handle('chatModels:request', async () => startChatModelDiscovery());
   handle('sessions:controls', async (payload) => sessionControlsFor(sessionIdArg.parse(payload).id));
   handle('sessions:automation', async (payload) => {
-    const { id, automation } = sessionIdArg.extend({ automation: z.enum(['off', 'goal', 'loop']) }).parse(payload);
-    return setSessionAutomation(id, automation);
+    const { id, automation, afterTurn } = sessionIdArg.extend({ automation: z.enum(['off', 'goal', 'loop']), afterTurn: z.boolean().optional() }).parse(payload);
+    return setSessionAutomation(id, automation, afterTurn);
   });
   handle('sessions:objective', async (payload) => {
     const { id, text, mode } = sessionIdArg.extend({ text: z.string().max(16000), mode: z.enum(['goal', 'loop']) }).parse(payload);
@@ -844,7 +851,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     const { id, sourceSessionId } = z.object({ id: z.string().uuid(), sourceSessionId: z.string().min(8).max(64) }).parse(payload);
     return retryGoalBrowserHelper(sourceSessionId, id);
   });
-  handle('sessions:editInput', async (payload) => { const { id, text, afterTurn } = z.object({ id: z.string().uuid(), text: z.string().trim().min(1).max(16000), afterTurn: z.boolean().optional() }).parse(payload); return editQueuedInput(id, text, afterTurn); });
+  handle('sessions:editInput', async (payload) => { const { id, text, afterTurn } = z.object({ id: z.string().uuid(), text: inputArgs.shape.text, afterTurn: z.boolean().optional() }).parse(payload); return editQueuedInput(id, text, afterTurn); });
   handle('sessions:cancelInput', async (payload) => cancelDesktopInput(z.object({ id: z.string().uuid() }).parse(payload).id));
   handle('sessions:inputAutomation', async payload => {
     const { id, mode } = z.object({ id: z.string().uuid(), mode: z.enum(['off', 'goal', 'loop']) }).parse(payload);
@@ -1048,12 +1055,15 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     },
     changed: () => push('session:changed'),
     recordDelivered: (entry) => getConfig().sessions.record ? recordDeliveredInput(entry) : Promise.resolve(true),
-    prepareText: (entry) => {
+    prepareText: async (entry, limits) => {
       const control = entry.conversationId ? goalSwitchFor(entry.conversationId) : getConfig().goal;
       const mode = entry.automation ?? (control.enabled ? control.mode : 'off');
       const text = mode === 'goal' && goalBackendFor('goal') === 'templates' && !entry.text.includes(GOAL_MARKER_INSTRUCTION)
         ? entry.text + GOAL_MARKER_INSTRUCTION : entry.text;
-      return text;
+      // Only the opening user input owns executor setup. Existing chats, queued
+      // checkpoints and automatic continuations already have their instructions.
+      return !entry.sessionId && !entry.conversationId && !entry.finishOwner && entry.mode !== 'finish'
+        ? prepareSessionPrompt(text, entry, limits) : text;
     },
     applyAutomation: async (conversationId, automation, phase, objective) => {
       // This message supersedes the old final; never pick that old final up merely

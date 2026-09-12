@@ -1,105 +1,68 @@
-> [!IMPORTANT]
-> **2.0.8 — Darkex by dark tibo — needs its matching companion extension.** Reload the unpacked extension after updating.
-> Model discovery now reads your account's native picker state across languages and nested version menus.
-> See [Browser behavior](#browser-behavior-in-the-current-source) for tab reuse, Browser only and native file attachments.
-
-
-<div align="center">
-  <img src="extension/icons/icon128.png" width="88" alt="Chat On Steroids icon" />
-  <h1>Chat On Steroids</h1>
-  <p><strong>ChatGPT, with hands on your computer.</strong></p>
-  <p>A desktop chat workspace and local MCP server for ChatGPT: project folders, images, plans, worker chats, and tools to read, patch and run code. Keep a local transcript and choose how the next instruction arrives.</p>
-  <p>
-    <a href="../../releases/latest"><strong>Download the latest release</strong></a>
-    · <a href="#quick-start">Quick start</a>
-    · <a href="#what-chatgpt-gets">Tools</a>
-    · <a href="#security-in-one-page">Security</a>
-    · <a href="CHANGELOG.md">Changelog</a>
-  </p>
-</div>
+<p align="center"><img src="docs/images/readme-hero.svg?v=2" width="960" alt="Turn ChatGPT into Codex without touching Codex limits. Chat On Steroids: Your files. Your terminal. Your ChatGPT plan." /></p>
 
 <p align="center">
-  <img src="docs/images/workspace.png" width="92%" alt="Chat On Steroids new-chat workspace with composer controls" />
+  <a href="https://github.com/totec448-spec/chat-on-steroids/releases/latest/download/Chat-On-Steroids-Setup-x64.exe"><img src="docs/images/download-windows.svg" width="208" height="56" alt="Download for Windows x64" /></a>&nbsp;
+  <a href="https://github.com/totec448-spec/chat-on-steroids/releases/latest/download/Chat-On-Steroids-macOS-arm64.dmg"><img src="docs/images/download-macos.svg" width="208" height="56" alt="Download for macOS Apple silicon" /></a>&nbsp;
+  <a href="https://github.com/totec448-spec/chat-on-steroids/releases/latest/download/Chat-On-Steroids-Linux-x64.deb"><img src="docs/images/download-linux.svg" width="208" height="56" alt="Download for Linux x64" /></a>
 </p>
-<p align="center">
-  <img src="docs/images/settings.png" width="92%" alt="Chat On Steroids settings for tools and chat automation" />
-</p>
 
-Screenshots of the app with private conversation and folder details redacted. Chat history loads in small chunks as you scroll upward. Image attachments stay visible as thumbnails, and delivery controls sit below their messages.
+<p align="center"><a href="https://github.com/totec448-spec/chat-on-steroids/releases/latest">All downloads</a></p>
 
-## Why this exists
+<br />
 
-ChatGPT is a good engineer trapped in a text box. Developer mode lets it call MCP servers, but most servers give it one narrow API. This one gives it a workbench.
+<p align="center"><a href="docs/images/demo.mp4"><img src="docs/images/demo.gif" width="960" alt="Chat On Steroids in action: model selection, task plans, live tool results and reusable workers" /></a></p>
 
-- **Codex-grade tools.** `apply_patch`, `exec_command` and `write_stdin` are ports of the tool contracts OpenAI's Codex CLI uses, so the model already knows how to hold them. Multi-file patches are preflighted before anything is written. Commands run as real processes with interactive stdin, output budgets and background results it can collect later.
-- **Sub agents inside ChatGPT.** One prime chat can spawn worker chats, hand them tasks, read their reports and wake them again later. Workers are ordinary ChatGPT conversations in your own browser, brokered by the app, so you can watch every one of them.
-- **Sessions that outlive the context window.** Every tool call is recorded locally with its real result. When a chat gets heavy, Compact & Resume asks it for a handoff brief, opens a fresh chat and moves the same local session across. The new chat can query everything the old one did.
-- **Plans, Goal and Loop.** Split a request into editable tasks or generate follow-ups through a separate ChatGPT helper or the API. Astra can receive the next task through `session_finish` in the same turn, without opening another model turn.
-- **External MCP plugins.** Settings → Plugins installs integrations such as Blender MCP, Playwright, Memory and Web Fetch behind a separate **Chat On Steroids Plugins** connector. Enable individual tools, import MCPB bundles or connect custom local/remote servers. [Setup and supported sources](docs/plugins.md). External servers run with their own OS/service permissions, outside CoS's approved-folder sandbox.
-- **You stay the permission boundary.** Only the folders you approve are visible. Each capability is a switch. Read-only mode is a single kill switch. Nothing runs on this machine that you did not turn on.
+<p align="center"><a href="#get-started">Get started</a> &nbsp;·&nbsp; <a href="docs/images/demo.mp4">Watch the demo</a> &nbsp;·&nbsp; <a href="CHANGELOG.md">What’s new</a></p>
 
-It runs in the tray, hosts no model of its own, and works with the ChatGPT you already use in the browser.
+<br />
 
-## Download
+<h2 align="center">Code. Delegate. Keep going.</h2>
 
-| Platform | x64 | ARM64 |
-| --- | --- | --- |
-| **Windows** | [Installer](../../releases/latest/download/Chat-On-Steroids-Setup-x64.exe) | [Installer](../../releases/latest/download/Chat-On-Steroids-Setup-arm64.exe) |
-| **macOS** | [DMG](../../releases/latest/download/Chat-On-Steroids-macOS-x64.dmg) · [ZIP](../../releases/latest/download/Chat-On-Steroids-macOS-x64.zip) | [DMG](../../releases/latest/download/Chat-On-Steroids-macOS-arm64.dmg) · [ZIP](../../releases/latest/download/Chat-On-Steroids-macOS-arm64.zip) |
-| **Linux** | [AppImage](../../releases/latest/download/Chat-On-Steroids-Linux-x64.AppImage) · [DEB](../../releases/latest/download/Chat-On-Steroids-Linux-x64.deb) | [AppImage](../../releases/latest/download/Chat-On-Steroids-Linux-arm64.AppImage) · [DEB](../../releases/latest/download/Chat-On-Steroids-Linux-arm64.deb) |
+**Work on the real project.** Let ChatGPT read and edit files, run tests, keep terminals open and use your desktop. Follow the actual tool results as they arrive.
 
-Every package ships with matching native dependencies, a pinned `tunnel-client`, ripgrep and the Chrome extension for that CPU. A standalone [extension zip](../../releases/latest/download/Chat-On-Steroids-Extension.zip) is attached for manual installs, and [`SHA256SUMS.txt`](../../releases/latest/download/SHA256SUMS.txt) lists every hash.
+**Give it a team.** Split independent jobs across workers, then bring their results back. Workers keep their context, so the next task can pick up where they left off.
 
-Windows and AppImage installs check GitHub for a newer release on start and every six hours, download it, verify its checksum and apply it when you quit or choose **Install update**. Staged downloads are revalidated before installation. macOS and DEB installs link to the release page for manual installation.
+**Stay in control of long tasks.** Send a correction while work runs. Goal follows unfinished work; Loop keeps working within your brief. Compact & Resume carries the session and worker history into a fresh chat.
 
-**Debian and Ubuntu: prefer the DEB.** The AppImage uses electron-builder's static launcher. On a host that disables unprivileged user namespaces, that launcher can fall back to starting Chromium with `--no-sandbox` so the app still opens. If you do not want that fallback, use the DEB.
+<p align="center"><strong>Uses your ChatGPT conversation. Does not consume Codex quota.</strong><br /><sub>Your account’s model availability, usage and context limits still apply.</sub></p>
 
-**The builds are not publisher-signed yet**, and macOS builds are not notarized. SmartScreen, Gatekeeper or your browser will warn. Verify the hash first, then use the normal "run anyway" path, or [build from source](#building).
+<br />
 
-```powershell
-Get-FileHash .\Chat-On-Steroids-Setup-x64.exe -Algorithm SHA256   # Windows
-```
-```sh
-shasum -a 256 Chat-On-Steroids-macOS-arm64.dmg    # macOS
-sha256sum Chat-On-Steroids-Linux-x64.AppImage     # Linux
-```
+## Get started
 
-> **This is a beta with real permissions.** A fresh install starts with Core capabilities on except opt-in ChatGPT file saving, read-only mode off, multi-agent mode on with two workers, and, on Windows, the Desktop permissions on. On macOS the Desktop permissions start off; enable them in **Settings → Workspace**, then grant Screen Recording and Accessibility in System Settings. Linux has Core tools but no Desktop computer-control backend. Review folder access before connecting: `exec_command` runs programs as your logged-in user.
+1. **Install CoS** and approve your project folder in **Settings → Workspace**.
+2. **Connect Core** through **Settings → Setup** and add it in ChatGPT’s Developer mode. [Tunnel setup →](docs/setup.md#tunnel-setup)
+3. **Load the companion extension.** Click **Open extension folder**, then **Load unpacked** in Chrome’s extension settings. Pairing is automatic.
+4. **Choose a model, write your task and send.**
 
-## Requirements
+<details>
+<summary>Requirements &amp; installation notes</summary>
 
-- **Windows 10/11**, **macOS 13 Ventura or newer**, or a current desktop **Linux**, on x64 or ARM64 matching the build you downloaded.
-- **Chrome 116 or newer**, or a current Microsoft Edge with the companion extension. Without it you still get the MCP tools, but not session attribution, Compact & Resume, worker chats or the Goal loop.
+Windows 10/11, **macOS 13 Ventura or newer**, or a current desktop Linux. Chrome 116+ or current Edge, plus a ChatGPT account/workspace with Developer mode and custom MCP apps. [Check account availability](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt).
 
-Using Edge? Choose **Settings → Browser & history → ChatGPT browser → Microsoft Edge**. Install the companion and sign in to ChatGPT in that browser's active profile (`edge://extensions` for Edge). This choice controls app-originated launches, including startup model discovery; already connected tabs and source-tab continuations keep their browser. Older configurations retain Chrome. If the selected browser is missing or cannot start, the app reports an error instead of opening a different browser. The setting chooses a browser family, not a particular profile.
-- **Linux:** a Secret Service keyring such as GNOME Keyring or KWallet. The app refuses Electron's unencrypted `basic_text` fallback for stored keys.
-- A ChatGPT workspace with **Developer mode** and custom MCP apps. OpenAI currently documents full MCP support, including write actions, as a beta for Business, Enterprise and Edu, with Pro limited to read and fetch. Business needs an admin to enable it. Check OpenAI's [Developer mode and MCP apps](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt) page if your workspace looks different.
-- An **OpenRouter API key** (or your own OpenAI-compatible endpoint) only if you select the API source for plans, Goal or Loop. The default ChatGPT helper source uses your connected browser session.
+- **Unsigned beta:** Windows is not publisher-signed; macOS is unsigned and unnotarized. Verify the package against the release checksums.
+- **Linux:** a Secret Service keyring is required. Prefer the DEB; when unprivileged user namespaces are disabled, the AppImage launcher can fall back to <code>--no-sandbox</code>.
+- **Permissions:** choose your approved folders and review capabilities before connecting. Fresh installs enable Core capabilities and two workers; Windows also enables Desktop permissions. Shell commands run with your normal user privileges.
+- **After updating:** reload the companion extension and refresh the CoS apps in ChatGPT when prompted.
 
-Use a normal ChatGPT conversation with the custom app enabled. OpenAI's built-in Agent mode does not use custom apps.
+</details>
 
-## Quick start
+<details>
+<summary>More screenshots</summary>
 
-1. Install the build for your CPU and open Chat On Steroids. It lives in the tray or menu bar.
-2. Open **Settings → Workspace**, review permissions and approve a project folder. Press **Add**, or drop the folder onto the Folders card.
-3. Create an OpenAI Secure MCP Tunnel and a restricted API key, then press **Connect**. Details below.
-4. In ChatGPT on the web, enable Developer mode and create the **Core** app from the tunnel. On Windows, create the **Desktop** app too if you left screen and input control on; on macOS, if you switched them on.
-5. Press **Open extension folder**, open `chrome://extensions`, enable Developer mode, choose **Load unpacked** and select that folder. Pairing is automatic.
+![Conversation, workers and task plan](docs/images/workspace.png)
 
-**Settings → Setup** marks each hop done only once the app has actually seen traffic on it. Back in chat, select a project and model, write a message, or choose **Create plan** from the gear. Images can be attached or dropped into the composer.
+![Model and reasoning selection](docs/images/model-picker.png)
 
-### OpenAI Secure MCP Tunnel (recommended)
+![Folder and capability settings](docs/images/settings.png)
 
-1. In [Platform → Tunnels](https://platform.openai.com/settings/organization/tunnels), create a tunnel in the same workspace you use in ChatGPT and copy its id (`tunnel_…`).
-2. In [Platform → API keys](https://platform.openai.com/settings/organization/api-keys), create a **Restricted** key with only **Tunnels: Read** and **Tunnels: Use**.
-3. Paste both into the Setup tab and press **Connect**.
-4. In ChatGPT, enable Developer mode under **Settings → Apps → Advanced settings** and create a custom app of type **Tunnel**. Review the discovered actions and enable it.
+</details>
 
-Core and the optional Desktop surface (Windows and macOS) use separate tunnel ids, because ChatGPT treats each custom app as one endpoint. Release builds bundle a checksum-verified `tunnel-client`; a path you set explicitly wins over it, and `PATH` is only a fallback.
+<br />
 
-### Other tunnels
+---
 
-**Cloudflare quick tunnel:** press **Connect**, copy the URL and use it as the MCP server URL in ChatGPT. The random path in that URL is the secret. It changes on every restart.
+<p align="center"><a href="docs/setup.md">Setup &amp; help</a> &nbsp;·&nbsp; <a href="docs/plugins.md">Plugins</a> &nbsp;·&nbsp; <a href="CONTRIBUTING.md">Contribute</a> &nbsp;·&nbsp; <a href="SECURITY.md">Security</a> &nbsp;·&nbsp; <a href="LICENSE">MIT license</a></p>
 
 **Your own HTTPS tunnel:** point it at the loopback URL the app shows and give ChatGPT the public equivalent, secret path included.
 
@@ -232,3 +195,5 @@ Bug reports, feature requests and PRs are welcome. Read [`CONTRIBUTING.md`](CONT
 MIT. See [`LICENSE`](LICENSE).
 
 Not affiliated with, endorsed by, or connected to OpenAI. "ChatGPT" and "Codex" are trademarks of OpenAI, used here only to describe what this tool works with.
+
+<p align="center"><sub>Not affiliated with or endorsed by OpenAI. ChatGPT and Codex are OpenAI trademarks.</sub></p>

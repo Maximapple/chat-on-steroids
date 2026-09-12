@@ -24,10 +24,15 @@ describe('macOS review v16 and bootstrap send safety', () => {
     // Unattended startup owns the composer on a redeemed command page: 2.0.6 settled this as
     // an unconditional replace, so what protects the user is the send-time check below, not a
     // refusal to write. See issue #30 for the setting that was proposed and not taken.
-    expect(content).toContain('CLF_DOM.insertPrompt(boot.text, true)');
+    // The third argument is upstream's: the insert now reports why it refused, instead of
+    // only that it did. The contract this pins is unchanged — insert, then verify, then send.
+    expect(content).toContain('CLF_DOM.insertPrompt(boot.text, true,');
     expect(content).toContain('waitForRevivalSubmitReady(openedConversation, attempt)');
     expect(content).toContain('the composer changed before bootstrap send; the draft was preserved');
-    expect(dom).toContain('function insertPrompt(value, mode = false)');
-    expect(dom).toContain('box.replaceChildren()');
+    expect(dom).toContain('function insertPrompt(value, mode = false, failure =');
+    // Replace, not append: upstream does it by selecting the editor's own children before the
+    // native insert, where this used to call replaceChildren(). Same guarantee, and it now
+    // goes through the editing path ChatGPT listens for rather than around it.
+    expect(dom).toContain('selection.selectAllChildren(box)');
   });
 });

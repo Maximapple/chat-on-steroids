@@ -14,41 +14,47 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/server';
-import { z } from 'zod';
+import { toolSchemaJson } from './tool-declarations.js';
 import type { PluginToolSchema } from '../../shared/plugin-refresh.js';
 import { createRegistrar, type ToolContext } from './kernel.js';
 import { registerCoreTools } from './tools-core.js';
 import { registerDesktopTools } from './tools-desktop.js';
 import { registerPluginTools } from './tools-plugins.js';
+import { registerCodeMode } from './code-mode-tool.js';
 import { surfaceDefinition, type SurfaceId } from './surfaces.js';
 import { serverInstructions } from './instructions.js';
 import { BUILD_VERSION } from './../version.js';
 import { toVirtualPath } from '../sandbox.js';
 import { logWarn } from '../logger.js';
 
-export function buildServer(ctx: ToolContext, surface: SurfaceId, observe?: (connectorName: string, version: string, instructions: string, tools: PluginToolSchema[]) => void): McpServer {
+export function buildServer(ctx: ToolContext, surface: SurfaceId, observe?: (connectorName: string, version: string, instructions: string, tools: PluginToolSchema[]) => void, liveContext: () => ToolContext = () => ctx): McpServer {
   const definition = surfaceDefinition(surface);
+  const instructions = serverInstructions(ctx, surface);
   const server = new McpServer(
-    // The build, not just the release. This is the one identity that reaches ChatGPT itself, so
-    // a connector talking to the wrong build can be recognised from the other end — which is
-    // precisely what nobody could do when a QA run spent itself on an app without the feature.
     { name: definition.serverName, version: BUILD_VERSION },
-    { capabilities: { tools: {} }, instructions: serverInstructions(ctx, surface) }
-  );
+    { capabilities: { tools: {} }, instructions }  );
 
   const tools: PluginToolSchema[] = [];
   if (surface === 'plugins') {
     const declarations = registerPluginTools(server);
-    observe?.(definition.connectorName, BUILD_VERSION, serverInstructions(ctx, surface), declarations);
-    return server;
+    observe?.(definition.connectorName, BUILD_VERSION, instructions, declarations);
+  return server;
   }
   const registrar = createRegistrar(server, ctx, surface, observe ? (name, config) => {
     // Match the SDK's Standard Schema conversion target and object-root normalization.
-    const schema = z.toJSONSchema(config.inputSchema, { target: 'draft-2020-12', io: 'input' });
+    const schema = toolSchemaJson(config.inputSchema);
     tools.push({ name, description: config.description, inputSchema: { type: 'object', ...schema }, ...(config.annotations ? { annotations: { ...config.annotations } } : {}) });
   } : undefined);
   if (surface === 'core') registerCoreTools(registrar);
   else registerDesktopTools(registrar);
+  registerCodeMode(registrar, (name, args, parent) => {
+    // Reuse the same registration/validation/handler authority, refreshed for every child
+    // so a permission or approved-root change during an awaited script takes effect.
+    const nested = createRegistrar(null, liveContext(), surface);
+    if (surface === 'core') registerCoreTools(nested);
+    else registerDesktopTools(nested);
+    return nested.invokeNested(name, args, parent);
+  }, { windowsDesktop: surface === 'desktop' && process.platform === 'win32' });
 
   // Cheap self-check on a property the tests assert and the design depends on: a surface
   // may register fewer tools than it declares — permissions decide that — but it may never
@@ -61,7 +67,7 @@ export function buildServer(ctx: ToolContext, surface: SurfaceId, observe?: (con
     }
   }
 
-  observe?.(definition.connectorName, BUILD_VERSION, serverInstructions(ctx, surface), tools);
+  observe?.(definition.connectorName, BUILD_VERSION, instructions, tools);
   return server;
 }
 

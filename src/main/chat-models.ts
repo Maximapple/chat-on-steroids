@@ -51,6 +51,7 @@ export function requestChatModels(allowOpen = true): ChatModelCatalog {
     logInfo(`model discovery requested id=${request.nonce}`);
     catalog = { ...catalog, state: 'pending', requestedAt: now, error: undefined };
     scheduleDeadline(request.expiresAt);
+    changed();
     wakeBrowserWork();
   } else if (allowOpen && !request.allowOpen) {
     // Explicit refresh promotes the existing nonce; it cannot create a competing request.
@@ -66,7 +67,7 @@ export async function startChatModelDiscovery(allowOpen = true): Promise<ChatMod
   requestChatModels(allowOpen);
   const nonce = request!.nonce;
   if (!launch || launch.nonce !== nonce || (request!.allowOpen && !launch.allowOpen)) {
-    const previous = launch?.work;
+    const previous = launch?.nonce === nonce ? launch.work : null;
     const attempt = { nonce, allowOpen: request!.allowOpen, work: Promise.resolve() };
     const work = (async () => {
       try {
@@ -86,12 +87,11 @@ export async function startChatModelDiscovery(allowOpen = true): Promise<ChatMod
     })();
     attempt.work = work;
     launch = attempt;
+    void work.finally(() => { if (launch === attempt) launch = null; });
   }
-  const attempt = launch;
-  await attempt.work;
-  // A completed OS handoff is not browser lifetime. A later explicit opening
-  // must reach the shared startup owner again if Chrome exited in the meantime.
-  if (launch === attempt) launch = null;
+  // The request deadline and observation own completion. OS wake is only dispatch;
+  // an unresolved handoff must never hold the renderer's Refresh/Send promise.
+  await Promise.resolve();
   return getChatModels();
 }
 export function pendingChatModelRequest(): { nonce: string; expiresAt: number; allowOpen: boolean } | null {

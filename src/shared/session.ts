@@ -287,6 +287,8 @@ export type SessionEvent =
       final: boolean;
       /** This exact stable reply was proven terminal and may enter Goal policy. */
       goalEligible?: boolean;
+      /** Store-owned sequence of the latest final text/state change; rendering/metadata cannot advance it. */
+      finalContentSeq?: number;
       /** First sequence assigned to this logical message; later revisions keep this anchor. */
       origin?: number;
     })
@@ -321,7 +323,7 @@ export type SessionEvent =
    * call under the same server turn then proved it had not. Absent on the page's own starts.
    */
   | (BaseEvent & { kind: 'turn_start'; detail?: string })
-  | (BaseEvent & { kind: 'turn_end'; outcome: TurnOutcome; detail?: string })
+  | (BaseEvent & { kind: 'turn_end'; outcome: TurnOutcome; detail?: string; reason?: 'thinking_failed' })
   | (BaseEvent & { kind: 'chat_error'; message: StoredText })
   | (BaseEvent & { kind: 'tool_call'; call: ToolCallRecord })
   /**
@@ -429,6 +431,8 @@ export function originTitle(origin: SessionOrigin, source: string | null): strin
 }
 
 export interface SessionSummary {
+  /** Durable naming authority; absent only on legacy recordings. */
+  titleSource?: 'fallback' | 'provider' | 'manual';
   /** Latest proven native picker selection; scoped to its frontend, never worker creation intent. */
   selectedModel?: { conversationId: string; model: string; observedAt: number; reasoningEffort?: ReasoningEffort };
   /** Explicit local project; durable across frontend conversation replacement. */

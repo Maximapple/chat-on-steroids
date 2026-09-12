@@ -24,9 +24,8 @@
  * landed in Unattributed activity. First proof wins, and it keeps winning.
  */
 
-import { readDurable, writeDurableSoon } from '../durable.js';
-import { readEverySummary, readRecentEvents } from './store.js';
-
+import { readDurable, writeDurableSnapshotSoon } from '../durable.js';
+import { indexedSessions, readRecentEvents } from './store.js';
 export interface RequestCorrelation {
   requestId: string;
   conversationId: string;
@@ -93,7 +92,7 @@ function snapshot(): PersistedCorrelations {
 }
 
 function persist(): void {
-  writeDurableSoon(CORRELATIONS_STATE, snapshot());
+  writeDurableSnapshotSoon(CORRELATIONS_STATE, snapshot);
 }
 
 /**
@@ -217,12 +216,7 @@ async function restoreRequestCorrelationsOnce(): Promise<void> {
   // is idempotent for the same conversation and still makes contradictions sticky.
   let sessions;
   try {
-    // Every retained session, not a capped page. This reconciliation decides who owns a
-    // request id, and `listAllSessions()` wrapped the bounded view whose own doc comment says
-    // never to use it for identity: past the cap it answers "no such session" for a session
-    // that exists, which here silently hands a request to the wrong conversation.
-    sessions = await readEverySummary();
-  } catch (error) {
+    sessions = await indexedSessions();  } catch (error) {
     // A valid direct snapshot can be restored before the session store is initialized (some
     // tests and narrowly scoped consumers do exactly that). In the real app the store is ready
     // before this function runs, so stale-snapshot reconciliation still happens there. With no

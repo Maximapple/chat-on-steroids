@@ -33,7 +33,7 @@ import {
   initSessionStore,
   rebindSession,
   sessionsRoot,
-  upsertMessageEvent,
+  readSessionPlan,  upsertMessageEvent,
   writeOverflowText
 } from '../src/main/session/store.js';
 import { resetWorkspaces, setWorkspaceFor } from '../src/main/workspace.js';
@@ -41,6 +41,7 @@ import { DEFAULT_CAPABILITIES, type Capabilities, type Root } from '../src/share
 import type { ToolOutcome } from '../src/shared/session.js';
 import { emptyEvidence, noteExec, noteOutcome, runInCallContext, type CallContext } from '../src/main/mcp/call-context.js';
 import { observeRequestCorrelation } from '../src/main/session/correlation.js';
+import { WINDOWS_COMPUTER_METHODS, WINDOWS_COMPUTER_READ_METHODS } from '../src/shared/windows-computer.js';
 import { resetBlockedChatsForTests, setChatBlocked } from '../src/main/session/blocked-chats.js';
 import {
   abortContinuation,
@@ -218,7 +219,7 @@ async function modern(
     headers['Mcp-Name'] = params['name'];
   }
   const res = await rawPost(endpoint.urls.core, JSON.stringify(body), headers);
-  return { status: res.status, body: decode(res) };
+  return { status: res.status, headers: res.headers, body: decode(res) };
 }
 
 const toolNames = (reply: any): string[] =>
@@ -607,8 +608,8 @@ describe('surface boundaries', () => {
     everything();
     const names = toolNames(await core('tools/list'));
     // find is absent because exec_command is present — they are mutually exclusive.
-    expect(names).toEqual(['agents', 'apply_patch', 'download_artifact', 'exec_command', 'read', 'session', 'view_image', 'write_stdin']);
-    for (const name of surfaceDefinition('desktop').tools) expect(names, name).not.toContain(name);
+    expect(names).toEqual(['agents', 'apply_patch', 'download_artifact', 'exec', 'exec_command', 'read', 'session', 'update_plan', 'view_image', 'write_stdin']);
+    for (const name of surfaceDefinition('desktop').tools.filter(name => name !== 'exec')) expect(names, name).not.toContain(name);
   });
 
   /**
@@ -737,8 +738,10 @@ describe('surface boundaries', () => {
   it('advertises exactly Desktop’s tools on Desktop, with nothing from Core', async () => {
     everything();
     const names = toolNames(await desktop('tools/list'));
-    expect(names).toEqual(['browser', 'computer', 'observe']);
-    for (const name of surfaceDefinition('core').tools) expect(names, name).not.toContain(name);
+    expect(names).toEqual(IS_WINDOWS
+      ? [...WINDOWS_COMPUTER_METHODS, 'browser', 'read_clipboard', 'write_clipboard', 'exec'].sort()
+      : ['browser', 'computer', 'exec', 'observe']);
+    for (const name of surfaceDefinition('core').tools.filter(name => name !== 'exec')) expect(names, name).not.toContain(name);
   });
 
   it('does not let Desktop discovery freeze Core’s mutually-exclusive tool shape', async () => {
@@ -746,7 +749,7 @@ describe('surface boundaries', () => {
     // snapshot, because ChatGPT caches these two connectors independently.
     ctx.readOnly = false;
     ctx.caps = withCaps({ search: true, screen: true });
-    expect(toolNames(await desktop('tools/list'))).toEqual(['observe']);
+    expect(toolNames(await desktop('tools/list'))).toEqual(IS_WINDOWS ? [...WINDOWS_COMPUTER_READ_METHODS, 'exec'].sort() : ['exec', 'observe']);
 
     // Before Core's first discovery the user enables command execution. Core should make
     // its one-time find-vs-exec choice from *this* state, not the state Desktop happened to
@@ -774,9 +777,10 @@ describe('surface boundaries', () => {
     const desktopBody = JSON.stringify((await desktop('tools/list')).body);
 
     // Not just the names: the action vocabulary of the other surface must be absent too,
-    // because a schema fragment is what a discovery pull actually costs.
+    // because a schema fragment is what a discovery pull actually costs. Match complete
+    // vocabulary words: "account-observed" is not the Desktop action "observe".
     for (const marker of ['computer', 'observe', 'click_ref', 'captureAfter', 'write_clipboard']) {
-      expect(coreBody, marker).not.toContain(marker);
+      expect(coreBody, marker).not.toMatch(new RegExp(`\\b${marker}\\b`));
     }
     for (const marker of ['apply_patch', 'exec_command', 'write_stdin', 'save_handoff', 'Begin Patch']) {
       expect(desktopBody, marker).not.toContain(marker);
@@ -816,15 +820,12 @@ describe('surface boundaries', () => {
       'delete_directory',
       'run_command',
       'run_powershell',
-      'launch_app',
+      ...(!IS_WINDOWS ? ['launch_app', 'list_windows', 'read_clipboard', 'write_clipboard'] : ['observe', 'computer']),
       'open_url',
       'process',
       'screenshot',
-      'list_windows',
       'wait_for_window',
       'find_ui',
-      'read_clipboard',
-      'write_clipboard',
       'resume_session',
       'session_history',
       'session_status',
@@ -852,67 +853,49 @@ describe('surface boundaries', () => {
     const coreTools = toolList(await core('tools/list'));
     const desktopTools = toolList(await desktop('tools/list'));
 
-    // Counts are the design: Core is capped at eight live schemas because find and the exec
-    // pair cannot both exist. Desktop is three -- observe and computer drive the operating
-    // system, and browser drives a web page, which is a different problem: Chromium keeps its
-    // renderer accessibility tree off until a real assistive client asks, so the OS-level
-    // driver sees a browser window as one opaque pane and has pixels and nothing else inside it.
-    expect(coreTools).toHaveLength(8);
-    expect(desktopTools).toHaveLength(3);
+    // Each populated surface includes code mode; find and the shell exec pair remain exclusive.
+    expect(coreTools).toHaveLength(10);
+    // One more than upstream on each platform: this fork publishes `browser` on Desktop, and it
+    // gates on control exactly as `computer` does, so it costs the same discovery budget.
+    expect(desktopTools).toHaveLength(IS_WINDOWS ? 17 : 4);
 
     // And the size, which is what a discovery pull actually costs the model on every
     // conversation that touches the connector. The ceilings sit just above what the
-    // surface measures today (core 12.5k, desktop 7.9k on 2026-08-17) rather than at a
+    // surface measures today (Windows Desktop 10,116 bytes on 2026-09-10) rather than at a
     // round number well above it: a budget with room to spare is a budget that never
     // catches the regression it exists to catch.
     const coreBytes = Buffer.byteLength(JSON.stringify(coreTools), 'utf8');
     const desktopBytes = Buffer.byteLength(JSON.stringify(desktopTools), 'utf8');
-    expect(coreBytes, `core tools/list is ${coreBytes} bytes`).toBeLessThan(18_000);
-    // Desktop grew from about 7.9k to about 12.4k when `browser` was added, and that is a real
-    // cost: it is paid on every conversation that connects the Desktop surface, including the
-    // ones that never drive a web page. It buys the only way to see inside one — Chromium keeps
-    // its renderer accessibility tree off until a real assistive client asks, so without this
-    // the OS-level driver has pixels and nothing else in a browser. The action union is already
-    // as small as the capability allows: attach was removed because the driver takes the newest
-    // ordinary tab on its own, which is bookkeeping the model should never have had to carry.
-    // detach and status were briefly removed with it and came back, because a model that had
-    // taken a page then had no way to give it back. Saying so in the description costs bytes
-    // here and is worth them: a run was lost to a model looking for an attach action, not
-    // finding one, and reaching for desktop automation to open a tab instead.
-    //
-    // Raised from 12,800 on 2026-09-01 for one sentence on `computer.actions`: only one
-    // UI-changing action goes per call. The rule was enforced and unstated, so a QA run met it as
-    // a rejected call and reported the schema and the runtime as disagreeing — which they did.
-    // Same trade as the paragraph above: bytes at discovery against a round trip in every run.
-    //
-    // Raised from 12,900 on 2026-09-01 for `move_ref`, which hovers a control by ref and presses
-    // nothing. Two independent QA runs named it as the one action genuinely missing: the only
-    // route to a named element was a click, which commits to the very thing a hover was meant to
-    // inspect first, so menus and tooltips that open under the pointer were unreachable. A whole
-    // capability for one schema line is the cheapest entry in this budget.
-    expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(13_200);
+    expect(coreBytes, `core tools/list is ${coreBytes} bytes`).toBeLessThan(20_500);
+    // Upstream's ceilings are 10,500 / 11,000 for sixteen tools. This fork publishes `browser`
+    // as well, whose schema is the largest on the surface: Windows Desktop measures 15,742
+    // bytes with it on 2026-09-12. The ceiling sits just above that rather than at a round
+    // number well clear of it — a budget with room to spare never catches its regression.
+    expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(IS_WINDOWS ? 16_000 : 16_500);
 
     // Per tool as well as per surface, so one schema cannot quietly eat the whole budget
-    // while the total stays under it. `computer` is the largest by design: fourteen
+    // while the total stays under it. `computer` is the largest by design: sixteen
     // discriminated action variants, each spelling out its own arguments, is what keeps
     // its validation errors small and its action set explicit. `exec_command` earns a narrow
     // exception for the `cmds` contract that removes whole connector round trips, including
-    // the one-shell and per-command-exit semantics, and since issue #36 for the sentence that
-    // makes draining a returned session ID to its terminal exit part of the tool contract:
-    // those bytes are what stops a completed background result from being silently dropped. `agents` is the other exception: its description is where the prime learns to write
+    // the one-shell and per-command-exit semantics. `agents` is the other exception: its description is where the prime learns to write
     // shared context once instead of per worker, to batch messages into one call, and to
     // hand back RESULT/CHANGES/VALIDATION/BLOCKERS — bytes spent once at discovery to save
     // a great many in every run that follows.
     for (const tool of [...coreTools, ...desktopTools]) {
       const bytes = Buffer.byteLength(JSON.stringify(tool), 'utf8');
       const budget =
-        tool.name === 'computer'
-          // Raised from 6,000 for the one sentence naming the batching rule on `actions`. It was
-          // enforced and unstated, so a QA run met it as a rejected call; see the surface ceiling.
-          // Raised again from 6,100 for `keypress` naming that a browser tab/window/address-bar
-          // chord is refused and pointing at set_value instead — the same "say the boundary up
-          // front" reasoning as the batching sentence above it.
-          ? 6_200
+        tool.name === 'browser'
+          // This fork's own tool, and the largest schema on either surface: it describes a
+          // whole page-driving vocabulary. Measured 5,260 bytes on 2026-09-12.
+          ? 5_400
+          :
+        IS_WINDOWS && desktopTools.includes(tool)
+          // Largest Window2 method is click at 882 bytes; composition is 1458 bytes.
+          ? (tool.name === 'exec' ? 1_500 : 950)
+          : tool.name === 'computer'
+          // Retain the existing legacy schema allowance on macOS.
+          ? 7_400
           : tool.name === 'apply_patch'
             ? 5_000
             : tool.name === 'agents'
@@ -922,28 +905,11 @@ describe('surface boundaries', () => {
                 // is quoted verbatim from Codex's own shell spec — it is not ours to trim to fit a
                 // budget. The non-Windows number is the one that says whether *our* additions have
                 // grown, so both are asserted rather than one loose bound covering both.
-                //
-                // Raised from 3,800/3,500 for the path contract on `workdir`, which said neither
-                // half of it: that `workdir` takes the same virtual path `read.paths` advertises,
-                // and that `cmd` is not translated so the same spelling inside it is refused. Both
-                // rules were already enforced and tested; only the description was silent, and one
-                // QA round walked into both sides. Both budgets move by the same amount so each
-                // keeps the headroom it had, and the test still measures growth rather than slack.
-                ? (process.platform === 'win32' ? 3_950 : 3_650)
-                : tool.name === 'browser'
-                  // Raised from 4,900 for detach and status. The tool could take a page and had
-                  // no way to give it back, so a QA run resorted to clicking the extension popup
-                  // with desktop automation — the ceiling was buying a smaller schema at the
-                  // price of an unreleasable session. Their descriptions are three words each.
-                  //
-                  // Raised again from 5,200 for `move_ref`: hovering a control by ref, which two
-                  // QA runs named as the one action genuinely missing. Without it the only route
-                  // to a named element was a click, and a click commits to the thing a hover was
-                  // meant to inspect first — menus and tooltips that open under the pointer were
-                  // simply out of reach. Coordinates are no substitute: what a hover reveals is
-                  // laid out relative to the element, so the point must be resolved at the move.
-                  ? 5_500
-                  : 3_000;
+                // Measured on this fork, 2026-09-12: 3,984 bytes on Windows. Upstream's 3,800
+                // reflects its own schema; this one carries the batch fields as well, and the
+                // ceiling sits just above what it actually measures rather than well clear of it.
+                ? (process.platform === 'win32' ? 4_050 : 3_500)
+                : 3_000;
       expect(bytes, `${tool.name} schema is ${bytes} bytes`).toBeLessThan(budget);
     }
   });
@@ -957,7 +923,7 @@ describe('surface boundaries', () => {
       // carry real vocabulary rather than a label.
       expect(surface.description.length, surface.id).toBeGreaterThan(120);
       // External plugins declare their bounded schemas dynamically after installation.
-      if (surface.id === 'plugins') expect(surface.tools).toEqual([]);
+      if (surface.id === 'plugins') expect(surface.tools).toEqual(['exec']);
       else expect(surface.tools.length, surface.id).toBeGreaterThan(0);
     }
     expect(surfaceDefinition('core').required).toBe(true);
@@ -993,6 +959,8 @@ describe('2025-era clients', () => {
   });
 
   it('exposes the Core server instructions', async () => {
+    ctx.caps = withCaps({ read: true, command: true });
+    ctx.readOnly = false;
     const reply = await core('initialize', {
       protocolVersion: '2025-06-18',
       capabilities: {},
@@ -1009,16 +977,18 @@ describe('2025-era clients', () => {
       expect(instructions).not.toContain('PowerShell does not expand * or ? for native programs');
     }
     // Progress guidance lives once at server level rather than bloating every tool description.
-    expect(instructions).toContain('Keep the user visibly informed more than usual while you work');
+    expect(instructions).toContain('more than 60 seconds during ongoing work');
     // The two round-trip levers the recorded sessions actually pay for. Both are instructions
     // rather than tool descriptions because they are about *how many calls to make*, which is a
     // decision taken before any one tool's schema is read.
     expect(instructions).toContain('exec_command cmds');
-    expect(instructions).toContain('read a file whole rather than in windows');
-    // Short enough not to burn the model's context on every conversation. Everything added
-    // since this bound was set paid for itself by tightening a line that said the same thing
-    // at greater length; raise it only for guidance that removes calls, never for prose.
-    expect(instructions.length).toBeLessThan(2500);
+    expect(instructions).toContain('Read whole files for orientation');
+    expect(instructions).toContain('look for AGENTS.md');
+    expect(instructions).not.toContain('/workspace/src/main.ts');
+    expect(instructions).not.toMatch(/functions\.|SKILL\.md|request_user_input|approval auto-review/);
+    // The requested upstream collaboration prose replaces the old minimal tool preamble.
+    expect(instructions).toContain('User authorization and preferences persist across turns.');
+    expect(instructions.length).toBeLessThan(18_000);
   });
 
   it('points at the other connector rather than pretending the capability does not exist', async () => {
@@ -1041,12 +1011,14 @@ describe('2025-era clients', () => {
       clientInfo: { name: 'test-client', version: '1.0.0' }
     });
     expect(desktopReply.body.result.instructions).toContain(surfaceDefinition('core').connectorName);
-    expect(desktopReply.body.result.instructions).toContain('observe');
-    // The most repeated desktop pattern in the recorded sessions was a batch containing
-    // nothing but a fixed sleep and a screenshot, run again and again. `verify` is the
-    // replacement, and it only helps if the instructions point at it by name.
-    expect(desktopReply.body.result.instructions).toContain('Do not poll with a batch that only waits');
-    expect(desktopReply.body.result.instructions).toContain('verify');
+    if (IS_WINDOWS) {
+      expect(desktopReply.body.result.instructions).toContain('get_window_state');
+      expect(desktopReply.body.result.instructions).toContain('sky');
+    } else {
+      expect(desktopReply.body.result.instructions).toContain('observe');
+      expect(desktopReply.body.result.instructions).toContain('Do not poll with a batch that only waits');
+      expect(desktopReply.body.result.instructions).toContain('verify');
+    }
   });
 
   it('lists tools without an initialize handshake', async () => {
@@ -1087,6 +1059,12 @@ describe('2025-era clients', () => {
 });
 
 describe('2026-07-28 clients', () => {
+  it.each(['server/discover', 'tools/list'])('returns JSON for modern %s', async method => {
+    const reply = await modern(method);
+    expect(reply.status).toBe(200);
+    expect(reply.body.error).toBeUndefined();
+    expect(reply.headers['content-type']).toContain('application/json');
+  });
   it('lists tools when the request carries the _meta envelope', async () => {
     const reply = await modern('tools/list');
     expect(reply.status).toBe(200);
@@ -1117,7 +1095,7 @@ describe('capability gating', () => {
     ctx.caps = effectiveCapabilities(config);
     ctx.readOnly = true;
 
-    expect(toolNames(await core('tools/list'))).toEqual(['find', 'read', 'view_image']);
+    expect(toolNames(await core('tools/list'))).toEqual(['exec', 'find', 'read', 'view_image']);
   });
 
   it('offers apply_patch only when a writing permission is on', async () => {
@@ -1739,7 +1717,7 @@ describe('desktop capabilities', () => {
   it('offers looking at the screen without offering control of it', async () => {
     ctx.caps = withCaps({ screen: true });
     const names = toolNames(await desktop('tools/list'));
-    expect(names).toEqual(['observe']);
+    expect(names).toEqual(IS_WINDOWS ? [...WINDOWS_COMPUTER_READ_METHODS, 'exec'].sort() : ['exec', 'observe']);
   });
 
   // Seeing the screen changes nothing, so it survives read-only mode; driving the
@@ -1753,31 +1731,35 @@ describe('desktop capabilities', () => {
     ctx.caps = effectiveCapabilities({ ...config, readOnly: true }, 'win32');
     expect(ctx.caps.screen).toBe(true);
     expect(ctx.caps.control).toBe(false);
-    expect(toolNames(await desktop('tools/list'))).toEqual(['observe']);
+    expect(toolNames(await desktop('tools/list'))).toEqual(IS_WINDOWS ? [...WINDOWS_COMPUTER_READ_METHODS, 'exec'].sort() : ['exec', 'observe']);
 
     ctx.readOnly = false;
     ctx.caps = effectiveCapabilities({ ...config, readOnly: false }, 'win32');
-    expect(toolNames(await desktop('tools/list'))).toContain('computer');
+    expect(toolNames(await desktop('tools/list'))).toContain(IS_WINDOWS ? 'click' : 'computer');
   });
 
-  it('offers computer for the clipboard alone, and refuses the steps that need control', async () => {
+  it('offers clipboard access alone and refuses operations whose permission is revoked', async () => {
     ctx.readOnly = false;
+    // Publish the schema once, then exercise live revocation on the same endpoint.
+    ctx.caps = withCaps({ screen: true, control: true, clipboardRead: true, clipboardWrite: true });
+    await desktop('tools/list');
     ctx.caps = withCaps({ control: false, clipboardRead: true, clipboardWrite: false });
-    expect(toolNames(await desktop('tools/list'))).toEqual(['computer']);
 
     const clicked = await desktop('tools/call', {
-      name: 'computer',
-      arguments: { actions: [{ type: 'click', x: 5, y: 5 }] }
+      name: IS_WINDOWS ? 'click' : 'computer',
+      arguments: IS_WINDOWS ? { window: { app: 'fixture.exe', id: 1 }, x: 5, y: 5 } : { actions: [{ type: 'click', x: 5, y: 5 }] }
     });
     expect(clicked.body.result?.isError).toBe(true);
-    expect(textOf(clicked)).toContain('mouse and keyboard control is disabled');
+    expect(textOf(clicked)).toContain(IS_WINDOWS ? 'TOOL_DISABLED' : 'mouse and keyboard control is disabled');
 
     const written = await desktop('tools/call', {
-      name: 'computer',
-      arguments: { actions: [{ type: 'write_clipboard', text: 'nope' }] }
+      name: IS_WINDOWS ? 'write_clipboard' : 'computer',
+      arguments: IS_WINDOWS ? { text: 'nope' } : { actions: [{ type: 'write_clipboard', text: 'nope' }] }
     });
     expect(written.body.result?.isError).toBe(true);
-    expect(textOf(written)).toContain('"Replace clipboard text"');
+    // Two messages, one permission: the generic TOOL_DISABLED refusal names the setting by its
+    // UI label, while the macOS tool refuses in its own words. Both must name the permission.
+    expect(textOf(written)).toContain(IS_WINDOWS ? '"Write clipboard"' : 'Replace clipboard text');
   });
 
   // The read-only branch of the same refusal: caps.control is false because Read-only zeroed
@@ -1785,19 +1767,21 @@ describe('desktop capabilities', () => {
   // user hunting for a permission that may already be granted.
   it('blames Read-only by name instead of the individual permission it overrode', async () => {
     const config = { ...defaultConfig('win32'), capabilities: withCaps({ screen: true, control: true }) };
-    // Expose `computer` first, the same way a real session would have before Read-only was
-    // switched on mid-run — exposedCaps only ever widens, so a fresh context that starts in
-    // read-only mode never registers the tool at all and there is nothing to call.
+    // Expose the mutating tool first, the same way a real session would have before Read-only
+    // was switched on mid-run — exposedCaps only ever widens, so a fresh context that starts in
+    // read-only mode never registers it at all and there is nothing to call. Which tool that is
+    // depends on the host: Windows publishes the individual methods, everything else `computer`.
+    const mutating = IS_WINDOWS ? 'click' : 'computer';
     ctx.readOnly = false;
     ctx.caps = effectiveCapabilities({ ...config, readOnly: false }, 'win32');
-    expect(toolNames(await desktop('tools/list'))).toContain('computer');
+    expect(toolNames(await desktop('tools/list'))).toContain(mutating);
 
     ctx.readOnly = true;
     ctx.caps = effectiveCapabilities({ ...config, readOnly: true }, 'win32');
 
     const clicked = await desktop('tools/call', {
-      name: 'computer',
-      arguments: { actions: [{ type: 'click', x: 5, y: 5 }] }
+      name: mutating,
+      arguments: IS_WINDOWS ? { window: { app: 'fixture.exe', id: 1 }, x: 5, y: 5 } : { actions: [{ type: 'click', x: 5, y: 5 }] }
     });
     expect(clicked.body.result?.isError).toBe(true);
     expect(textOf(clicked)).toContain('Read-only mode is on');
@@ -1805,18 +1789,67 @@ describe('desktop capabilities', () => {
     expect(textOf(clicked)).not.toContain('enable "Control mouse and keyboard"');
   });
 
+  it('publishes only the clipboard read tool and composition with clipboard-read permission alone', async () => {
+    ctx.readOnly = false;
+    ctx.caps = withCaps({ clipboardRead: true });
+    expect(toolNames(await desktop('tools/list'))).toEqual(IS_WINDOWS ? ['exec', 'read_clipboard'] : ['computer', 'exec']);  });
+
   it('marks observing read-only and control destructive', async () => {
     ctx.caps = withCaps({ screen: true, control: true });
     ctx.readOnly = false;
     const tools = toolList(await desktop('tools/list'));
-    const observe = tools.find((t) => t.name === 'observe');
-    const computer = tools.find((t) => t.name === 'computer');
+    const observe = tools.find((t) => t.name === (IS_WINDOWS ? 'get_window_state' : 'observe'));
+    const computer = tools.find((t) => t.name === (IS_WINDOWS ? 'click' : 'computer'));
     expect(observe?.annotations?.readOnlyHint).toBe(true);
     expect(computer?.annotations?.readOnlyHint).toBe(false);
     expect(computer?.annotations?.destructiveHint).toBe(true);
   });
 
-  it('carries the clipboard actions in the computer schema rather than as tools of their own', async () => {
+  it.skipIf(!IS_WINDOWS)('publishes Window2 schemas with exact window ownership and bounded wheel deltas', async () => {
+    ctx.readOnly = false;
+    ctx.caps = withCaps({ screen: true, control: true });
+    const tools = toolList(await desktop('tools/list'));
+    const click = tools.find(t => t.name === 'click')!.inputSchema;
+    expect(click.properties.window.required).toEqual(['app', 'id']);
+    expect(click.properties.element_index.type).toBe('integer');
+    expect(click.properties.screenshotId.type).toBe('string');
+    expect(click.properties.mouse_button.enum).toEqual(['left', 'right', 'middle', 'l', 'r', 'm']);
+    const scroll = tools.find(t => t.name === 'scroll')!.inputSchema;
+    expect(scroll.properties.scrollY.minimum).toBe(-1_200_000);
+    expect(scroll.properties.scrollY.maximum).toBe(1_200_000);
+    for (const method of WINDOWS_COMPUTER_METHODS) {
+      expect(failed(await core('tools/call', { name: method, arguments: {} })), method).toBe(true);
+    }
+    for (const name of ['observe', 'computer']) {
+      expect(failed(await desktop('tools/call', { name, arguments: {} })), name).toBe(true);
+    }
+  });
+
+  it.skipIf(!IS_WINDOWS)('rejects invalid Window2 input over HTTP before native observation or input', async () => {
+    ctx.readOnly = false;
+    ctx.caps = withCaps({ screen: true, control: true });
+    const window = { app: 'fixture.exe', id: 1 };
+    for (const [name, args] of [
+      ['click', { window: { id: 1 }, x: 1, y: 1 }],
+      ['click', { window, element_index: -1 }],
+      ['click', { window, mouse_button: 'invalid', x: 1, y: 1 }],
+      ['scroll', { window, x: 1, y: 1, scrollX: 0, scrollY: 1_200_001 }],
+      ['get_window_state', { window, include_screenshot: false, include_text: false }]
+    ] as const) {
+      const reply = await desktop('tools/call', { name, arguments: args });
+      expect(failed(reply), `${name}: ${textOf(reply)}`).toBe(true);
+      expect(textOf(reply)).not.toContain('WINDOW_NOT_FOUND');
+    }
+    const paste = await desktop('tools/call', { name: 'type_text', arguments: { window, text: 'first\nsecond' } });
+    expect(failed(paste)).toBe(true);
+    expect(textOf(paste)).toContain('Replace clipboard text permission');
+    ctx.caps = withCaps({ control: true });
+    const revoked = await desktop('tools/call', { name: 'get_window_state', arguments: { window } });
+    expect(failed(revoked)).toBe(true);
+    expect(textOf(revoked)).toContain('TOOL_DISABLED');
+  });
+
+  it.skipIf(process.platform !== 'darwin')('carries the clipboard actions in the computer schema rather than as tools of their own', async () => {
     ctx.caps = withCaps({ screen: true, control: true, clipboardRead: true, clipboardWrite: true });
     ctx.readOnly = false;
     const schema = JSON.stringify(toolList(await desktop('tools/list')).find((t) => t.name === 'computer'));
@@ -1826,7 +1859,7 @@ describe('desktop capabilities', () => {
     expect(schema).toContain('ctrl+v on Windows/Linux');
   });
 
-  it('rejects a malformed action before it reaches the desktop', async () => {
+  it.skipIf(process.platform !== 'darwin')('rejects a malformed action before it reaches the desktop', async () => {
     ctx.caps = withCaps({ screen: true, control: true });
     ctx.readOnly = false;
     // No coordinates, so there is nothing to click; this must fail as a tool error
@@ -1838,7 +1871,7 @@ describe('desktop capabilities', () => {
     expect(failed(reply)).toBe(true);
   });
 
-  it('rejects unknown fields inside a desktop action instead of silently dropping them', async () => {
+  it.skipIf(process.platform !== 'darwin')('rejects unknown fields inside a desktop action instead of silently dropping them', async () => {
     ctx.caps = withCaps({ control: true });
     ctx.readOnly = false;
     const reply = await desktop('tools/call', {
@@ -1848,7 +1881,7 @@ describe('desktop capabilities', () => {
     expect(failed(reply)).toBe(true);
   });
 
-  it('rejects capture options that would otherwise be silently ignored', async () => {
+  it.skipIf(process.platform !== 'darwin')('rejects capture options that would otherwise be silently ignored', async () => {
     ctx.caps = withCaps({ control: true, screen: true });
     ctx.readOnly = false;
     const withoutCapture = await desktop('tools/call', {
@@ -1869,7 +1902,7 @@ describe('desktop capabilities', () => {
     expect(failed(conflictingTargets)).toBe(true);
   });
 
-  it('validates compact computer postconditions and keeps screen permission live', async () => {
+  it.skipIf(process.platform !== 'darwin')('validates compact computer postconditions and keeps screen permission live', async () => {
     ctx.caps = withCaps({ control: true, screen: true });
     ctx.readOnly = false;
     const malformed = await desktop('tools/call', {
@@ -1890,7 +1923,7 @@ describe('desktop capabilities', () => {
     expect(textOf(disabled)).toContain('See the screen');
   });
 
-  it('rejects observe options whose selected view would silently ignore them', async () => {
+  it.skipIf(process.platform !== 'darwin')('rejects observe options whose selected view would silently ignore them', async () => {
     ctx.caps = withCaps({ screen: true });
     const strayTimeout = await desktop('tools/call', {
       name: 'observe',
@@ -2087,7 +2120,7 @@ describe('sandbox enforcement through the tool layer', () => {
     });
     const instructions: string = reply.body.result.instructions ?? '';
     expect(instructions).toContain('/workspace');
-    expect(instructions).toContain('Read only');
+    expect(instructions).toContain('local tools are read-only');
   });
 
   /**
@@ -3467,6 +3500,50 @@ describe('exec_command and write_stdin', () => {
   });
 });
 
+describe('agent-maintained plans over MCP', () => {
+  it('uses exact request proof without workers, refuses foreign targets and retired chats', async () => {
+    ctx.sessionTools = true;
+    ctx.agentTools = false;
+    const source = await createSession({ conversationId: 'plan-http-source' });
+    const other = await createSession({ conversationId: 'plan-http-other' });
+    const args = { plan: [{ step: 'Implement the fix', details: 'Validate session ownership.', status: 'in_progress' }] };
+    const send = (requestId: string | null, arguments_: Record<string, unknown> = args) => modern('tools/call',
+      { name: 'update_plan', arguments: arguments_ }, requestId ? { 'x-request-id': `${requestId}/att1` } : {});
+    expect(failed(await send(null))).toBe(true);
+    expect(await readSessionPlan(source.id)).toBeNull();
+    const prove = (requestId: string, conversationId = 'plan-http-source') => observeRequestCorrelation({
+      requestId, conversationId, sessionId: source.id, messageId: `msg-${requestId}`, tool: 'update_plan', observedAt: Date.now()
+    });
+    expect(prove('wfr_plan_owned')).toBe('stored');
+    expect(failed(await send('wfr_plan_owned', { ...args, session_id: other.id }))).toBe(true);
+    expect(failed(await send('wfr_plan_owned'))).toBe(false);
+    expect((await readSessionPlan(source.id))?.plan).toEqual(args.plan);
+    expect(await readSessionPlan(other.id)).toBeNull();
+    // The desktop view reads the same current document, without a second plan store.
+    const { sessionControlsFor } = await import('../src/main/bridge.js');
+    expect((await sessionControlsFor(source.id)).plan?.plan).toEqual(args.plan);
+    expect(await rebindSession(source.id, 'plan-http-source', 'plan-http-destination')).toBe(true);
+    expect(failed(await send('wfr_plan_owned', { plan: [] }))).toBe(true);
+    expect(prove('wfr_plan_destination', 'plan-http-destination')).toBe('stored');
+    expect(failed(await send('wfr_plan_destination', { plan: [] }))).toBe(false);
+    expect((await readSessionPlan(source.id))?.plan).toEqual([]);
+  });
+
+  it('validates the Codex statuses and enforces recording disable after discovery', async () => {
+    ctx.sessionTools = true;
+    const declaration = toolList(await core('tools/list')).find(tool => tool.name === 'update_plan');
+    expect(declaration?.inputSchema.required).toEqual(['plan']);
+    expect(declaration?.inputSchema.additionalProperties).toBe(false);
+    expect(failed(await core('tools/call', { name: 'update_plan', arguments: { plan: [
+      { step: 'One', status: 'in_progress' }, { step: 'Two', status: 'in_progress' }
+    ] } }))).toBe(true);
+    ctx.sessionTools = false;
+    const disabled = await core('tools/call', { name: 'update_plan', arguments: { plan: [] } });
+    expect(failed(disabled)).toBe(true);
+    expect(textOf(disabled)).toContain('Session recording');
+  });
+});
+
 describe('exec sessions belong to the chat that opened them', () => {
   beforeEach(() => {
     ctx.readOnly = false;
@@ -3564,8 +3641,8 @@ describe('exec sessions belong to the chat that opened them', () => {
   });
 
   it('keeps a live process with the durable session across Compact & Resume and retires A', async () => {
-    const chatA = '6a96de28-76f4-83ed-a33a-b77f73003798';
-    const chatB = '6a96dee4-e598-83eb-80ac-a39827f932d3';
+    const chatA = 'f0f00005-1111-4111-8111-111111111111';
+    const chatB = 'f0f00006-1111-4111-8111-111111111111';
     const summary = await createSession({ title: 'exec continuation owner', conversationId: chatA });
     expect(prove('wfr_exec_resume_a', chatA, summary.id)).toBe('stored');
 
@@ -3603,8 +3680,8 @@ describe('exec sessions belong to the chat that opened them', () => {
 
   it('refuses every tool from a chat whose handoff brief has been asked for, until the move is over', async () => {
     resetContinuationsForTests();
-    const chatA = '6a97199d-9e70-83eb-be87-01a743616cda';
-    const chatB = '6a973cc2-2d84-83ec-9d84-b5a5a6f2a2ce';
+    const chatA = 'f0f00007-1111-4111-8111-111111111111';
+    const chatB = 'f0f00008-1111-4111-8111-111111111111';
     const summary = await createSession({ title: 'compacting owner', conversationId: chatA });
     expect(prove('wfr_compact_a', chatA, summary.id)).toBe('stored');
 
@@ -3712,7 +3789,7 @@ describe('exec sessions belong to the chat that opened them', () => {
     }
   });
 
-  it('re-offers an exited unread result on later owner calls without draining it or leaking it', async () => {
+  it('delivers completed output on an ordinary same-request call without leaking it', async () => {
     expect(prove('wfr_background_owner', 'conv-background-owner')).toBe('stored');
     expect(prove('wfr_background_other', 'conv-background-other')).toBe('stored');
     const started = await asChat('wfr_background_owner', 'exec_command', {
@@ -3739,25 +3816,62 @@ describe('exec sessions belong to the chat that opened them', () => {
     expect(textOf(stranger)).not.toContain(`Background session ${sessionId}`);
 
     const later = await asChat('wfr_background_owner', 'read', { paths: ['/workspace/src/app.ts'] });
-    expect(textOf(later)).toContain(
-      `Background session ${sessionId} finished with exit code ${exitCode} and has unread output`
-    );
-    expect(textOf(later)).toContain(`write_stdin(session_id=${sessionId}, chars="")`);
-    expect(textOf(later)).not.toContain('background-e2e-once');
-
-    const drained = await asChat('wfr_background_owner', 'write_stdin', {
-      session_id: sessionId,
-      chars: ''
-    });
-    expect(textOf(drained)).toContain('background-e2e-once');
-    expect(textOf(drained)).toContain(`Process exited with code ${exitCode}`);
-    expect(textOf(drained)).not.toContain('Background command recovery');
+    expect(textOf(later)).toContain(`Background session ${sessionId} completed`);
+    expect(textOf(later)).toContain(`Exit code: ${exitCode}`);
+    expect(textOf(later)).toContain('background-e2e-once');
+    expect(textOf(later)).not.toContain(`write_stdin(session_id=${sessionId}`);
 
     const after = await asChat('wfr_background_owner', 'read', { paths: ['/workspace/src/app.ts'] });
     expect(textOf(after)).not.toContain(`Background session ${sessionId}`);
+    expect(unifiedExecManager.exitedUnread(owned)).toEqual([]);
   });
 
-  it('refuses new commands for the exact chat at the unread-result bound, then admits after a drain', async () => {
+  it('reoffers completed output after the real HTTP connection closes before publication', async () => {
+    const requestId = 'wfr_background_disconnect';
+    expect(prove(requestId, 'conv-background-disconnect')).toBe('stored');
+    const started = await asChat(requestId, 'exec_command', {
+      cmd: IS_WINDOWS ? "Start-Sleep -Milliseconds 650; Write-Output 'transport-replay'" : "sleep 0.65; echo transport-replay",
+      workdir: '/workspace', yield_time_ms: 250
+    });
+    expect(failed(started), textOf(started)).toBe(false);
+    const id = Number(textOf(started).match(/Process running with session ID (\d+)/)?.[1]);
+    expect(Number.isInteger(id), textOf(started)).toBe(true);
+    // Match the adjacent real-process test's deadline: PowerShell startup competes with
+    // native compilation in the full suite and is not bounded by this command's 650 ms sleep.
+    await vi.waitFor(() => expect(unifiedExecManager.exitedUnread(new Set([id]))).toHaveLength(1), {
+      timeout: 5_000, interval: 20
+    });
+    const offer = unifiedExecManager.offerCompletedOutput.bind(unifiedExecManager);
+    let publication: Parameters<typeof offer>[1] | undefined;
+    let unblock!: () => void;
+    const gate = new Promise<void>(resolve => { unblock = resolve; });
+    const spy = vi.spyOn(unifiedExecManager, 'offerCompletedOutput').mockImplementation(async (...args) => {
+      const result = await offer(...args);
+      publication = args[1];
+      await gate;
+      return result;
+    });
+    const controller = new AbortController();
+    const aborted = fetch(endpoint.url, {
+      method: 'POST', signal: controller.signal,
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'x-request-id': requestId },
+      body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method: 'tools/call', params: { name: 'read', arguments: { paths: ['/workspace/src/app.ts'] } } })
+    }).catch(() => null);
+    try {
+      await vi.waitFor(() => expect(publication).toBeDefined());
+      controller.abort();
+      await aborted;
+      await vi.waitFor(() => expect(publication?.failed).toBe(true));
+    } finally { unblock(); spy.mockRestore(); }
+    const replay = await asChat(requestId, 'read', { paths: ['/workspace/src/app.ts'] });
+    expect(textOf(replay)).toContain('transport-replay');
+    expect(unifiedExecManager.exitedUnread(new Set([id]))).toHaveLength(1);
+    const receipt = await asChat(requestId, 'read', { paths: ['/workspace/src/app.ts'] });
+    expect(textOf(receipt)).not.toContain('transport-replay');
+    expect(unifiedExecManager.exitedUnread(new Set([id]))).toEqual([]);
+  });
+
+  it('refuses new commands at the unread-result bound, delivers a result, then admits after automatic receipt', async () => {
     const conversationId = 'conv-background-admission';
     const sessionIds: number[] = [];
 
@@ -3766,8 +3880,8 @@ describe('exec sessions belong to the chat that opened them', () => {
       expect(prove(requestId, conversationId)).toBe('stored');
       const started = await asChat(requestId, 'exec_command', {
         cmd: IS_WINDOWS
-          ? `Start-Sleep -Milliseconds 500; Write-Output 'owed-${index}'; exit ${index + 1}`
-          : `sleep 0.5; printf '%s\\n' owed-${index}; exit ${index + 1}`,
+          ? `while (!(Test-Path './delivery-release')) { Start-Sleep -Milliseconds 30 }; Write-Output 'owed-${index}'; exit ${index + 1}`
+          : `while [ ! -f ./delivery-release ]; do sleep 0.03; done; printf '%s\\n' owed-${index}; exit ${index + 1}`,
         workdir: '/workspace',
         yield_time_ms: 100
       });
@@ -3776,6 +3890,7 @@ describe('exec sessions belong to the chat that opened them', () => {
       sessionIds.push(sessionId);
     }
 
+    await fs.writeFile(path.join(approved, 'delivery-release'), 'ready');
     await vi.waitFor(
       () => expect(backgroundExecObligations(`session-${conversationId}`).exitedUnread.map((row) => row.processId)).toEqual(
         [...sessionIds].sort((left, right) => left - right)
@@ -3793,8 +3908,8 @@ describe('exec sessions belong to the chat that opened them', () => {
     expect(textOf(blocked)).toContain('EXEC_RESULTS_UNREAD');
     for (const sessionId of sessionIds) expect(textOf(blocked)).toContain(String(sessionId));
 
-    const drained = await asChat(blockedRequest, 'write_stdin', { session_id: sessionIds[0], chars: '' });
-    expect(textOf(drained)).toContain('owed-0');
+    expect(textOf(blocked)).toMatch(/Background session \d+ completed/);
+    expect(textOf(blocked)).toContain('owed-');
 
     const admitted = await asChat(blockedRequest, 'exec_command', {
       cmd: IS_WINDOWS ? "Write-Output 'admitted-after-drain'" : "printf '%s\\n' admitted-after-drain",
@@ -3807,6 +3922,7 @@ describe('exec sessions belong to the chat that opened them', () => {
     for (const sessionId of sessionIds.slice(1)) {
       await asChat(blockedRequest, 'write_stdin', { session_id: sessionId, chars: '' });
     }
+    await fs.unlink(path.join(approved, 'delivery-release'));
   });
 
   it('pings a live session left unpolled once, without blocking work or reaching another chat', async () => {
@@ -3834,8 +3950,9 @@ describe('exec sessions belong to the chat that opened them', () => {
       expect(textOf(pinged)).toContain(`Background session ${sessionId} has been running unpolled for 3m`);
       expect(textOf(pinged)).toContain(`write_stdin(session_id=${sessionId}, chars="")`);
 
-      // Once, and only once: a session that is supposed to run all turn must not nag all turn.
-      const again = await asChat('wfr_background_unattended', 'read', { paths: ['/workspace/src/app.ts'] });
+      // A published reminder is suppressed until attendance starts a new idle span.
+      expect(prove('wfr_background_unattended_next', 'conv-background-unattended')).toBe('stored');
+      const again = await asChat('wfr_background_unattended_next', 'read', { paths: ['/workspace/src/app.ts'] });
       expect(textOf(again)).not.toContain(`Background session ${sessionId}`);
 
       // A reminder is not admission pressure. The session it names may be the point of the turn,

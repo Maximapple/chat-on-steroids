@@ -6,7 +6,8 @@ const root = process.cwd();
 const source = (rel: string) => readFileSync(path.join(root, ...rel.split('/')), 'utf8');
 const swift = source('native/macos-desktop-helper/main.swift');
 const computer = source('src/main/computer/index.ts');
-const tools = source('src/main/mcp/tools-desktop.ts');
+// Upstream split the Desktop tools per platform; the macOS contract lives in its own file.
+const tools = source('src/main/mcp/tools-desktop-macos.ts');
 const instructions = source('src/main/mcp/instructions.ts');
 const ci = source('.github/workflows/ci.yml');
 
@@ -19,7 +20,10 @@ describe('macOS Computer Use v16 input routing', () => {
   });
 
   it('fails closed for physical mutations without an exact WindowLease', () => {
-    expect(computer).toContain('targetWindow?: number');
+    // Named `window` on the options since upstream's split, `targetWindow` on the result and
+    // in the helper request. The contract is the same: one exact input target, carried in.
+    expect(computer).toContain('window?: number;');
+    expect(computer).toContain('ownerWindow?: number;');
     expect(computer).toContain('const inferredTargetWindow');
     expect(computer).toContain('const requiresWindowLease');
     expect(computer).toContain('INPUT_TARGET_REQUIRED: physical pointer and application text mutations require targetWindow');
@@ -33,7 +37,7 @@ describe('macOS Computer Use v16 input routing', () => {
 
   it('carries a semantic ref target forward into following keyboard input', () => {
     expect(swift).toMatch(/case "click_ui", "set_value_ui":[\s\S]*leasedWindow = actionWindow[\s\S]*case "type":[\s\S]*targetWindow: target/);
-    expect(computer).toContain('{ targetWindow: inferredTargetWindow }');
+    expect(computer).toContain('targetWindow: opts.window');
   });
 
   it('does not activate a window merely to validate its coordinate frame', () => {
@@ -43,12 +47,14 @@ describe('macOS Computer Use v16 input routing', () => {
   });
 
   it('exposes closed-loop targetWindow and automatic result capture', () => {
-    expect(tools).toContain('targetWindow: windowIdArg.optional()');
+    expect(tools).toContain('window: windowIdArg.optional()');
     expect(tools).toContain('decisionActions.length > 1');
     expect(tools).toContain('const autoCapture = caps.screen && captureAfter !== false && mutatesDesktop');
     expect(tools).toContain('captureMaxWidth ?? (autoCapture ? 1600 : undefined)');
     expect(computer).toContain('captureFallback');
-    expect(computer).toContain('capture.window = result.targetWindow');
+    // The default result capture still follows the input target; it is resolved from the
+    // options under the action lock now rather than read back off the result.
+    expect(computer).toContain('capture.window = opts.targetWindow ?? opts.window ??');
     expect(computer).toContain('targetWindow: inferredTargetWindow ?? null');
     expect(instructions).toContain('pass the observed window id as targetWindow');
   });

@@ -93,6 +93,25 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
+it('persists Pro Loop delivery across toggles and restart without granting Goal browser continuation', async () => {
+  const id = 'pro-loop-delivery-test';
+  const session = await createSession({ conversationId: id });
+  await observeSessionModel(session.id, id, 'gpt-6-pro', Date.now(), 'pro');
+  await goal.setGoalSwitchNow(id, 'loop', true);
+  expect(await goal.astraFinishOnly(session.id, id)).toBe(true);
+  await goal.setGoalSwitchNow(id, 'loop', true, true);
+  expect(await goal.astraFinishOnly(session.id, id)).toBe(false);
+  const saved = goal.snapshotGoalSwitches();
+  goal.restoreGoalSwitches(saved);
+  expect(goal.loopAfterTurnFor(id)).toBe(true);
+  await goal.setGoalSwitchNow(id, 'loop', false);
+  expect(goal.loopAfterTurnFor(id)).toBe(false);
+  await goal.setGoalSwitchNow(id, 'loop', true);
+  expect(goal.loopAfterTurnFor(id)).toBe(true);
+  await goal.setGoalSwitchNow(id, 'goal', true);
+  expect(await goal.astraFinishOnly(session.id, id)).toBe(true);
+});
+
 it('keeps a withdrawn synthetic reply revoked when the deletion write fails and Goal is re-armed', async () => {
   const conversationId = 'deletion-failure-pro';
   const session = await createSession({ conversationId, title: 'Synthetic revocation' });
@@ -306,6 +325,18 @@ describe('what leaves this machine', () => {
     expect(sent.includes('Inspecting the project')).toBe(true);
     expect(sent.includes('tool-result-evidence')).toBe(includeToolCalls);
     expect(sent.includes('/project/example')).toBe(includeToolCalls);
+  });
+
+  it('gives decision helpers authored requests without executor guidance in the reference transcript', async () => {
+    const { prependUserPrompt } = await import('../src/shared/user-prompt.js');
+    const session = await createSession({ title: 'authored helper context', conversationId: 'authored-helper-context' });
+    const framed = prependUserPrompt('Full workflow carrier', 'EXECUTOR_GUIDANCE_ONLY');
+    await appendEvent(session.id, { time: 100, source: 'app', kind: 'user_message', messageId: 'authored-helper-user',
+      authoredText: 'Original user requirements', message: { text: framed.replace(/\n\n/g, '\n'), chars: framed.length, truncated: false } });
+    const next = prependUserPrompt('Next checkpoint', 'EXECUTOR_GUIDANCE_ONLY');
+    expect(await goal.conversationMessages(session.id, [next])).toEqual([
+      { role: 'user', content: 'Original user requirements' }, { role: 'user', content: 'Next checkpoint' }
+    ]);
   });
 
   /**
@@ -1990,13 +2021,13 @@ describe('a chat driven towards a specific goal', () => {
    * has been told "not you" cannot be talked back into it by a later change somewhere else.
    */
   it('lets one chat answer the Goal switch for itself, and leaves the rest inheriting', async () => {
-    expect(goal.goalSwitchFor('c-switch-quiet')).toEqual({ enabled: true, mode: 'goal', own: false });
+    expect(goal.goalSwitchFor('c-switch-quiet')).toEqual({ enabled: true, mode: 'goal', own: false, afterTurn: false });
 
     expect(await goal.setGoalSwitchNow('c-switch-loud', 'loop', true)).toEqual({ enabled: true, mode: 'loop' });
-    expect(goal.goalSwitchFor('c-switch-loud')).toEqual({ enabled: true, mode: 'loop', own: true });
+    expect(goal.goalSwitchFor('c-switch-loud')).toEqual({ enabled: true, mode: 'loop', own: true, afterTurn: false });
     expect(goal.goalDrivingMode('c-switch-loud')).toBe('loop');
     // Its neighbour, and the app-wide setting the neighbour still follows, are untouched.
-    expect(goal.goalSwitchFor('c-switch-quiet')).toEqual({ enabled: true, mode: 'goal', own: false });
+    expect(goal.goalSwitchFor('c-switch-quiet')).toEqual({ enabled: true, mode: 'goal', own: false, afterTurn: false });
     expect(goal.goalDrivingMode('c-switch-quiet')).toBe('goal');
 
     // Turning off the mode that is *not* running changes nothing, exactly as the app-wide
@@ -2019,13 +2050,13 @@ describe('a chat driven towards a specific goal', () => {
     expect(goal.goalSwitchFor('c-switch-parent').own).toBe(false);
 
     goal.restoreGoalSwitches(saved);
-    expect(goal.goalSwitchFor('c-switch-parent')).toEqual({ enabled: true, mode: 'loop', own: true });
+    expect(goal.goalSwitchFor('c-switch-parent')).toEqual({ enabled: true, mode: 'loop', own: true, afterTurn: false });
 
     // Compact & Resume replaces the conversation and the loop goes on running in its
     // replacement; leaving the override behind would hand chat B back to the app-wide setting.
     expect(goal.moveGoalSwitch('c-switch-parent', 'c-switch-child')).toBe(true);
     expect(goal.goalSwitchFor('c-switch-parent').own).toBe(false);
-    expect(goal.goalSwitchFor('c-switch-child')).toEqual({ enabled: true, mode: 'loop', own: true });
+    expect(goal.goalSwitchFor('c-switch-child')).toEqual({ enabled: true, mode: 'loop', own: true, afterTurn: false });
 
     // The app's own switch going off is the master stop and reaches every override there is.
     goal.clearAllGoalSwitches();
