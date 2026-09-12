@@ -212,12 +212,31 @@ function send(method, params = {}, timeoutMs = COMMAND_TIMEOUT_MS) {
 async function groupDrivenTab(tabId) {
   try {
     if (!chrome.tabs?.group || !chrome.tabGroups?.update) return null;
-    // A stray group from a session this worker no longer remembers (see sweepStaleDrivenGroups
-    // below) must not be left standing beside the one this call is about to create — that is
-    // exactly how two "Chat On Steroids" bands end up visible at once.
-    await sweepStaleDrivenGroups();
-    const groupId = await chrome.tabs.group({ tabIds: [tabId] });
+    // Join this window's existing band rather than minting one per attach. Chrome saves tab
+    // groups, and a saved group leaves an entry in the bookmarks bar that outlives the group
+    // itself — no extension API removes one. Creating a group per attach therefore did not cost
+    // a band, which the sweep below already cleaned up; it cost one bookmarks-bar entry per run,
+    // kept forever, which is what a person actually sees pile up.
+    let windowId;
+    try { windowId = (await chrome.tabs.get(tabId))?.windowId; } catch { /* unknown window */ }
+    let reuse = null;
+    if (chrome.tabGroups?.query) {
+      try {
+        const found = await chrome.tabGroups.query(windowId === undefined
+          ? { title: DRIVEN_GROUP_TITLE } : { title: DRIVEN_GROUP_TITLE, windowId });
+        reuse = Array.isArray(found) && found.length > 0 ? found[0] : null;
+      } catch { /* querying is optional; falling back to a fresh group still works */ }
+    }
+    // Joined before the old members leave, because a group Chrome sees empty is a group Chrome
+    // removes — and removing it is exactly what mints the next bookmarks-bar entry.
+    const groupId = await chrome.tabs.group(reuse
+      ? { tabIds: [tabId], groupId: reuse.id } : { tabIds: [tabId] });
     await chrome.tabGroups.update(groupId, { title: DRIVEN_GROUP_TITLE, color: 'blue' });
+    // A stray group from a session this worker no longer remembers (see sweepStaleDrivenGroups
+    // below) must not be left standing beside the one being used — that is exactly how two
+    // "Chat On Steroids" bands end up visible at once. The band now in use is spared, and so is
+    // the tab that just joined it.
+    await sweepStaleDrivenGroups(groupId, tabId);
     return groupId;
   } catch {
     return null;
@@ -260,7 +279,7 @@ async function ungroupDrivenTab(tabId, groupId) {
  * timer (so an orphan is still caught even if nothing ever attaches again). Never touches the
  * tabs themselves — same as `detach`, only the grouping goes away, never the page.
  */
-export async function sweepStaleDrivenGroups() {
+export async function sweepStaleDrivenGroups(keepGroupId = null, keepTabId = null) {
   if (!chrome.tabGroups?.query || !chrome.tabs?.query || !chrome.tabs?.ungroup) return;
   let groups;
   try {
@@ -270,9 +289,14 @@ export async function sweepStaleDrivenGroups() {
   }
   for (const group of groups) {
     if (session && group.id === session.groupId) continue;
+    // The band this attach just joined stays, and only the members it inherited leave it: the
+    // group survives, so Chrome has no removal to save, and the band still says only what is
+    // being driven now.
+    const reusing = keepGroupId !== null && group.id === keepGroupId;
     try {
       const tabs = await chrome.tabs.query({ groupId: group.id });
-      const tabIds = tabs.map((tab) => tab.id).filter((id) => typeof id === 'number');
+      const tabIds = tabs.map((tab) => tab.id)
+        .filter((id) => typeof id === 'number' && !(reusing && id === keepTabId));
       if (tabIds.length > 0) await chrome.tabs.ungroup(tabIds);
     } catch {
       // The group or its tabs may already be gone by the time this runs. Best effort, same as
