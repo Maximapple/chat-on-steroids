@@ -5533,7 +5533,13 @@ const turnRepairSpent = new Map<string, { sessionId: string; turnKey: string }>(
  * remedy is no longer the proven-useless one.
  */
 const SILENCE_RELOAD_ATTEMPTS = 3;
-const silenceProvenUseless = new Map<string, { turnKey: string; error: string; attempts: number; told: boolean }>();
+/**
+ * How many silence reloads one wedged episode may spend in total, whatever the page calls the
+ * trouble each time. Higher than the per-failure budget on purpose: genuinely varied trouble is
+ * worth more attempts than identical trouble, and this only stops the unbounded case.
+ */
+const SILENCE_EPISODE_CEILING = 5;
+const silenceProvenUseless = new Map<string, { turnKey: string; error: string; attempts: number; episodeAttempts: number; told: boolean }>();
 
 /**
  * Whether a recorded silence verdict still describes what the chat is doing.
@@ -5619,15 +5625,16 @@ function queueBrowserRecovery(
     // clears, so comparing it alone handed a chat that had just given up a fresh budget — the
     // event that most confirms the verdict was the one discarding it. Only a turn actually
     // running again makes this a different question.
-    if (proven && silenceEpisodeHolds(proven.turnKey, live) && proven.attempts >= SILENCE_RELOAD_ATTEMPTS) {
+    if (proven && silenceEpisodeHolds(proven.turnKey, live) &&
+        (proven.attempts >= SILENCE_RELOAD_ATTEMPTS || proven.episodeAttempts >= SILENCE_EPISODE_CEILING)) {
       if (!proven.told) {
         proven.told = true;
         // Sixteen silent retries with no user-visible verdict was its own half of this defect:
         // the app knew the turn was dead and said so only to its log.
         void recordNote(
           sessionId,
-          `Stopped reloading this chat: ${SILENCE_RELOAD_ATTEMPTS} reloads each came back with the same failure — ` +
-            `"${proven.error.slice(0, 200)}". The turn is broken on ChatGPT's side, which a reload cannot repair. ` +
+          `Stopped reloading this chat: ${proven.episodeAttempts} reloads each came back with it still broken — ` +
+            `last "${proven.error.slice(0, 200)}". The turn is broken on ChatGPT's side, which a reload cannot repair. ` +
             'Continue in a new chat, or send a message here to start a fresh turn.'
         ).catch(() => undefined);
         logWarn(`bridge: ${conversationId} answered ${SILENCE_RELOAD_ATTEMPTS} silence reloads with the same failure — not reloading it again`);
@@ -5831,8 +5838,24 @@ async function noteRecoveryObservations(
       const proven = silenceProvenUseless.get(conversationId);
       // Counted under the same rule the refusal reads, or the count resets itself the moment
       // the turn ends and the budget is silently refilled.
-      if (proven && proven.error === error && silenceEpisodeHolds(proven.turnKey, live)) proven.attempts += 1;
-      else silenceProvenUseless.set(conversationId, { turnKey, error, attempts: 1, told: false });
+      // The per-failure budget below is deliberate and stays: a chat whose trouble is different
+      // every time has not answered anything the same way, and muting its liveness check is how
+      // a wedged chat went unnoticed before this watchdog existed.
+      //
+      // But the wording is not a reliable name for the trouble. Measured on 2026-09-12, one turn
+      // reported a single wedge as "Connection interrupted" three times and then as "Message
+      // delivery timed out" twice — and two variants of that second message, with and without a
+      // trailing "Retry", already counted as separate failures. Each switch reset the per-failure
+      // count, so the chat could never exhaust its budget at all.
+      //
+      // So the per-failure count keeps its meaning and a second, wording-blind count bounds the
+      // episode. Varied trouble still buys more attempts than identical trouble; nothing buys
+      // unlimited ones.
+      if (proven && silenceEpisodeHolds(proven.turnKey, live)) {
+        proven.attempts = proven.error === error ? proven.attempts + 1 : 1;
+        proven.episodeAttempts += 1;
+        proven.error = error;
+      } else silenceProvenUseless.set(conversationId, { turnKey, error, attempts: 1, episodeAttempts: 1, told: false });
     }
     // Auto-compaction owns this chat's recovery clock until its ticket commits or is cancelled.
     // A native error inside a handoff is not permission for the ordinary two-minute response
