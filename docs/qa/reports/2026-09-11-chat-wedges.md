@@ -308,12 +308,13 @@ Six consecutive handoffs, all committed **from the server-authored marker, never
 ACK** — which is exactly what a page that never obtained an id would produce. The handoff succeeds
 anyway, which is why the failed half went unnoticed.
 
-### What is still unknown
+### Why the loop finds nothing — answered in §9c
 
-Why `bootstrapConversation()` returns nothing for 40 s in a chat that demonstrably has an id —
-the app is committing against it seconds later. That is the thing to measure next, and it matters
-beyond the composer: a resume whose page never binds its id also never runs
-`rememberResumeGoalPending`, so whatever depends on that is silently skipped too.
+Why `bootstrapConversation()` returns nothing for 40 s in a chat that demonstrably has an id was
+the open question here, and §9c below answers it: the page cannot accept its own submitted
+message, because the conversation guard in `matchesSubmittedUser` compares the address against a
+name the address is incapable of carrying. It mattered beyond the composer exactly as suspected —
+a resume whose page never binds its id also never runs `rememberResumeGoalPending`.
 
 ### What not to do
 
@@ -321,88 +322,120 @@ Do not simply add a clear to the fall-through. It would tidy the symptom and lea
 failing to bind its own conversation — and the earlier `clearPromptExact` fix was already removed
 once, in `c7e7344`, for being the wrong layer.
 
-## 9c. Why the receipt fails — MEASURED, and it is neither of the two candidates as stated
+## 9c. Why the receipt fails — FIXED, and both earlier readings of it were wrong
 
-`matchesSubmittedUser` was instrumented in the shipped extension, recording six values per call
-and no text content. One resume handoff, 2026-09-11 12:58.
-
-### Raw lines
-
-Successor chat, 120 calls:
-
-```
-{"at":"12:58:43.366","exit":"compared","turnFound":false,"conversationSame":null,"authored":0,
- "branch":"message.text","actualLen":69504,"expectedLen":60425,"squeezedEqual":false,
- "result":false,"path":"/c/WEB:153a2e6b-…"}
-{"at":"12:58:43.533","exit":"fiber-conversation-mismatch","turnFound":true,
- "conversationSame":false,"expectedLen":60425,"result":false,"path":"/c/WEB:153a2e6b-…"}
-{"at":"12:58:44.370","exit":"fiber-conversation-mismatch","turnFound":true,
- "conversationSame":false,"expectedLen":60425,"result":false,"path":"/c/WEB:153a2e6b-…"}
-… 116 further fiber-conversation-mismatch, path "/c/6aa3fb02-…"
-```
-
-Totals: `fiber-conversation-mismatch` **119**, `compared` **1**, spanning 12:58:43.533 to
-12:59:21.515 — **38 seconds**, i.e. the 80 × 500 ms poll window running to exhaustion.
-
-Control, from the established chat in the same store:
-
-```
-{"at":"12:54:26.493","exit":"compared","turnFound":false,"authored":0,"branch":"message.text",
- "actualLen":5758,"expectedLen":5801,"squeezedEqual":true,"result":true,"path":"/c/6aa3e67c-…"}
-```
-
-The function works normally in a chat that already exists.
-
-### What the lines say
-
-**Candidate (a) is the cause, but not in the form it was proposed.** The proposal was Fiber's
-*provisional* thread id — a transitional state. The measurement shows it is not transitional:
-
-```
-path "/c/WEB:153a2e6b-…"          4 calls
-path "/c/6aa3fb02-…"            116 calls
-```
-
-Only the first four calls happen while the address still carries the `WEB:` client-side thread id.
-The remaining **116 mismatches occur after the route has settled on the real conversation id** —
-`CLF_DOM.conversationId()` returns the real one, and the Fiber turn keeps returning the
-provisional one. They never converge, and the guard
+`matchesSubmittedUser` refuses when the Fiber turn stamped onto the rendered row names a
+different conversation than the address does:
 
 ```js
 if (turn && turn.conversationId !== CLF_DOM.conversationId()) return false;
 ```
 
-therefore refuses for the rest of the window.
+Two instrumented handoffs say that this refusal is what breaks a resume, and the second one says
+why. Both recorded booleans and lengths only.
 
-**Candidate (b) is refuted, in the opposite direction to the one proposed.** The single call that
-reached the text comparison did so before any Fiber turn existed, and fell back to `message.text`:
+### The two measurements
+
+2026-09-11, 120 calls: `fiber-conversation-mismatch` **119**, `compared` **1**, spanning 38 s —
+the 80 × 500 ms ack poll running to exhaustion. Only the first four happened while the address
+still carried a provisional thread id; the remaining **116 refusals came after the route had
+settled on the real conversation id**.
+
+2026-09-12, the same shape with the turn's own name measured, 110 calls over **38.6 s**:
+
+| field | result |
+| --- | --- |
+| `provisional` | true in **110 of 110** |
+| `hasColon`, `prefixAlpha`, `prefixLen` | true, true, **3** |
+| `tailIsUuidish` | true in 110 of 110 |
+| `tailEqualsRoute` | **false in 110 of 110** |
+| `routeNull` / `routeSettled` | 4 / **106** |
+| `turnIdLen` | 40 |
+
+So the Fiber turn's name is a three-letter prefix, a colon, and a full 36-character uuid — and
+that uuid is not the one in the address.
+
+### What it is not
+
+**It is not a transitional state.** That was the first reading, and 116 of 120 refusals after the
+route settled disprove it. Waiting longer cannot help: the ack loop already waits 40 s.
+
+**It is not Fiber holding a different conversation.** That was the second reading, taken from
+`tailEqualsRoute` being false, and it is wrong for a reason the code states plainly in two places.
+`fiber.js` reports
+
+```js
+conversationId: str(group.clientThreadId) || str(group.conversationId)
+```
+
+— the client thread id *wins whenever it exists*, which until the server has named the chat is
+always. `content.js` says the same of `data-turn-id`, which after a reload reads
+`request-WEB:<load-uuid>-<n>`: a name that "belongs to one page load and to nothing beyond it".
+A page-minted name is therefore expected in a chat this page just created, and its uuid half is
+the page's own thread, not some other conversation.
+
+What settles it is that no address can carry such a name at all. `conversationFromPath` accepts
+`[0-9a-f-]{8,64}` and nothing else:
 
 ```
-actualLen 69504   expectedLen 60425   diff +9079   squeezedEqual false
+/c/WEB:6aa53b58-…   -> conversationId() = null
+/c/6aa53b58-…       -> conversationId() = 6aa53b58-…
 ```
 
-The rendered bubble is **9,079 characters longer** than what was sent, after whitespace is
-squeezed out of both. Not a clamped bubble — a longer one. What those extra characters are was
-not measured and is the obvious next question, but truncation is excluded.
+A turn wearing a provisional name can never equal the route, in any chat, ever. The comparison
+has exactly one possible answer for those turns, which makes it a question that cannot come out
+otherwise rather than evidence about which conversation the turn belongs to. `refreshFiber`
+already draws that same line: `concreteConversation` tests the identical character class, treats
+a non-uuid name as "no claim", and keeps such a descriptor where it discards one that genuinely
+names another chat.
 
-### Consequences
+### The fix
 
-Both symptoms follow from this single refusal, as predicted:
+`extension/content.js` now exempts exactly those names, and nothing else:
 
-- `send()`'s only admissible proof in a brand-new chat is this function, so it returns false and
-  `content.js` takes its silent return — the composer keeps the brief.
-- The ack loop polls the same failing probe for 40 s, exhausts, and sends the bare ack that clears
-  nothing.
-- The page never binds its own conversation, so the commit arrives from the server-authored marker
-  instead — which the log shows for every handoff — and `rememberResumeGoalPending` never runs.
+```js
+const provisionalThreadName = (value) => typeof value === 'string' && /^[A-Za-z]+:/.test(value);
+if (turn && !provisionalThreadName(turn.conversationId) &&
+    turn.conversationId !== CLF_DOM.conversationId()) return false;
+```
 
-### What this does not settle
+Unknown is not mismatch. A concrete id that genuinely differs is still a mismatch and is still
+refused.
 
-Whether the Fiber turn's provisional id ever updates, or whether the branch is permanently
-detached for a resumed chat. 120 calls over 38 seconds say it does not update within the window
-that matters; they say nothing about a minute later. That is one more instrumented handoff away,
-and it decides whether the fix is "wait longer" (it is not, the window is already 40 s) or "stop
-comparing against the Fiber turn's conversation id in a chat this page just created".
+Four cases in `test/content-script.test.ts`, under *a send receipt in a chat the page has only
+just created*, all built on the working ordering of the receipt test above them — Fiber journals
+the authored user object, the app anchors it, the bubble renders last — with the descriptor
+stamped onto the user section so the comparison is actually reached:
+
+| case | before | after |
+| --- | --- | --- |
+| settled route, turn named `WEB:<route>` | 0 turns opened | 1 |
+| settled route, turn named `<route>` (control) | 1 | 1 |
+| no route yet, turn named another chat's bare uuid (control) | 0 | 0 |
+| no route yet, turn named `WEB:<other>` | 0 | 1 |
+
+The third case is the one that matters for the guard's remaining job: before ChatGPT assigns an
+id there is no conversation to filter descriptors against, so `refreshFiber` keeps all of them
+and a turn that really does name another chat reaches this line — and is still refused after the
+fix. The fourth differs from it by one character class and must be accepted; together they show
+the exemption is the name's shape and not the fixture.
+
+### Consequences this closes
+
+- `send()`'s only admissible proof in a brand-new chat is this function, so it returned false and
+  `content.js` took its silent return — the composer kept the brief.
+- The ack loop polled the same failing probe for 40 s, exhausted, and sent the bare ack that
+  clears nothing.
+- The page never bound its own conversation, so every handoff committed from the server-authored
+  marker instead, and `rememberResumeGoalPending` never ran.
+
+### What this still does not settle
+
+The single 2026-09-11 call that reached the text comparison found the rendered bubble **9,079
+characters longer** than what was sent, whitespace squeezed out of both (69,504 vs 60,425). Not a
+clamped bubble — a longer one. What those extra characters are was never measured, and this fix
+does not touch it. It matters only on the path where a Fiber turn is absent entirely, which is
+why it did not block the fix above.
 
 ## 10. What not to do
 
