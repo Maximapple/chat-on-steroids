@@ -95,7 +95,7 @@ describe('desktop partial batch result', () => {
       act([
         { type: 'type', text: 'first' },
         { type: 'type', text: 'second' }
-      ], { window: 42 })
+      ], { targetWindow: 42 })
     ).rejects.toMatchObject({
       completedCount: 1,
       failedIndex: 1,
@@ -118,7 +118,7 @@ describe('desktop partial batch result', () => {
       act([
         { type: 'type', text: 'first' },
         { type: 'type', text: 'second' }
-      ], { window: 42 })
+      ], { targetWindow: 42 })
     ).rejects.toMatchObject({
       completedCount: 1,
       failedIndex: 1,
