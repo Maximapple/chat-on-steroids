@@ -41,9 +41,10 @@ import {
   mouseButtonArg,
   ok,
   pointArg,
-  windowIdArg,
+  toolDisabledMessage,
   type SurfaceRegistrar,
-  type ToolContent
+  type ToolContent,
+  windowIdArg
 } from './kernel.js';
 
 /**
@@ -568,10 +569,11 @@ export function registerMacOSDesktopTools(reg: SurfaceRegistrar): void {
           // need "control", the clipboard steps need their own, and one blanket refusal
           // would hide which of them the user actually has to switch on.
           if (!caps.control && actions.some((a) => a.type !== 'wait' && !a.type.endsWith('_clipboard'))) {
-            return fail(
-              'TOOL_DISABLED: mouse and keyboard control is disabled by the current Chat On Steroids permissions. ' +
-                'Ask the user to enable "Control mouse and keyboard" in the app, then retry.'
-            );
+            // Through the shared message, so Read-only is blamed by name when Read-only is what
+            // took the capability away. The refusal written here named the checkbox instead, and
+            // a user whose box is already ticked is then sent to tick it again — the one thing
+            // this wording exists to prevent. Windows already went through this path.
+            return fail(toolDisabledMessage(ctx.readOnly, 'control', 'computer', 'Control mouse and keyboard'));
           }
           const parsed: Action[] = [];
           for (const a of actions) {
