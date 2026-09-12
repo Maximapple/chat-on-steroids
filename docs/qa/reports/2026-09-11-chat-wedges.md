@@ -481,3 +481,78 @@ Whether "Refresh" now lives in the menu behind the `Plugin actions` button. A sy
 not open it (`aria-expanded` stays false), and calling page callbacks is out of bounds. That
 decides whether the feature returns or simply ends cleanly through the manual branch — which now
 works either way.
+
+## 12. What a wedge actually looks like, watched live (2026-09-12)
+
+A run was watched end to end with the app log captured through rotation. It produced the first
+direct anatomy of a wedge, and closed three more candidate explanations.
+
+### The anatomy
+
+```
+06:20:35  handoff committed → fresh chat        (10.8 s, the fourth in a row to succeed)
+…         63 minutes of steady work, ~8 tool calls per minute
+07:21:53  write_stdin   ok in 1104 ms   → 200 in 1116ms
+07:21:59  write_stdin   ok in 1106 ms   → 200 in 1117ms
+          ─── nothing ───
+07:23:59  silent for two minutes — reload
+07:24:19  assistant transport failure          (20 s after the reload)
+07:26:19  reload
+07:26:50  assistant transport failure          (31 s after the reload)
+07:28:49  reload
+```
+
+**The last tool call completed cleanly.** 1.1 s, status 200, no error, no delay. The break happens
+in the pause *after* a successful exchange, with no tool call involved. Two calls that had taken
+30 s each ran at 07:18 and 07:19 and both finished successfully; between them and the break lie two
+minutes of fast, ordinary calls.
+
+**Every reload reproduces the failure within 20–31 seconds.** A freshly loaded page asks about the
+open turn and is refused again immediately. That is not a transient network blip: the broken state
+is server-side and bound to that turn, which is also why only a new message helps — it starts a
+turn that is not broken.
+
+### Three more explanations refuted
+
+**Turn size is not the mechanism.** Failure rate rises steeply with tool count (4.2 % below 150
+calls, 36.6 % at or above, p < 0.0001) — but normalising by time at risk flattens it:
+
+| Turn duration | turns | hours at risk | failures | per hour |
+|---|---|---|---|---|
+| 0–1 min | 53 | 0.3 | 0 | 0.00 |
+| 1–10 min | 93 | 6.2 | 0 | 0.00 |
+| 10–30 min | 53 | 15.0 | 3 | 0.20 |
+| 30–60 min | 34 | 24.5 | 11 | 0.45 |
+| > 60 min | 22 | 34.9 | 10 | 0.29 |
+
+The hazard settles around a constant **0.30 failures per turn-hour** — 24 failures over 80.9
+turn-hours, an expected survival of about 202 minutes. Long turns do not fail *because* they are
+long; they are exposed for longer. Cutting turns into smaller pieces therefore changes nothing,
+and neither does lowering the compaction threshold. The user said as much before the measurement
+did.
+
+**Polling is not the cause either.** Turn transcripts look full of `sleep`/status calls, but they
+are 956 of 16,971 calls — **5.6 %**, 0.11 h against 16.92 h of real work, median 3 % in turns of
+100+ calls. The turns are working, not idling.
+
+**And the version question stays open.** The log only reaches back two days, so the user's
+recollection that this did not happen on 2.0.2 remains untestable — the third time that question
+has been raised and left unanswered for want of history.
+
+### What is still missing, and why
+
+The one thing that would settle the mechanism is ChatGPT's own network traffic at the moment of
+the break: whether `Message delivery timed out` is a real timeout, a 5xx, or a severed stream.
+That needs DevTools, and Chrome refuses it on the profile in use — verified by its own message
+rather than inferred:
+
+```
+DevTools remote debugging requires a non-default data directory.
+Specify this using --user-data-dir.
+```
+
+A copied profile would allow it but is not the profile the work happens in. Reading
+`performance.getEntriesByType('resource')` from the wedged tab is the remaining route, with one
+catch learned the hard way: **the app's own recovery reloads the page and wipes that history**.
+Blocking the chat first (`isChatBlocked` refuses every recovery trigger) freezes the state long
+enough to read it.
