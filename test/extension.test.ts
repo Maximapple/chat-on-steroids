@@ -3281,7 +3281,12 @@ describe('extension observation journal', () => {
     });
     await worker.send({ type: 'bind', conversationId }, 12);
     await worker.startTabNavigation(12);
-    expect(closed).toEqual([conversationId]);
+    // Waited for, not counted out. The departure reads the tab back before judging it, so the
+    // release lands a few event-loop turns after the listener returns — and how many is a
+    // property of the path, not a number this test can know. Two fixed turns were enough until
+    // that read was added, and then this passed on one platform and failed on another for a
+    // difference in scheduling rather than in behaviour.
+    await vi.waitFor(() => expect(closed).toEqual([conversationId]), { timeout: 5_000, interval: 10 });
     expect(session.data.tabConversations).toEqual({});
   });
 
