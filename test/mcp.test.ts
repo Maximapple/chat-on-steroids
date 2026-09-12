@@ -1728,13 +1728,13 @@ describe('desktop capabilities', () => {
     const config = { ...defaultConfig('win32'), capabilities: withCaps({ screen: true, control: true }) };
 
     ctx.readOnly = true;
-    ctx.caps = effectiveCapabilities({ ...config, readOnly: true }, platform);
+    ctx.caps = effectiveCapabilities({ ...config, readOnly: true }, 'win32');
     expect(ctx.caps.screen).toBe(true);
     expect(ctx.caps.control).toBe(false);
     expect(toolNames(await desktop('tools/list'))).toEqual(IS_WINDOWS ? [...WINDOWS_COMPUTER_READ_METHODS, 'exec'].sort() : ['exec', 'observe']);
 
     ctx.readOnly = false;
-    ctx.caps = effectiveCapabilities({ ...config, readOnly: false }, platform);
+    ctx.caps = effectiveCapabilities({ ...config, readOnly: false }, 'win32');
     expect(toolNames(await desktop('tools/list'))).toContain(IS_WINDOWS ? 'click' : 'computer');
   });
 
@@ -1781,7 +1781,7 @@ describe('desktop capabilities', () => {
     expect(toolNames(await desktop('tools/list'))).toContain(mutating);
 
     ctx.readOnly = true;
-    ctx.caps = effectiveCapabilities({ ...config, readOnly: true }, 'win32');
+    ctx.caps = effectiveCapabilities({ ...config, readOnly: true }, platform);
 
     const clicked = await desktop('tools/call', {
       name: mutating,
