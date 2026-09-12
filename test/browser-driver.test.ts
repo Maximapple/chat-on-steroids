@@ -598,14 +598,40 @@ describe('a driven tab group does not outlive the session that created it', () =
   const driver = readFileSync(path.join(process.cwd(), 'extension/browser-driver.js'), 'utf8');
   const background = readFileSync(path.join(process.cwd(), 'extension/background.js'), 'utf8');
 
-  it('sweeps stale groups before creating a new one, not after', () => {
+  /**
+   * One band, reused, rather than one per attach.
+   *
+   * Chrome saves tab groups. A saved group leaves an entry in the bookmarks bar that outlives
+   * the group, and no extension API removes one — so a group created per attach did not cost a
+   * band, which the sweep already cleaned up; it cost a bookmarks-bar entry per run, kept. That
+   * is what a person actually sees pile up, and the reason this joins an existing band instead.
+   *
+   * The order is the other half. Sweeping first empties the band, an empty band is one Chrome
+   * removes, and removing it is what mints the next saved entry. So the tab joins first and the
+   * inherited members leave afterwards: the group never has zero members, and the band still
+   * says only what is being driven now.
+   */
+  it('joins an existing band and sweeps the rest only after, so no group is ever emptied', () => {
     const body = driver.slice(driver.indexOf('async function groupDrivenTab'));
     const fn = body.slice(0, body.indexOf('\n}\n'));
-    const sweepAt = fn.indexOf('await sweepStaleDrivenGroups()');
-    const createAt = fn.indexOf('chrome.tabs.group(');
+    const queryAt = fn.indexOf('chrome.tabGroups.query(');
+    const joinAt = fn.indexOf('chrome.tabs.group(');
+    const sweepAt = fn.indexOf('await sweepStaleDrivenGroups(');
+    expect(queryAt, 'looks for a band to reuse').toBeGreaterThan(-1);
+    expect(joinAt).toBeGreaterThan(-1);
     expect(sweepAt).toBeGreaterThan(-1);
-    expect(createAt).toBeGreaterThan(-1);
-    expect(sweepAt).toBeLessThan(createAt);
+    expect(queryAt).toBeLessThan(joinAt);
+    expect(joinAt).toBeLessThan(sweepAt);
+    // Reuse is the point: without a groupId the call mints a new band every time.
+    expect(fn).toContain('tabIds: [tabId], groupId: reuse.id');
+    expect(fn).toContain('sweepStaleDrivenGroups(groupId, tabId)');
+  });
+
+  it('keeps the band it just joined, and only the members it inherited leave', () => {
+    const body = driver.slice(driver.indexOf('export async function sweepStaleDrivenGroups'));
+    const fn = body.slice(0, body.indexOf('\n}\n'));
+    expect(fn).toContain('keepGroupId');
+    expect(fn).toContain('!(reusing && id === keepTabId)');
   });
 
   it('never ungroups the session it is currently running', () => {
