@@ -43,6 +43,17 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A resumed chat recognises its own first message again.** After Compact & Resume opened the
+  successor chat and sent the brief, the page could not accept that message as its own send
+  receipt: it compared the conversation named by the page's React tree against the one in the
+  address, and a chat ChatGPT has not named yet knows itself only by the thread id the page
+  minted for itself — a name no address can carry, so the comparison could only ever come out
+  unequal. Measured over one handoff: 110 such refusals in 38.6 seconds, 106 of them after the
+  address had already settled on the real id. The consequences were the visible ones — the whole
+  brief left standing in the new chat's message box under the message it had just been sent as,
+  and forty seconds of polling a check that could not succeed. A provisional name is now read as
+  "not yet known" instead of as a different chat; a real id that genuinely differs is still
+  refused.
 - **A wedged chat is no longer reloaded forever because ChatGPT rephrases the same failure.** The
   budget that stops reloading a chat nothing is reviving counted per error message, and ChatGPT
   reports this one state as both "Connection interrupted" and "Message delivery timed out" —

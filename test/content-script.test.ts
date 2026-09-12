@@ -2861,6 +2861,136 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
     expect(emitted(live.sent, 'turn_start')).toHaveLength(1);
   });
 
+  /**
+   * The same receipt, with the Fiber turn named the way a page names a thread it just created.
+   *
+   * `matchesSubmittedUser` refuses when the Fiber turn stamped onto the rendered row names a
+   * different conversation than the address does. A chat this page opened has only one name to
+   * offer: `fiber.js` reports `str(group.clientThreadId) || str(group.conversationId)`, and the
+   * client thread id wins whenever it exists — which, until the server has assigned anything,
+   * is always. `content.js` says the same of `data-turn-id`, which after a reload reads
+   * `request-WEB:<load-uuid>-<n>`: a name that "belongs to one page load and to nothing beyond
+   * it".
+   *
+   * No address can carry such a name. `conversationFromPath` accepts `[0-9a-f-]{8,64}` and
+   * nothing else, so `/c/WEB:6aa53b58-…` reads back as null while `/c/6aa53b58-…` reads back as
+   * the id. The comparison therefore has exactly one possible answer for those turns, in every
+   * chat, forever — which is a question that cannot come out any other way rather than evidence
+   * that some other conversation is involved. `concreteConversation` in `refreshFiber` already
+   * treats a non-uuid name as "no claim" for precisely this reason, and keeps such a descriptor
+   * where it discards a genuinely foreign one.
+   *
+   * Measured 2026-09-12, one handoff, 110 calls over 38.6 s: every call carried `WEB:` plus a
+   * 36-character uuid, every call refused, 106 of them after the address had already settled on
+   * the real id and 4 before it existed. That refusal is what leaves the brief standing in the
+   * successor chat's composer and makes the ack loop poll a probe that cannot succeed until it
+   * exhausts — after which the continuation is committed by the server-authored marker instead,
+   * and `rememberResumeGoalPending` never runs.
+   */
+  describe('a send receipt in a chat the page has only just created', () => {
+    /** What the harness's default address reports, and the id a settled route carries. */
+    const ROUTE = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    /** A concrete id belonging to some other chat. Nothing here is ever on this route. */
+    const ELSEWHERE = 'ffffffff-0000-1111-2222-333333333333';
+    /** `content.js`'s transcript-observer coalescing delay, mirrored for the drain below. */
+    const TRANSCRIPT_OBSERVE_MS = 250;
+
+    /**
+     * One accepted send whose rendered row is bound to a Fiber turn naming `conversationId`.
+     *
+     * The ordering is the live one, and all of it is load-bearing: Fiber journals the stable
+     * authored user object before the DOM has a usable identity for it, the app anchors that
+     * same id, and only then does the bubble render. Drop the activity steps and no turn opens
+     * at all — every variant then reads zero, which says nothing about the guard. The stamped
+     * section is what makes `stampedFiberTurn` return a descriptor; without it the comparison
+     * is never reached and a green result would be green for the wrong reason.
+     */
+    const receiptTurns = async (conversationId: string, url?: string): Promise<number> => {
+      const authored = {
+        messageId: 'm-opening-send',
+        rawMessageId: 'm-opening-send',
+        role: 'user',
+        stable: true,
+        createTime: 1_787_165_090_500,
+        rawText: 'start the repository audit',
+        renderedHtml: ''
+      };
+      live = await harness(url);
+      const composer = live.document.querySelector('#prompt-textarea')!;
+      composer.textContent = 'start the repository audit';
+      live.document.querySelector('#composer-form')!.dispatchEvent(
+        new live.window.Event('submit', { bubbles: true })
+      );
+      composer.textContent = '';
+      assistantTurn(live.document, 'opening-answer', []);
+
+      await replyFiber([], [{
+        turnId: 'opening-answer',
+        conversationId,
+        calls: [],
+        messages: [authored],
+        activities: []
+      }]);
+      await live.hook.flush();
+
+      live.reply.set('activity', () => ({
+        ok: true,
+        data: {
+          entries: [],
+          stream: [],
+          userAnchors: [{ seq: 1, time: 1_787_165_090_500, messageId: 'm-opening-send' }],
+          nextSince: 0,
+          pendingTools: 0,
+          activeTurnId: null
+        }
+      }));
+      await live.hook.pullActivity();
+
+      const section = userTurn(live.document, 'opening-send', 'start the repository audit');
+      await bindFiberTurns([{ section, turn: { turnId: 'opening-send', conversationId, messages: [authored] } }]);
+      // The join the guard reads. Asserted rather than assumed: a run where this stamp is
+      // missing proves nothing, whatever the counts say.
+      expect(section.getAttribute('data-clf-fiber-turn')).toMatch(/:0$/);
+
+      live.hook.observe();
+      await settle();
+      await live.hook.flush();
+      // `replyFiber` runs the scan on real timers so the descriptor frame can be delivered,
+      // which makes anything the script schedules inside that window a real timer too. The
+      // send boundary opens there, and the transcript observer's 250 ms coalescing timer is
+      // still pending when the test returns; firing it after `afterEach` has closed the
+      // document raises an unhandled error attributed to whichever test is running by then.
+      // Let it land while this window is still alive.
+      await new Promise((resolve) => globalThis.setTimeout(resolve, TRANSCRIPT_OBSERVE_MS + 50));
+      return emitted(live.sent, 'turn_start').length;
+    };
+
+    it('opens the boundary when Fiber names the thread the page minted for itself', async () => {
+      expect(await receiptTurns(`WEB:${ROUTE}`)).toBe(1);
+    });
+
+    // Control. Same fixture, a name the address could carry and does: the send boundary opens,
+    // so a zero above is the guard's answer and not an inert harness.
+    it('opens it when the Fiber turn and the address name the same chat', async () => {
+      expect(await receiptTurns(ROUTE)).toBe(1);
+    });
+
+    // Control. Before the server assigns anything the route is null, and `refreshFiber` keeps
+    // every descriptor because there is no conversation to compare them against — so a turn
+    // that really does name another chat reaches this guard, and must still be refused. This is
+    // what the fix must not give away.
+    it('still refuses a turn that names another chat while this one has no address yet', async () => {
+      expect(await receiptTurns(ELSEWHERE, 'https://chatgpt.com/')).toBe(0);
+    });
+
+    // The same page, the same missing address, one character class different in the name: this
+    // is the first four of the measured 110 calls, and it must be accepted where the line above
+    // is refused.
+    it('opens it for a provisional name on a page that has no address yet', async () => {
+      expect(await receiptTurns(`WEB:${ELSEWHERE}`, 'https://chatgpt.com/')).toBe(1);
+    });
+  });
+
   it('keeps a follow-up send boundary when Fiber and the app anchor the new row before the DOM does', async () => {
     live = await harness();
     userTurn(live.document, 'prior-question', 'the recorded question', { sent: false });
