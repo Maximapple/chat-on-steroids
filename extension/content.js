@@ -754,14 +754,32 @@
   let userSendReceipt = null;
   const pageViewChecks = new Set(); // Existing readiness waits also observe accepted MAIN-world snapshots.
   const sendText = (value) => String(value || '').replace(/\s+/g, '');
+  /**
+   * A name the page minted for a thread it had just created, such as `WEB:<uuid>`.
+   *
+   * No address can carry one: `conversationFromPath` accepts `[0-9a-f-]{8,64}` and nothing
+   * else, so `/c/WEB:<uuid>` reads back as null. A turn wearing such a name can therefore
+   * never equal the route, in any chat, ever — which makes comparing the two a question with
+   * one possible answer rather than evidence about which conversation the turn belongs to.
+   * `refreshFiber` already draws the same line with `concreteConversation`, and keeps such a
+   * descriptor where it discards one that genuinely names another chat.
+   */
+  const provisionalThreadName = (value) => typeof value === 'string' && /^[A-Za-z]+:/.test(value);
   /** Receipt, transcript and presentation share the same exact native user source. */
-  function userMessageSource(message) {
-    if (!message || message.role !== 'user' || !message.id || !message.node?.isConnected ||
+  function userMessageSource(message) {    if (!message || message.role !== 'user' || !message.id || !message.node?.isConnected ||
         retiredMessages.has(message.id) || isStale(message.node)) return null;
     const turn = stampedFiberTurn({ node: message.node }, [...fiberTurns.values()], fiberScanToken);
     const temporary = desktopDecision?.temporary && desktopDecision.onTarget() &&
       (!desktopDecision.messageId || desktopDecision.messageId === message.id);
-    if (turn && (turn.conversationConflict || (!temporary && turn.conversationId !== CLF_DOM.conversationId()))) return null;
+    // Unknown is not mismatch. A Compact & Resume successor is scanned before ChatGPT has
+    // named it, so its Fiber branch offers only the thread id the page minted for itself, and
+    // this comparison refused every time: measured 2026-09-12, 110 calls over 38.6 s, all of
+    // them provisional, 106 of them after the address had already settled on the real id. The
+    // receipt then had no admissible proof in the one chat that needs it most. A concrete id
+    // that genuinely differs is still a mismatch, and is still refused here.
+    if (turn && (turn.conversationConflict ||
+        (!temporary && !provisionalThreadName(turn.conversationId) &&
+          turn.conversationId !== CLF_DOM.conversationId()))) return null;
     const authored = (turn?.messages || []).filter(candidate => candidate.role === 'user' && candidate.stable === true &&
       (candidate.rawMessageId === message.id || candidate.messageId === message.id));
     if (authored.length > 1) return null;
