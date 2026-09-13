@@ -1644,6 +1644,127 @@ describe('automatic compaction', () => {
     expect((await request('POST', '/compact', { body: { conversationId, token, sourceDispatch: true } })).status).toBe(409);
   });
 
+  /**
+   * The one detector for a checkpoint lost between the page and the app.
+   *
+   * It answers "a token arrived and matched nothing", which is the only shape a dropped
+   * relay field leaves behind — the app falls through to the start branch and answers 200,
+   * and neither end has anything to look at. It has caught that twice (`destinationLost`,
+   * then `sourceLost`).
+   *
+   * It also sat above every branch that quotes a token for a living, so the brief capture —
+   * healthy, answered correctly two milliseconds later — tripped it on every successful
+   * handoff. Four warnings in the maintainer's log, four handoffs, zero real losses. A
+   * detector that fires on the healthy path is one nobody reads by the time it matters.
+   */
+  it('warns about a token that matched nothing, and stays quiet through a healthy capture', async () => {
+    await pair();
+    const conversationId = 'a1a1a1a1-0000-4000-8000-00000000ac10';
+    await request('POST', '/events', {
+      body: {
+        conversationId,
+        events: [{ kind: 'user_message', time: Date.now(), text: 'the work this brief describes', messageId: 'm-detector' }]
+      }
+    });
+    const filed = await request('POST', '/compact', { body: { conversationId } });
+    const token = filed.body.token as string;
+    expect(token, 'no continuation was opened, so there is no brief to capture').toBeTruthy();
+
+    const lostWarnings = (from: number): string[] =>
+      getLog()
+        .slice(from)
+        .map((entry) => entry.message)
+        .filter((message) => message.includes('matched no checkpoint'));
+
+    // The capture: it quotes its token because that is how the app knows which turn produced
+    // the brief. Nothing is lost here, and nothing should be reported.
+    const beforeCapture = getLog().length;
+    const captured = await request('POST', '/compact', {
+      body: { conversationId, token, summary: `carry on
+
+${SAMPLE_BRIEF}` }
+    });
+    expect(captured.status).toBe(200);
+    expect(lostWarnings(beforeCapture)).toEqual([]);
+
+    // And the shape it exists for: a token quoting a continuation that no branch will claim.
+    const beforeLost = getLog().length;
+    await request('POST', '/compact', { body: { conversationId, token: 'tokenthatmatchesnothing' } });
+    expect(lostWarnings(beforeLost)).toHaveLength(1);
+  });
+
+  /** The text of every `Compact & Resume abandoned` row a session recorded, in order. */
+  const abandonedNotes = (events: Awaited<ReturnType<typeof readEvents>>): string[] =>
+    events.flatMap((event) =>
+      event.kind === 'note' && event.message.text.startsWith('Compact & Resume abandoned') ? [event.message.text] : []
+    );
+
+  /**
+   * What the person is told when a compaction dies before anything was sent.
+   *
+   * On 2026-09-12 an automatic ticket was abandoned 3.4 seconds after it was filed and the
+   * timeline said only `Failed — handoff_never_sent`. The page knew why — the message box in
+   * that chat was not empty, so ChatGPT refused the instruction — and knowing it was the
+   * difference between a five-second fix and an unexplained failure. The durable state stays
+   * the code every other assertion here matches on; the row a person reads names the barrier.
+   */
+  it('says which barrier ended the handoff, and keeps the code as the durable state', async () => {
+    await pair();
+    const conversationId = 'a1a1a1a1-0000-4000-8000-00000000ac0e';
+    await request('POST', '/events', {
+      body: {
+        conversationId,
+        events: [{ kind: 'user_message', time: Date.now(), text: 'the box was not empty', messageId: 'm-auto-named' }]
+      }
+    });
+    const filed = await request('POST', '/compact', { body: { conversationId, ticket: true, automatic: true } });
+    const token = filed.body.token as string;
+    expect((await request('POST', '/compact', { body: { conversationId, token, sourceAttempt: true } })).body.allowed).toBe(true);
+
+    const lost = await request('POST', '/compact', {
+      body: { conversationId, token, sourceLost: true, reason: 'composer_occupied' }
+    });
+    expect(lost.status).toBe(200);
+    expect(lost.body.aborted).toBe(true);
+    // The machine fact is unchanged: this is still the same abort, and everything keyed on it
+    // keeps working.
+    expect(continuationByToken(token)).toMatchObject({ state: 'aborted', error: 'handoff_never_sent' });
+
+    const abandoned = abandonedNotes(await readEvents(filed.body.sessionId as string, { kinds: ['note'] }));
+    expect(abandoned).toHaveLength(1);
+    expect(abandoned[0]).toContain('the message box in this chat was not empty');
+    expect(abandoned[0]).not.toContain('handoff_never_sent');
+  });
+
+  /**
+   * The control. A companion that names nothing, or names something this app does not know,
+   * must not be able to write whatever it likes into the session's own timeline.
+   */
+  it('keeps the bare code when the page names a barrier this app does not know', async () => {
+    await pair();
+    const conversationId = 'a1a1a1a1-0000-4000-8000-00000000ac0f';
+    await request('POST', '/events', {
+      body: {
+        conversationId,
+        events: [{ kind: 'user_message', time: Date.now(), text: 'an unknown barrier', messageId: 'm-auto-unknown' }]
+      }
+    });
+    const filed = await request('POST', '/compact', { body: { conversationId, ticket: true, automatic: true } });
+    const token = filed.body.token as string;
+    expect((await request('POST', '/compact', { body: { conversationId, token, sourceAttempt: true } })).body.allowed).toBe(true);
+
+    const lost = await request('POST', '/compact', {
+      body: { conversationId, token, sourceLost: true, reason: 'the composer said <b>no</b>' }
+    });
+    expect(lost.status).toBe(200);
+    expect(lost.body.aborted).toBe(true);
+
+    const abandoned = abandonedNotes(await readEvents(filed.body.sessionId as string, { kinds: ['note'] }));
+    expect(abandoned).toHaveLength(1);
+    expect(abandoned[0]).toContain('handoff_never_sent');
+    expect(abandoned[0]).not.toContain('composer said');
+  });
+
   it('does not immediately refile a rejected automatic compaction in the same working turn', async () => {
     await pair();
     const conversationId = 'a1a1a1a1-0000-4000-8000-00000000ac09';

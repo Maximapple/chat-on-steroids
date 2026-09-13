@@ -874,7 +874,14 @@ export async function releaseContinuationSourceSendNow(token: string, reason: st
  * the dispatch fence has been crossed the outcome is ambiguous and only ChatGPT's marker or an
  * explicit user cancellation may end the transaction.
  */
-export async function abortContinuationSourceBeforeSendNow(token: string, reason: string): Promise<boolean> {
+export async function abortContinuationSourceBeforeSendNow(
+  token: string,
+  reason: string,
+  // What the timeline says. `reason` is the durable machine state and stays a code every
+  // caller and test can match on; the row a person reads should name the barrier instead.
+  // Callers that know which one it was pass it here; the rest keep the code they always had.
+  note: string = reason
+): Promise<boolean> {
   return withCheckpointLock(token, async () => {
     const entry = byToken.get(token);
     if (!entry || !isOpen(entry) || entry.state !== 'awaiting-summary' || !sendUnattempted(entry.sourceSend)) {
@@ -884,7 +891,7 @@ export async function abortContinuationSourceBeforeSendNow(token: string, reason
     await transitionNow(entry, (current) => ({ ...current, state: 'aborted', error: reason }));
     cancelPrimeTransfer(entry.from);
     logWarn(`continuation ${entry.token.slice(0, 8)} durably abandoned before source Send — ${reason}`);
-    noteAbandoned(entry, reason);
+    noteAbandoned(entry, note);
     return true;
   });
 }
