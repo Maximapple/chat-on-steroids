@@ -1644,6 +1644,55 @@ describe('automatic compaction', () => {
     expect((await request('POST', '/compact', { body: { conversationId, token, sourceDispatch: true } })).status).toBe(409);
   });
 
+  /**
+   * The one detector for a checkpoint lost between the page and the app.
+   *
+   * It answers "a token arrived and matched nothing", which is the only shape a dropped
+   * relay field leaves behind — the app falls through to the start branch and answers 200,
+   * and neither end has anything to look at. It has caught that twice (`destinationLost`,
+   * then `sourceLost`).
+   *
+   * It also sat above every branch that quotes a token for a living, so the brief capture —
+   * healthy, answered correctly two milliseconds later — tripped it on every successful
+   * handoff. Four warnings in the maintainer's log, four handoffs, zero real losses. A
+   * detector that fires on the healthy path is one nobody reads by the time it matters.
+   */
+  it('warns about a token that matched nothing, and stays quiet through a healthy capture', async () => {
+    await pair();
+    const conversationId = 'a1a1a1a1-0000-4000-8000-00000000ac10';
+    await request('POST', '/events', {
+      body: {
+        conversationId,
+        events: [{ kind: 'user_message', time: Date.now(), text: 'the work this brief describes', messageId: 'm-detector' }]
+      }
+    });
+    const filed = await request('POST', '/compact', { body: { conversationId } });
+    const token = filed.body.token as string;
+    expect(token, 'no continuation was opened, so there is no brief to capture').toBeTruthy();
+
+    const lostWarnings = (from: number): string[] =>
+      getLog()
+        .slice(from)
+        .map((entry) => entry.message)
+        .filter((message) => message.includes('matched no checkpoint'));
+
+    // The capture: it quotes its token because that is how the app knows which turn produced
+    // the brief. Nothing is lost here, and nothing should be reported.
+    const beforeCapture = getLog().length;
+    const captured = await request('POST', '/compact', {
+      body: { conversationId, token, summary: `carry on
+
+${SAMPLE_BRIEF}` }
+    });
+    expect(captured.status).toBe(200);
+    expect(lostWarnings(beforeCapture)).toEqual([]);
+
+    // And the shape it exists for: a token quoting a continuation that no branch will claim.
+    const beforeLost = getLog().length;
+    await request('POST', '/compact', { body: { conversationId, token: 'tokenthatmatchesnothing' } });
+    expect(lostWarnings(beforeLost)).toHaveLength(1);
+  });
+
   /** The text of every `Compact & Resume abandoned` row a session recorded, in order. */
   const abandonedNotes = (events: Awaited<ReturnType<typeof readEvents>>): string[] =>
     events.flatMap((event) =>
