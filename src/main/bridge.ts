@@ -5694,6 +5694,23 @@ const lastBrowserRecoveryAt = new Map<string, number>();
 const turnRepairSpent = new Map<string, { sessionId: string; turnKey: string }>();
 
 /**
+ * How many error reloads one wedged chat may spend before the app stops trying.
+ *
+ * The per-turn budget beside this one is not a bound on a wedge, and measuring it showed why:
+ * the reload mints a turn id for a generation that never ended, the page reports the same
+ * failure under that new id, and a new turn is a new budget. Reproduced in the fixture below —
+ * twenty-four rounds produced ten error reloads and was still going — and in the field on
+ * 2026-09-13, where a chat the silence path had already given up on was asked to recover every
+ * three minutes with no work of any kind in between.
+ *
+ * So the per-turn rule keeps its meaning, and this counts the chat's consecutive error reloads
+ * blind to turn identity. A turn the chat actually completes clears it: that is the one signal
+ * a reload cannot manufacture, because the wedged turn never completes.
+ */
+const ERROR_REPAIR_CEILING = 3;
+const errorRepairsSpent = new Map<string, number>();
+
+/**
  * Silence reloads on one chat that each came back reporting the same failure.
  *
  * `turnRepairSpent` says a remedy is spent for one *turn*; this says a remedy has been proven
@@ -5792,6 +5809,8 @@ function queueBrowserRecovery(
     const live = liveConversations().find((entry) => entry.conversationId === conversationId);
     if (spent && turnKeyFor(live) === spent.turnKey) return false;
     if (spent) turnRepairSpent.delete(conversationId);
+    // ...and the chat-level bound the per-turn one cannot be: see ERROR_REPAIR_CEILING.
+    if ((errorRepairsSpent.get(conversationId) ?? 0) >= ERROR_REPAIR_CEILING) return false;
   }
   // The reload this chat has already answered the same way. Bounded per chat rather than per
   // turn, because a wedged turn never ends and so never releases a turn-scoped budget.
@@ -5860,6 +5879,9 @@ function queueBrowserRecovery(
     token: '',
     progressId: `browser-repair:${randomBytes(9).toString('base64url')}`
   };
+  if (reason === 'assistant-error') {
+    errorRepairsSpent.set(conversationId, (errorRepairsSpent.get(conversationId) ?? 0) + 1);
+  }
   repairsInFlight.set(conversationId, repair);
   // Queue publication owns the pickup notification, just as the input outbox does.
   // Without it an already-due repair waits for the extension's 30-second alarm.
@@ -6026,6 +6048,12 @@ async function noteRecoveryObservations(
   // explicitly marked non-recoverable. Only the DOM transport classifier or an app-owned
   // watchdog may grant recovery authority. The error may precede a page turn, so turn identity,
   // agent binding and recent tool calls are still not prerequisites for a recognized failure.
+  // A turn the chat carried to completion is the one thing a reload of a wedged turn cannot
+  // produce, so it — and nothing else — clears the chat's error-reload ceiling. An `error`,
+  // `stalled` or `interrupted` end is the wedge itself ending, which proves nothing.
+  if (observations.some((item) => item.kind === 'turn_end' && item.outcome === 'completed')) {
+    errorRepairsSpent.delete(conversationId);
+  }
   const now = Date.now();
   for (const item of observations) {
     if (item.kind !== 'chat_error') continue;
@@ -7329,6 +7357,7 @@ function clearUnattributedIncident(): void {
   repairsInFlight.clear();
   lastBrowserRecoveryAt.clear();
   turnRepairSpent.clear();
+  errorRepairsSpent.clear();
 }
 
 /**

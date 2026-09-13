@@ -48,6 +48,15 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A wedged chat is no longer reloaded forever by the error path either.** The reload that
+  answers a transport failure is budgeted per turn, and that budget could not bound a wedge: the
+  reload mints a turn id for a generation that never ended, the page reports the same failure
+  under the new id, and a new turn is a new budget. Measured on 2026-09-13 — a chat the silence
+  watchdog had already given up on was asked to recover every three minutes, nine times, with no
+  work of any kind in between, and in the fixture twenty-four rounds produced ten reloads and
+  kept climbing. The per-turn rule keeps its meaning; a second, turn-blind ceiling now bounds the
+  chat. A turn the chat actually carries to completion clears it, which is the one signal a
+  reload of a broken turn cannot manufacture.
 - **A compaction no longer spends five chat reloads on a message box that was busy for a
   moment.** Getting the handoff instruction into the box was one attempt per pickup, and the only
   retry was the app reloading the whole chat two minutes later, five times, before giving the
