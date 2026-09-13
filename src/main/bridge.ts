@@ -6488,6 +6488,23 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
       deferred = true;
       continue;
     }
+    // A tool call this chat is still running is work, not silence — and reloading the page out
+    // from under one destroys it. Measured on 2026-09-13: every `BROWSER_BUSY` refusal of that
+    // day, five of five, arrived 6 to 32 seconds after a silence reload, each reporting its
+    // batch as `Completed 0 of 15`, `0 of 6`, `0 of 2`. The model's work was discarded and the
+    // conversation's browser lane was left claiming an action that no longer had a page.
+    //
+    // Bounded by the call's own age rather than by trust: this watchdog exists for the page
+    // that died mid-call, and a call that has been running longer than any tool is allowed to
+    // take is exactly that case again. `browser` actions on this machine ran to 110 seconds
+    // and timed out at 151, so a call still open after five minutes has stopped being evidence
+    // of anything.
+    const working = runningToolProgress(conversationId);
+    if (working && now - working.since < RUNNING_CALL_GRACE_MS) {
+      grant.until = working.since + RUNNING_CALL_GRACE_MS;
+      deferred = true;
+      continue;
+    }
     // A blocked chat never gets the reload, so it can never get the confirmation this pass
     // otherwise waits for, and it would sit measured-silent in the ledger — and in the live set
     // the UI paints — for the rest of the process. Its silence is spent the moment it is
@@ -6651,6 +6668,15 @@ const COMPACTION_PICKUPS: Record<CompactionPhase, { every: number; attempts: num
 const compactionWatch = new Map<string, { token: string; phase: CompactionPhase; since: number; attempts: number }>();
 /** Tickets already handed back to the silence watch once, so the hand-back is not a loop. */
 const handedBackTokens = new Set<string>();
+
+/**
+ * How long a running tool call keeps this chat out of the silence watchdog's hands.
+ *
+ * Long enough that no honest call is interrupted — the longest `browser` action measured on
+ * 2026-09-13 ran 110 seconds and the tool's own timeout fired at 151 — and short enough that a
+ * call whose page died still gets the reload this watchdog exists for.
+ */
+const RUNNING_CALL_GRACE_MS = 5 * 60_000;
 
 function compactionPhaseOf(entry: ContinuationView): CompactionPhase {
   if (entry.state !== 'awaiting-summary') return 'opening';
