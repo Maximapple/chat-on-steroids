@@ -261,6 +261,9 @@ function quoteWindowsArgument(argument: string): string {
  * never see the same bytes twice and never silently drop them either.
  */
 class UnifiedExecProcess {
+  private readonly startedAt = Date.now();
+  private resolveCompletion!: (value: ProcessCompletion) => void;
+  readonly completion = new Promise<ProcessCompletion>(resolve => { this.resolveCompletion = resolve; });
   private buffer = new HeadTailBuffer();
   private displayBuffer: HeadTailBuffer | undefined;
   private readonly batchDisplay: CommandBatchDisplay | undefined;
@@ -443,6 +446,8 @@ class UnifiedExecProcess {
       this.exited = true;
       this.exitedAtMs = Date.now();
       this.exit = exitCode;
+      const completedAt = Date.now();
+      this.resolveCompletion({ exitCode, completedAt, durationMs: Math.max(0, completedAt - this.startedAt) });
     }
     if (!this.cancelled) {
       this.cancelled = true;
@@ -548,7 +553,15 @@ function sleep(ms: number): Promise<void> {
 
 // --------------------------------------------------------------------------- tool output
 
+export interface ProcessCompletion {
+  exitCode: number | null;
+  completedAt: number;
+  durationMs: number;
+}
+
 export interface ExecCommandToolOutput {
+  /** Exact process lifetime for recording; never serialized into the MCP response. */
+  completion?: Promise<ProcessCompletion>;
   chunkId: string;
   wallTimeMs: number;
   rawOutput: Buffer;
@@ -797,6 +810,7 @@ export class UnifiedExecProcessManager {
     }
 
     const response = {
+      ...(responseProcessId === null ? {} : { completion: process.completion }),
       chunkId,
       wallTimeMs,
       rawOutput,

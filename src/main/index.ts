@@ -1,5 +1,3 @@
-import { requestSessionFinishGoal, setFinishNotifier } from './session/finish.js';
-import { setStuckNotifier } from './stuck-notice.js';
 /**
  * Main process entry: window, tray, and the security posture for the renderer.
  */
@@ -17,6 +15,9 @@ import { initSecretsPath } from './secrets.js';
 import { pluginManager } from './plugins/manager.js';
 import { setBrowserOpener, setBrowserWorkArea, shutdownBridge, startBridge } from './bridge.js';
 import { flushSessions, initSessionStore, pruneSessions } from './session/store.js';
+import { usageOverview } from './session/usage.js';
+import { requestSessionFinishGoal, setFinishNotifier } from './session/finish.js';
+import { setStuckNotifier } from './stuck-notice.js';
 import {
   flushRecorder,
   queueDeterministicAttributionRepair,
@@ -95,6 +96,7 @@ let quitting = false;
 let shutdownStarted = false;
 let shutdownComplete = false;
 let stopSessionRetention: (() => void) | null = null;
+const usageWarmup = new AbortController();
 
 // One instance only: two copies would fight over the tunnel and the config file.
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -536,6 +538,11 @@ void app.whenReady().then(async () => {
   // push, every failure ends inside it, and its own timer keeps it running for a tray app that
   // is never restarted.
   startUpdateChecks();
+  // From 2.1.0: warm the existing derived cache once, after startup, without delaying the UI.
+  // A visit to Usage joins this same calculation; unchanged recordings cost no reads.
+  void usageOverview(usageWarmup.signal).catch((error: Error) => {
+    if (!usageWarmup.signal.aborted) logWarn(`usage background refresh failed: ${error.message}`);
+  });
 })
   /*
    * Startup is one long chain, and it had nothing to catch a throw.
@@ -567,6 +574,7 @@ app.on('before-quit', () => {
   // From this point `will-quit` owns a bounded teardown. A Dock click/relaunch arriving while
   // that sequence drains must not recreate or reveal a window after the tray has disappeared.
   windowActivation.disable();
+  usageWarmup.abort();
 });
 
 app.on('window-all-closed', () => {
