@@ -397,10 +397,11 @@ async function withBackgroundExecRecovery(
  */
 function withUnattributedNotice(
   conversationId: string | null | undefined,
-  result: ToolResult
+  result: ToolResult,
+  requestId: string | null
 ): ToolResult {
   if (conversationId) return result;
-  const eta = unattributedRepairEta();
+  const eta = unattributedRepairEta(Date.now(), requestId);
   if (eta === null) return result;
   return {
     ...result,
@@ -814,7 +815,8 @@ async function dispatchTracked(
   const baseResult = surface === 'plugins' && !handlerRan ? pluginManager.redactResult(result) as ToolResult : result;
   let delivered = nested ? baseResult : withUnattributedNotice(
     context.caller.conversationId,
-    withInbox(context.caller.conversationId, context.agent, baseResult, isFinish)
+    withInbox(context.caller.conversationId, context.agent, baseResult, isFinish),
+    context.caller.requestId
   );
   // Ordinary tools carry direct user input, but only the explicit finish signal
   // advances a planned stage. Successful work is not evidence that a stage is done.
@@ -840,6 +842,14 @@ async function dispatchTracked(
     // wastes work and can make the recorded result differ from what the caller received.
     const added = pluginManager.redactResult({ content: delivered.content.slice(baseResult.content.length) });
     delivered = { ...delivered, content: [...baseResult.content, ...added.content as ToolResult['content']] };
+  }
+  // Some hosts consume structured results instead of content. Core owns these shapes;
+  // project its final app appendices once without changing the underlying tool data.
+  if (surface === 'core' && delivered.structuredContent) {
+    const supplemental = delivered.content.slice(baseResult.content.length)
+      .filter((part): part is Extract<ToolContent, { type: 'text' }> => part.type === 'text')
+      .map(part => part.text).join('\n');
+    if (supplemental) delivered = { ...delivered, structuredContent: { ...delivered.structuredContent, supplemental_context: supplemental } };
   }
   const recorderStartedAt = Date.now();
   // Event duration includes identity/handler/delivery work. Recorder and local HTTP finish
@@ -1150,7 +1160,13 @@ export function createRegistrar(server: McpServer | null, ctx: ToolContext, surf
       names.push(name);
       handlers.set(name, { description: config.description, run: async args => {
         const parsed = await config.inputSchema.safeParseAsync(args);
-        return parsed.success ? handler(parsed.data) : fail('INVALID_ARGUMENTS: arguments do not match this tool’s schema.');
+        if (parsed.success) return handler(parsed.data);
+        // Preserve the schema owner's corrective explanation for code-mode children too.
+        // Zod issues omit input values; bound paths/messages and the number of diagnostics.
+        const details = parsed.error.issues.slice(0, 3).map(issue =>
+          `${issue.path.map(String).join('.').slice(0, 80) || 'arguments'}: ${issue.message.slice(0, 300)}`
+        ).join('; ');
+        return fail(`INVALID_ARGUMENTS: ${details}`);
       } });
       observe?.(name, config);
       // No identity field is ever added here. Every tool's schema is exactly what its
