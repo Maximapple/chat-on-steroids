@@ -6157,6 +6157,69 @@ describe('unattributed activity recovery', () => {
     }
   });
 
+  /**
+   * The chat that stops without ever reaching a verdict.
+   *
+   * The reload budget's give-up — the one that reaches the desktop — is only reached by a chat
+   * that keeps answering reloads with the same failure. A turn that simply ends `failed` and is
+   * followed by nothing never gets there: no open turn is left to watch, the app treats the
+   * matter as closed, and the conversation sits. Measured on 2026-09-13, that was the shape of
+   * the longest standstills of the day — four episodes, 198 minutes, the last one ended by the
+   * user noticing forty-five minutes in.
+   */
+  it('reports a chat whose last turn failed and was followed by nothing', async () => {
+    vi.useFakeTimers();
+    const STOPPED = 'dedede00-1111-2222-3333-444444444444';
+    const stopped: Array<{ body: string; sessionId: string }> = [];
+    setStuckNotifier((_title, body, sessionId) => { stopped.push({ body, sessionId }); return true; });
+    try {
+      await pair();
+      await events(STOPPED, [openTurn('turn-failing'), endTurn('turn-failing', 'failed')]);
+
+      // Nothing follows. The sweep eventually stops watching this chat, and that is the last
+      // moment anything can say so.
+      for (let round = 0; round < 6; round++) {
+        await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 15_000);
+        const repair = await maintenance();
+        if (repair) await maintenance(repair.token);
+      }
+
+      expect(stopped).toHaveLength(1);
+      expect(stopped[0]!.body).toMatch(/last turn failed/i);
+      const session = await findSessionByConversation(STOPPED);
+      expect(stopped[0]!.sessionId).toBe(session!.id);
+    } finally {
+      setStuckNotifier(null);
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * The control: a chat that carries on is not a chat that stopped.
+   */
+  it('says nothing when the chat starts another turn after a failed one', async () => {
+    vi.useFakeTimers();
+    const CARRIES = 'dedede01-1111-2222-3333-444444444444';
+    const stopped: string[] = [];
+    setStuckNotifier((_title, _body, sessionId) => { stopped.push(sessionId); return true; });
+    try {
+      await pair();
+      await events(CARRIES, [openTurn('turn-rough'), endTurn('turn-rough', 'failed')]);
+      await events(CARRIES, [openTurn('turn-next')]);
+
+      for (let round = 0; round < 6; round++) {
+        await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 15_000);
+        const repair = await maintenance();
+        if (repair) await maintenance(repair.token);
+      }
+
+      expect(stopped).toEqual([]);
+    } finally {
+      setStuckNotifier(null);
+      vi.useRealTimers();
+    }
+  });
+
   it('stops reloading a chat whose every reload comes back with the same error', async () => {
     vi.useFakeTimers();
     try {
