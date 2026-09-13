@@ -6021,6 +6021,97 @@ describe('unattributed activity recovery', () => {
    * But a reload whose page comes back reporting the same error is a remedy that has been
    * proven not to work, and the loop has no next step after it fails.
    */
+  /**
+   * The same wedge, reloaded the way the field reloads it.
+   *
+   * The test below keeps one turn open for six rounds, so the key the per-turn budget is
+   * charged to never moves and one reload is all the error path spends. A real wedged chat is
+   * not that tidy: this reload mints a turn id for a generation that never ended, the page
+   * reports the same failure under the new id, and a new turn is a new budget. Twenty-four
+   * rounds produced ten error reloads and was still climbing; in the field on 2026-09-13 a chat
+   * the silence path had already given up on was asked to recover every three minutes, nine
+   * times, with no work of any kind in between.
+   *
+   * So the per-turn rule keeps its meaning and a chat-level ceiling bounds the wedge, blind to
+   * turn identity — the same shape the silence budget needed for the same reason.
+   */
+  it('stops spending error reloads on a chat that only ever mints new broken turns', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      await events(PRIME, [openTurn('turn-wedged-0')]);
+
+      const reloads: string[] = [];
+      for (let round = 0; round < 24; round++) {
+        await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 15_000);
+        const repair = await maintenance();
+        if (repair) {
+          reloads.push(repair.reason);
+          await maintenance(repair.token);
+        }
+        // The page comes back on a fresh turn id and reports the same failure under it.
+        await events(PRIME, [
+          endTurn(`turn-wedged-${round}`, 'error'),
+          openTurn(`turn-wedged-${round + 1}`),
+          {
+            kind: 'chat_error',
+            time: Date.now(),
+            text: 'Connection interrupted. Waiting for the complete answer',
+            turnId: `turn-wedged-${round + 1}`,
+            recoverable: true
+          }
+        ]);
+      }
+
+      // ERROR_REPAIR_CEILING in bridge.ts, quoted here because it is module-private there.
+      // Bounded rather than exact: a queued error repair that silence supersedes is charged to
+      // the budget without ever being handed out, so the ceiling is what is promised, not a
+      // count. Unbounded before this — twenty-four rounds produced ten and kept climbing.
+      expect(reloads.filter((reason) => reason === 'assistant-error').length).toBeLessThanOrEqual(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * The control: a chat that actually gets a turn out is not the chat this ceiling is for.
+   */
+  it('gives a chat its error reloads back once it completes a turn', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      await events(PRIME, [openTurn('turn-rough-0')]);
+
+      const reloads: string[] = [];
+      for (let round = 0; round < 12; round++) {
+        await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 15_000);
+        const repair = await maintenance();
+        if (repair) {
+          reloads.push(repair.reason);
+          await maintenance(repair.token);
+        }
+        // Every third round the chat carries a turn all the way through — the one thing a
+        // reload of a wedged turn cannot fake.
+        const outcome = round % 3 === 2 ? 'completed' : 'error';
+        await events(PRIME, [
+          endTurn(`turn-rough-${round}`, outcome),
+          openTurn(`turn-rough-${round + 1}`),
+          {
+            kind: 'chat_error',
+            time: Date.now(),
+            text: 'Connection interrupted. Waiting for the complete answer',
+            turnId: `turn-rough-${round + 1}`,
+            recoverable: true
+          }
+        ]);
+      }
+
+      expect(reloads.filter((reason) => reason === 'assistant-error').length).toBeGreaterThan(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('stops reloading a chat whose every reload comes back with the same error', async () => {
     vi.useFakeTimers();
     try {
