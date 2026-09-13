@@ -48,6 +48,15 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A chat whose last turn simply failed is no longer put down in silence.** The give-up verdict
+  that reaches the desktop is only reached by a chat that keeps answering reloads with the same
+  failure. A turn that ends in a transport failure and is followed by nothing never gets there:
+  no open turn is left to watch, the app treats the matter as closed, and the conversation sits.
+  That was the shape of the longest standstills measured on one machine on 2026-09-13 — four
+  episodes, 24 + 53 + 76 + 45 minutes, 198 minutes of a working day, the last of them ending when
+  the user happened to notice. The moment the app stops watching such a chat, it now says so, in
+  the session's timeline and on the desktop. A chat that starts another turn is carrying on and
+  says nothing.
 - **A chat the app has given up on now says so on the desktop.** The watchdog's verdict was
   durable and invisible: it went into the session's own timeline, which is where nobody is
   looking when a chat has been quiet for ten minutes. Measured on one machine in one day — three

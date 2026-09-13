@@ -5692,6 +5692,22 @@ const lastBrowserRecoveryAt = new Map<string, number>();
  * Written only once the browser confirms the action, so a handout nobody carried out spends
  * nothing.
  */
+/**
+ * Chats whose last turn ended `failed` and which have produced nothing since.
+ *
+ * This is the shape of a stopped chat that no watchdog was ever going to report. The reload
+ * budget's verdict — the one that reaches the desktop — is only reached by a chat that keeps
+ * answering reloads with the same failure. A turn that simply ends `failed` and is followed by
+ * nothing never gets there: there is no open turn left to watch, the app considers the matter
+ * closed, and the conversation sits there.
+ *
+ * Measured on one machine on 2026-09-13: four episodes, 24 + 53 + 76 + 45 minutes, 198 minutes
+ * of a working day. The last of them ended when the user noticed, forty-five minutes in.
+ *
+ * Cleared by the chat starting another turn, which is what "it carried on" looks like.
+ */
+const failedTurnQuiet = new Map<string, string>();
+
 const turnRepairSpent = new Map<string, { sessionId: string; turnKey: string }>();
 
 /**
@@ -6041,6 +6057,10 @@ async function noteRecoveryObservations(
       current: () => activeUntil.get(conversationId) === terminalGrant && runningToolCalls(conversationId) === 0
     });
   }
+  // Another turn is the chat carrying on, and the only thing that is. Read before the failure
+  // below rather than after it: one batch can carry a turn's start and its failed end, and
+  // clearing afterwards would file exactly that batch as a chat that kept going.
+  if (observations.some((item) => item.kind === 'turn_start')) failedTurnQuiet.delete(conversationId);
   const proTerminal = terminalGrant?.model === 'pro' && (activity.endedTurnId === terminalGrant.turnId ||
     (activity.terminal && !observations.some(item => item.kind === 'turn_end')));
   const awaitingSilenceRefresh = !settledThinkingFailure && !!lastEnd &&
@@ -6050,7 +6070,10 @@ async function noteRecoveryObservations(
     if (proTerminal) endActivity(conversationId);
     else if (lastEnd === 'unknown' && sessionId && await extendedSilenceWindowFor(conversationId, sessionId)) {
       // Loss of browser completion evidence does not change the last meaningful-work clock.
-    } else if (lastEnd === 'failed' && !settledThinkingFailure && sessionId) grantActivity(conversationId, sessionId, Math.min(Date.now(), activity.at ?? Date.now()));
+    } else if (lastEnd === 'failed' && !settledThinkingFailure && sessionId) {
+      failedTurnQuiet.set(conversationId, sessionId);
+      grantActivity(conversationId, sessionId, Math.min(Date.now(), activity.at ?? Date.now()));
+    }
     else endActivity(conversationId);
   }
 
@@ -6435,6 +6458,23 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
 /** Retires a confirmed one-shot silence recovery after the caller has handled any Worker slot. */
 function finishSilentChats(conversationIds: readonly string[]): void {
   for (const conversationId of conversationIds) {
+    // The last moment anything is watching this chat. If its final turn failed and nothing
+    // followed, this is where it would otherwise be put down in silence — see failedTurnQuiet.
+    const sessionId = failedTurnQuiet.get(conversationId);
+    if (sessionId) {
+      failedTurnQuiet.delete(conversationId);
+      void recordNote(
+        sessionId,
+        'This chat stopped: its last turn ended in a transport failure and nothing followed it. ' +
+          'Send a message here to start a fresh turn, or continue in a new chat.'
+      ).catch(() => undefined);
+      noticeChatStopped(
+        'A chat stopped',
+        'Its last turn failed and nothing followed. Send a message there to start a fresh turn.',
+        sessionId
+      );
+      logWarn(`bridge: ${conversationId} stopped after a failed turn with nothing following it`);
+    }
     forgetActivity(conversationId);
     repairsInFlight.delete(conversationId);
   }
@@ -7368,6 +7408,7 @@ function clearUnattributedIncident(): void {
   repairsInFlight.clear();
   lastBrowserRecoveryAt.clear();
   turnRepairSpent.clear();
+  failedTurnQuiet.clear();
   errorRepairsSpent.clear();
 }
 
