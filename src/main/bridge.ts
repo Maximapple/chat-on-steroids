@@ -2562,33 +2562,6 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         origin
       );
     }
-    // Every request that reaches this line asked to *start* a compaction, and says which keys it
-    // arrived with. Keys only — never a value, so a brief or a conversation id is never written
-    // to the log by this.
-    //
-    // The line exists because a checkpoint lost in transit is invisible from here in exactly the
-    // way that matters: the app falls through to this branch, answers 200 with a plausible
-    // start-compaction reply, and neither end has anything to look at. That has now happened
-    // three times. Twice the service worker dropped a field both ends implemented correctly
-    // (`sourceLost`, and `destinationLost` for two days before it). The third is open as this is
-    // written: a give-up whose page-side call demonstrably held a token, arriving here with
-    // neither the token nor the flag, which is what `compactCheckpointFields` produces when it
-    // decides `message.token` is not a string.
-    //
-    // An earlier version of this logged only when a token survived, and could not see that third
-    // case at all — the shape with nothing left to notice is the one that needed reporting most.
-    // Unconditional is also what makes it useful: `sourceAttempt` and `sourceDispatch` reach this
-    // route with their token intact on every compaction, so their key lists sit in the same log
-    // as the give-up's, and diffing them is the whole diagnosis.
-    logInfo(
-      `bridge: /compact start request — body keys: ${Object.keys(body as Record<string, unknown>).sort().join(', ')}`
-    );
-    if (checkpointToken) {
-      logWarn(
-        `bridge: /compact carried token ${checkpointToken.slice(0, 8)} but matched no checkpoint. ` +
-          'A checkpoint the page reported is not reaching the app; check the service worker forwards it.'
-      );
-    }
     if (goalWorkerChat(id)) {
       return json(
         res,
@@ -2787,6 +2760,35 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           job: resumeJobFor(sessionId)
         },
         origin
+      );
+    }
+
+    // Every request that reaches this line asked to *start* a compaction, and says which keys it
+    // arrived with. Keys only — never a value, so a brief or a conversation id is never written
+    // to the log by this.
+    //
+    // The line exists because a checkpoint lost in transit is invisible from here in exactly the
+    // way that matters: the app falls through to the start branch, answers 200 with a plausible
+    // reply, and neither end has anything to look at. That has now happened three times. Twice
+    // the service worker dropped a field both ends implemented correctly (`sourceLost`, and
+    // `destinationLost` for two days before it). The third is open as this is written: a give-up
+    // whose page-side call demonstrably held a token, arriving here with neither the token nor
+    // the flag, which is what `compactCheckpointFields` produces when it decides `message.token`
+    // is not a string.
+    //
+    // It sits *after* every branch that legitimately quotes a token, and that position is the
+    // whole of its precision. It used to sit above them, where the capture — which quotes its
+    // token by design and is answered correctly two milliseconds later — tripped the warning on
+    // every single successful handoff: four for four in the maintainer's log, against zero real
+    // losses. A detector that fires on the healthy path teaches everyone to ignore it, and this
+    // one has exactly one job.
+    logInfo(
+      `bridge: /compact start request — body keys: ${Object.keys(body as Record<string, unknown>).sort().join(', ')}`
+    );
+    if (checkpointToken) {
+      logWarn(
+        `bridge: /compact carried token ${checkpointToken.slice(0, 8)} but matched no checkpoint. ` +
+          'A checkpoint the page reported is not reaching the app; check the service worker forwards it.'
       );
     }
 
