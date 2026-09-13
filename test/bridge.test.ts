@@ -152,6 +152,7 @@ const {
 const { makeTempDir, removeTempDir, SAMPLE_BRIEF, faultGate } = await import('./helpers.js');
 const { resumeBootstrapText } = await import('../src/main/session/handoff.js');
 const { getLog } = await import('../src/main/logger.js');
+const { setStuckNotifier } = await import('../src/main/stuck-notice.js');
 
 const EXTENSION_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop';
 /** The chat that spawns the swarm in these tests: only a proven conversation can. */
@@ -6108,6 +6109,50 @@ describe('unattributed activity recovery', () => {
 
       expect(reloads.filter((reason) => reason === 'assistant-error').length).toBeGreaterThan(3);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * The verdict, carried to where a person is.
+   *
+   * The timeline note this accompanies is durable and invisible: it lands in the session's own
+   * history, which is where nobody is looking when a chat has been quiet for ten minutes.
+   * Measured on one machine on 2026-09-13 — three episodes, 24, 53 and 76 minutes of standstill,
+   * each ended by the user happening to glance at the app.
+   *
+   * Once per episode, because the verdict already is: the same `told` flag that writes the note.
+   */
+  it('tells the desktop once when it gives a chat up, not only the timeline', async () => {
+    vi.useFakeTimers();
+    // Its own chat: a wedge verdict is per-conversation state that outlives the test that
+    // produced it, and spending PRIME's budget here left the case below with none.
+    const STUCK = 'dcdcdcdc-1111-2222-3333-444444444444';
+    const stopped: Array<{ title: string; body: string; sessionId: string }> = [];
+    setStuckNotifier((title, body, sessionId) => { stopped.push({ title, body, sessionId }); return true; });
+    try {
+      await pair();
+      await events(STUCK, [openTurn('turn-wedged-notice')]);
+
+      for (let round = 0; round < 6; round++) {
+        await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 15_000);
+        const repair = await maintenance();
+        if (repair) await maintenance(repair.token);
+        await events(STUCK, [{
+          kind: 'chat_error',
+          time: Date.now(),
+          text: 'Connection interrupted. Waiting for the complete answer',
+          turnId: 'turn-wedged-notice',
+          recoverable: true
+        }]);
+      }
+
+      expect(stopped).toHaveLength(1);
+      expect(stopped[0]!.body).toMatch(/send a message there/i);
+      const session = await findSessionByConversation(STUCK);
+      expect(stopped[0]!.sessionId).toBe(session!.id);
+    } finally {
+      setStuckNotifier(null);
       vi.useRealTimers();
     }
   });

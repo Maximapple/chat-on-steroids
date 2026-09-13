@@ -75,6 +75,7 @@ import {
   setGoalSwitchNow,
   startGoalDraft
 } from './goal.js';
+import { noticeChatStopped } from './stuck-notice.js';
 import { logInfo, logWarn } from './logger.js';
 import {
   closeConversation,
@@ -5833,6 +5834,16 @@ function queueBrowserRecovery(
             `last "${proven.error.slice(0, 200)}". The turn is broken on ChatGPT's side, which a reload cannot repair. ` +
             'Continue in a new chat, or send a message here to start a fresh turn.'
         ).catch(() => undefined);
+        // The note above is durable and invisible: it lands in the session's own timeline, which
+        // is where nobody is looking when a chat has been quiet for ten minutes. Measured on one
+        // machine on 2026-09-13, three episodes cost 24, 53 and 76 minutes of standstill, each
+        // one ended by the user happening to glance at the app. The verdict is already final and
+        // already once-per-episode — `told` above — so this only carries it to where a person is.
+        noticeChatStopped(
+          'A chat stopped and will not be retried',
+          'ChatGPT broke this turn and reloading did not repair it. Send a message there to start a fresh turn.',
+          sessionId
+        );
         logWarn(`bridge: ${conversationId} answered ${SILENCE_RELOAD_ATTEMPTS} silence reloads with the same failure — not reloading it again`);
         changed();
       }

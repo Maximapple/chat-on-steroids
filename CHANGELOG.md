@@ -48,6 +48,14 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A chat the app has given up on now says so on the desktop.** The watchdog's verdict was
+  durable and invisible: it went into the session's own timeline, which is where nobody is
+  looking when a chat has been quiet for ten minutes. Measured on one machine in one day — three
+  episodes costing 24, 53 and 76 minutes of standstill, each ended by the user happening to
+  glance at the app. The same once-per-episode verdict now also reaches the desktop, and clicking
+  it opens that session. Deliberately still not a message sent into the conversation: the app
+  delivers instructions the user queued, and inventing one to submit under their name is a
+  different act that a broken turn does not authorise.
 - **A wedged chat is no longer reloaded forever by the error path either.** The reload that
   answers a transport failure is budgeted per turn, and that budget could not bound a wedge: the
   reload mints a turn id for a generation that never ended, the page reports the same failure
