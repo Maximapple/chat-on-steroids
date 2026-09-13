@@ -14,7 +14,7 @@ export { setBrowserWorkArea } from './browser-window-layout.js';
 import { pendingBrowserPreferenceRequest, acknowledgeBrowserPreferences } from './browser-preferences.js';
 import { sessionFinishHeld, releaseSessionFinish, getSessionFinishDraft, sessionFinishWaiting } from './session/finish.js';
 import { observeUsage } from './session/usage.js';
-import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, listInputs, fileSilenceInput, hasQueuedAfterTurnInput, deferSilenceInput, revokeSilenceInputs } from './session/input.js';
+import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, listInputs, fileSilenceInput, hasQueuedAfterTurnInput, deferSilenceInput, revokeSilenceInputs, enqueueInput } from './session/input.js';
 /**
  * The local bridge between the Chrome extension and this app.
  *
@@ -37,7 +37,7 @@ import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindB
  * cannot read a file, run anything, or change a permission.
  */
 
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 import type { BridgeStatus } from '../shared/types.js';
 import { positionOf } from '../shared/chronology.js';
@@ -5708,6 +5708,57 @@ const lastBrowserRecoveryAt = new Map<string, number>();
  */
 const failedTurnQuiet = new Map<string, string>();
 
+/**
+ * How often the app restarts a chat that stopped, before it leaves it alone.
+ *
+ * A stopped chat is one this app has already spent its reloads on: the turn is broken on
+ * ChatGPT's side and no reload repairs it. What does repair it is a new turn, and the only way
+ * to start one is to say something. That is the difference between a standstill of minutes and
+ * one of an hour — measured on 2026-09-13, four episodes totalling 198 minutes, every one of
+ * them ended by a person eventually typing into the chat.
+ *
+ * Bounded, because a chat that dies again on the message this sends is one nothing here can
+ * rescue. Cleared by a turn the chat carries to `completed` — the same signal the error-reload
+ * ceiling uses, and for the same reason: a turn that merely starts proves nothing, and the
+ * message this sends starts one by itself.
+ */
+const AUTO_CONTINUE_ATTEMPTS = 2;
+const autoContinueSpent = new Map<string, number>();
+
+/**
+ * Asks a stopped chat to carry on, once, in words the user can read in their own transcript.
+ *
+ * Not a repair of the broken turn — that turn is gone and nothing here brings it back. It is
+ * the one thing that starts a new one. Everything the ordinary input path refuses it still
+ * refuses: a blocked chat, a worker's chat, a session that has moved to another conversation,
+ * a stop the user asked for. This goes through that path rather than around it.
+ */
+async function continueStoppedChat(conversationId: string, sessionId: string): Promise<void> {
+  if (isChatBlocked(conversationId) || stopRequestedFor(conversationId)) return;
+  const spent = autoContinueSpent.get(conversationId) ?? 0;
+  if (spent >= AUTO_CONTINUE_ATTEMPTS) return;
+  autoContinueSpent.set(conversationId, spent + 1);
+  // Deterministic from the chat and the attempt, so repeating this decision files the same
+  // message rather than a second one: `enqueueInput` returns a known id untouched.
+  const hash = createHash('sha256').update(`continue:${conversationId}:${spent}`).digest('hex');
+  const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+  try {
+    await enqueueInput({
+      id,
+      sessionId,
+      text: 'The previous turn was cut off by a connection failure before it finished. Continue that work from where it stopped.',
+      mode: 'auto',
+      dueAt: Date.now(),
+      model: null,
+      reasoningEffort: null
+    });
+    void recordNote(sessionId, 'Sent a message to restart this chat after its turn was cut off.').catch(() => undefined);
+    logInfo(`bridge: asked ${conversationId} to continue after it stopped (attempt ${spent + 1})`);
+  } catch (err) {
+    logWarn(`bridge: could not ask ${conversationId} to continue — ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 const turnRepairSpent = new Map<string, { sessionId: string; turnKey: string }>();
 
 /**
@@ -5857,9 +5908,12 @@ function queueBrowserRecovery(
         // already once-per-episode — `told` above — so this only carries it to where a person is.
         noticeChatStopped(
           'A chat stopped and will not be retried',
-          'ChatGPT broke this turn and reloading did not repair it. Send a message there to start a fresh turn.',
+          'ChatGPT broke this turn and reloading did not repair it. Restarting it with a message.',
           sessionId
         );
+        // Reloading is spent; a new turn is the only thing left that works, and waiting for a
+        // person to type it is what turned these into hour-long standstills.
+        void continueStoppedChat(conversationId, sessionId);
         logWarn(`bridge: ${conversationId} answered ${SILENCE_RELOAD_ATTEMPTS} silence reloads with the same failure — not reloading it again`);
         changed();
       }
@@ -6061,6 +6115,12 @@ async function noteRecoveryObservations(
   // below rather than after it: one batch can carry a turn's start and its failed end, and
   // clearing afterwards would file exactly that batch as a chat that kept going.
   if (observations.some((item) => item.kind === 'turn_start')) failedTurnQuiet.delete(conversationId);
+  // A turn carried through to the end is the chat working again, which is the only thing that
+  // earns it fresh restarts. A turn that merely *starts* cannot be the signal: the restart this
+  // app sends starts one by itself, and reading that as recovery is an unbounded loop.
+  if (observations.some((item) => item.kind === 'turn_end' && item.outcome === 'completed')) {
+    autoContinueSpent.delete(conversationId);
+  }
   const proTerminal = terminalGrant?.model === 'pro' && (activity.endedTurnId === terminalGrant.turnId ||
     (activity.terminal && !observations.some(item => item.kind === 'turn_end')));
   const awaitingSilenceRefresh = !settledThinkingFailure && !!lastEnd &&
@@ -6470,9 +6530,10 @@ function finishSilentChats(conversationIds: readonly string[]): void {
       ).catch(() => undefined);
       noticeChatStopped(
         'A chat stopped',
-        'Its last turn failed and nothing followed. Send a message there to start a fresh turn.',
+        'Its last turn failed and nothing followed. Restarting it with a message.',
         sessionId
       );
+      void continueStoppedChat(conversationId, sessionId);
       logWarn(`bridge: ${conversationId} stopped after a failed turn with nothing following it`);
     }
     forgetActivity(conversationId);
@@ -7409,6 +7470,7 @@ function clearUnattributedIncident(): void {
   lastBrowserRecoveryAt.clear();
   turnRepairSpent.clear();
   failedTurnQuiet.clear();
+  autoContinueSpent.clear();
   errorRepairsSpent.clear();
 }
 

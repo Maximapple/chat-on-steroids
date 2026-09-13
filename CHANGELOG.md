@@ -48,6 +48,13 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A chat the app has given up on is now restarted instead of left standing.** Reloading a turn
+  ChatGPT broke does not repair it — measured, repeatedly — but a new turn works, and the only
+  thing that starts one is a message. Every standstill measured on one machine on 2026-09-13
+  ended that way: 24, 53, 76 and 45 minutes, each one waiting for a person to type a line. The
+  app now types it itself, through the same input path a queued instruction uses, and records in
+  the transcript that it did. Bounded to two attempts per chat, cleared only by a turn carried
+  through to completion, because a turn that merely starts is what this message itself produces.
 - **A chat whose last turn simply failed is no longer put down in silence.** The give-up verdict
   that reaches the desktop is only reached by a chat that keeps answering reloads with the same
   failure. A turn that ends in a transport failure and is followed by nothing never gets there:

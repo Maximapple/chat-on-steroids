@@ -6123,6 +6123,50 @@ describe('unattributed activity recovery', () => {
    *
    * Once per episode, because the verdict already is: the same `told` flag that writes the note.
    */
+  /**
+   * The point of noticing at all.
+   *
+   * A stopped chat is one this app has already spent its reloads on: the turn is broken on
+   * ChatGPT's side, and the only thing that starts a working one is a message. Every standstill
+   * measured on 2026-09-13 — 24, 53, 76 and 45 minutes — ended when a person eventually typed
+   * one. So the app types it, through the ordinary input path, and says so in the transcript.
+   *
+   * Bounded: a chat that dies again on this message is not one more messages will rescue. The
+   * counter clears only on a turn carried to `completed`, never on a turn merely starting,
+   * because the message this sends starts one by itself.
+   */
+  it('restarts a stopped chat itself, and stops after its two attempts', async () => {
+    vi.useFakeTimers();
+    const RESTART = 'dedede03-1111-2222-3333-444444444444';
+    try {
+      await pair();
+      await events(RESTART, [openTurn('turn-dead')]);
+
+      // Run long enough for the give-up to happen several times over.
+      for (let round = 0; round < 14; round++) {
+        await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 15_000);
+        const repair = await maintenance();
+        if (repair) await maintenance(repair.token);
+        await events(RESTART, [{
+          kind: 'chat_error',
+          time: Date.now(),
+          text: 'Connection interrupted. Waiting for the complete answer',
+          turnId: 'turn-dead',
+          recoverable: true
+        }]);
+      }
+
+      const session = await findSessionByConversation(RESTART);
+      const { listInputs } = await import('../src/main/session/input.js');
+      const queued = (await listInputs()).filter((entry) => entry.sessionId === session!.id);
+      expect(queued.length).toBeGreaterThan(0);
+      expect(queued.length).toBeLessThanOrEqual(2);
+      expect(queued[0]!.text).toMatch(/continue that work from where it stopped/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('tells the desktop once when it gives a chat up, not only the timeline', async () => {
     vi.useFakeTimers();
     // Its own chat: a wedge verdict is per-conversation state that outlives the test that
@@ -6148,7 +6192,8 @@ describe('unattributed activity recovery', () => {
       }
 
       expect(stopped).toHaveLength(1);
-      expect(stopped[0]!.body).toMatch(/send a message there/i);
+      // The app no longer asks the user to do it; it says what it is doing instead.
+      expect(stopped[0]!.body).toMatch(/restarting it with a message/i);
       const session = await findSessionByConversation(STUCK);
       expect(stopped[0]!.sessionId).toBe(session!.id);
     } finally {
