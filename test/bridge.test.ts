@@ -1929,6 +1929,16 @@ ${SAMPLE_BRIEF}` }
         await request('GET', `/status?repaired=${handout!.token}&repairAction=reloaded`);
       }
 
+      // Spent. The ticket stays open, and the chat is handed back to the ordinary silence watch
+      // for one reload — it used to be handed to nobody, which on 2026-09-13 was a chat that sat
+      // for 104 minutes with the give-up, the reload budget and the restart all waiting behind a
+      // ticket that had stopped chasing anything.
+      await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
+      const handback = await takeRepair();
+      expect(handback).toMatchObject({ conversationId, reason: 'silence' });
+      await request('GET', `/status?repaired=${handback!.token}&repairAction=reloaded`);
+      // One chance, not a second clock on a durable ticket: the page still says nothing, and
+      // two more hours buy it nothing either.
       await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
       expect(await takeRepair()).toBeNull();
       expect(continuationByToken(token)).toMatchObject({ automatic: true, state: 'awaiting-summary' });
@@ -7383,14 +7393,76 @@ describe('unattributed activity recovery', () => {
         expect(handout).toMatchObject({ conversationId: OTHER, reason: 'compaction' });
         await request('GET', `/status?repaired=${handout!.token}&repairAction=reloaded`);
       }
+      // Spent. The chat is handed back for its one silence reload rather than to nobody.
       await vi.advanceTimersByTimeAsync(5 * 60_000);
-      expect(await pickup()).toBeNull();
+      const handback = await pickup();
+      expect(handback).toMatchObject({ conversationId: OTHER, reason: 'silence' });
+      await request('GET', `/status?repaired=${handback!.token}&repairAction=reloaded`);
 
       // Spent, and the ticket still open. The chat now goes silent with a turn in the air.
       await events(OTHER, [openTurn('turn-wedged-by-compaction')]);
       await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS);
       await sweepStaleSwarm(Date.now());
       expect(await maintenance()).toMatchObject({ conversationId: OTHER, reason: 'silence' });
+      expect(continuationByToken(token)).toMatchObject({ state: 'awaiting-summary' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * The same spent ticket, on a chat that shows no further sign of life.
+   *
+   * The case above ends with `openTurn`, and that is what hands the chat back: a turn is
+   * activity, activity is a grant, and the silence sweep walks grants. A chat whose page simply
+   * stopped never produces that turn, and then a spent ticket leaves it with no watcher at all —
+   * the compaction machinery is no longer chasing it, and the sweep has nothing to walk.
+   *
+   * Measured on 2026-09-13: the writing pickups ran out at 17:00:56 on a chat whose last work
+   * was 16:45:20. At 18:29 it had still done nothing — 104 minutes, the longest standstill of
+   * that day, with the reload budget, the give-up and the restart all waiting behind a ticket
+   * that had stopped chasing anything.
+   */
+  it('hands back a chat whose compaction pickups are spent even when nothing stirs on the page', async () => {
+    vi.useFakeTimers();
+    const QUIET = 'efefefef-2222-3333-4444-555555555555';
+    try {
+      await pair();
+      await events(QUIET, [
+        { kind: 'user_message', time: Date.now(), text: 'generate the huge handoff', messageId: 'm-quiet-wedge' }
+      ]);
+      const filed = await request('POST', '/compact', {
+        body: { conversationId: QUIET, ticket: true, automatic: true }
+      });
+      const token = filed.body.token as string;
+
+      const pickup = async (): Promise<{ conversationId: string; token: string; reason: string } | null> => {
+        await sweepStaleSwarm(Date.now());
+        return maintenance();
+      };
+
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
+      const asking = await pickup();
+      expect(asking).toMatchObject({ conversationId: QUIET, reason: 'compaction' });
+      await request('GET', `/status?repaired=${asking!.token}&repairAction=reloaded`);
+
+      expect((await request('POST', '/compact', { body: { conversationId: QUIET, token, sourceAttempt: true } })).body.allowed).toBe(true);
+      expect((await request('POST', '/compact', { body: { conversationId: QUIET, token, sourceDispatch: true } })).body.armed).toBe(true);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        const handout = await pickup();
+        expect(handout).toMatchObject({ conversationId: QUIET, reason: 'compaction' });
+        await request('GET', `/status?repaired=${handout!.token}&repairAction=reloaded`);
+      }
+
+      // Spent. And this time the page says nothing at all — no turn, no call, no error.
+      let recovered: { conversationId: string; reason: string } | null = null;
+      for (let sweep = 0; sweep < 6 && !recovered; sweep += 1) {
+        await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS);
+        recovered = await pickup();
+      }
+      expect(recovered).toMatchObject({ conversationId: QUIET });
+      // The ticket is untouched: this is the recovery half, not a decision to abandon a handoff.
       expect(continuationByToken(token)).toMatchObject({ state: 'awaiting-summary' });
     } finally {
       vi.useRealTimers();
