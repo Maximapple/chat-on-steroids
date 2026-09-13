@@ -48,6 +48,15 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A chat running a tool call is no longer reloaded out from under it.** The watchdog's
+  definition of silence is "nothing arrived for two minutes", and a `browser` batch takes longer
+  than that routinely — a single action ran 110 seconds on the machine this was measured on, with
+  fifteen steps behind one call. Reloading underneath one rescued nothing and destroyed the work:
+  every `BROWSER_BUSY` refusal of 2026-09-13, five of five, arrived 6 to 32 seconds after a
+  silence reload, reporting `Completed 0 of 15`, `0 of 6`, `0 of 2`, `0 of 1`, and left the
+  conversation's browser lane claiming an action whose page was gone. A running call now holds
+  the watchdog off, bounded by the call's own age so that a page which died mid-call still gets
+  the reload this watchdog exists for.
 - **A chat whose compaction stopped being chased is watched again instead of by nobody.** When a
   handoff's pickups run out, the compaction machinery stops reloading that chat — and the
   ordinary silence watch never picks it up, because it walks chats that hold an activity grant

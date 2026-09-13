@@ -7411,6 +7411,62 @@ describe('unattributed activity recovery', () => {
   });
 
   /**
+   * A chat running a tool call is working, and a reload lands on its page like a pulled plug.
+   *
+   * The watchdog measures silence as "nothing arrived for two minutes", and a `browser` batch
+   * takes longer than that routinely — 110 seconds for a single action on the machine this was
+   * measured on, with batches of fifteen steps behind one call. Reloading underneath one does
+   * not rescue anything; it destroys the work and leaves the conversation's browser lane
+   * claiming an action whose page is gone.
+   *
+   * Measured on 2026-09-13: every `BROWSER_BUSY` refusal of that day, five of five, arrived
+   * 6 to 32 seconds after a silence reload — `Completed 0 of 15`, `0 of 6`, `0 of 2`, `0 of 1`.
+   *
+   * The grace is bounded by the call's own age, because the case this watchdog exists for is a
+   * page that died mid-call: a call still open long after any tool may take is that case again.
+   */
+  it('leaves a chat alone while one of its tool calls is still running', async () => {
+    vi.useFakeTimers();
+    const BUSY = 'dedede04-1111-2222-3333-444444444444';
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const inFlight = trackInFlight(
+      {
+        startedAt: Date.now(),
+        transportKey: null,
+        agent: null,
+        caller: { transportKey: null, requestId: 'wfr_browser_batch', conversationId: BUSY },
+        outcome: null,
+        evidence: emptyEvidence()
+      },
+      () => held
+    );
+    try {
+      await pair();
+      await events(BUSY, [openTurn('turn-driving-the-browser')]);
+      expect(runningToolCalls(BUSY)).toBeGreaterThan(0);
+
+      // Two minutes of no events is this watchdog's definition of silence — and exactly what a
+      // long browser batch looks like from here.
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 15_000);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toBeNull();
+
+      // The call ends, the chat really is quiet, and the watchdog does its job as before. The
+      // deferral it wrote runs to the call's grace, so the clock has to pass that too.
+      release?.();
+      await inFlight;
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + CHAT_SILENCE_MS);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toMatchObject({ conversationId: BUSY, reason: 'silence' });
+    } finally {
+      release?.();
+      await inFlight;
+      vi.useRealTimers();
+    }
+  });
+
+  /**
    * The same spent ticket, on a chat that shows no further sign of life.
    *
    * The case above ends with `openTurn`, and that is what hands the chat back: a turn is
