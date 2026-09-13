@@ -10827,7 +10827,72 @@ describe('the Compact & resume control', () => {
     const compacts = live.sent.filter((message) => message.type === 'compact');
     expect(compacts[0]).toMatchObject({ ticket: true, automatic: true });
     expect(compacts.some((message) => message.cancel === true)).toBe(false);
-    expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain('clear the message box');
+    // The ticket stays on the WAL, as before. What changed is what the person is told: there
+    // is no draft here to clear, and saying so sent the maintainer looking at an empty box.
+    const pill = live.document.querySelector('.clf-pill-text')!.textContent!;
+    expect(pill).toContain('composer_missing');
+    expect(pill).not.toContain('clear the message box');
+  });
+
+  /**
+   * One pickup, several attempts.
+   *
+   * `insertPrompt` refuses on nine named conditions and only one of them — a draft already in
+   * the box — is durable. The rest are the editor being rebuilt underneath the edit, a composer
+   * a reload has not mounted yet, a selection that moved: all of them gone again within a
+   * frame or two. This flow made exactly one attempt per pickup, so every such refusal cost a
+   * full chat reload and two minutes, and on 2026-09-12 a session at 464k tokens spent all five
+   * pickups that way and had its ticket given up without the instruction ever being typed.
+   */
+  it('retries a transient refusal inside one pickup instead of spending the next chat reload', async () => {
+    const automaticJob = {
+      sessionId: 's-auto-transient-insert',
+      stage: 'handoff-pending',
+      automatic: true,
+      busy: true,
+      handoffId: null,
+      error: null
+    };
+    live = await harness(undefined, {
+      activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null } }),
+      compact: () => ({
+        ok: true,
+        data: {
+          started: true,
+          token: 'tok-auto-transient-insert',
+          prompt: 'write the automatic handoff brief',
+          job: automaticJob
+        }
+      })
+    });
+    live.hook.injectControl();
+
+    const dom = (live.window as any).CLF_DOM;
+    const real = dom.insertPrompt.bind(dom);
+    let attempts = 0;
+    dom.insertPrompt = (value: string, mode: unknown, failure?: (reason: string) => void) => {
+      attempts += 1;
+      // React replaced the editing host under the first edit. Nothing about the page is wrong a
+      // moment later, which is exactly why one attempt is the wrong number of attempts.
+      if (attempts === 1) {
+        failure?.('editor_replaced');
+        return false;
+      }
+      return real(value, mode, failure);
+    };
+
+    await live.hook.startCompact(true);
+
+    expect(attempts).toBeGreaterThan(1);
+    // It got past the box: the instruction is claimed, which is the step the old code never
+    // reached on any of those five pickups.
+    expect(live.sent.some((message) => message.type === 'compact' && message.sourceAttempt === true)).toBe(true);
+    expect(live.sent.some((message) => message.type === 'compact' && message.cancel === true)).toBe(false);
+    // This fixture has no page to accept a send, so the attempt ends at the next barrier — and
+    // that is the point: whatever it gives up on now, it is no longer the message box.
+    for (const message of live.sent.filter((entry) => entry.type === 'compact' && entry.sourceLost === true)) {
+      expect(message.reason).toBe('send_refused');
+    }
   });
 
   it('preserves a stale COS handoff draft including user edits and retires the unsent ticket', async () => {

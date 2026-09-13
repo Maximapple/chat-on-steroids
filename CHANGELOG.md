@@ -48,6 +48,16 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A compaction no longer spends five chat reloads on a message box that was busy for a
+  moment.** Getting the handoff instruction into the box was one attempt per pickup, and the only
+  retry was the app reloading the whole chat two minutes later, five times, before giving the
+  ticket up. Most of what the editor refuses on is transient by construction — an editor React is
+  rebuilding, a composer the reload has not mounted yet, a selection that moved under the edit —
+  so a pickup now retries a few hundred milliseconds apart before giving up, and a draft already
+  in the box still ends it at once, because that one does not pass. Seen on a session at 464,000
+  tokens that spent all five pickups and twelve minutes without the instruction ever being typed.
+  The refusal also says which of the nine named conditions it was, instead of telling everyone to
+  clear a message box that was empty.
 - **A compaction that never started now says what stopped it.** When the message box in a chat
   already held a draft, ChatGPT refused the handoff instruction, and the app gave the ticket up
   rather than reloading into the same refusal forever — correctly, because a draft survives
