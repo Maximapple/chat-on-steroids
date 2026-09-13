@@ -197,11 +197,17 @@ try {
       expect(result.status, result.stderr + result.stdout).toBe(0);
       expect(result.stdout).toContain('WINDOWS_ACCESSIBILITY_PROBE_OK');
     } finally {
-      // Windows holds the image of a process it has just run for a moment after it exits, so a
-      // straight remove here raced it and threw EPERM on `fixture.exe` — failing a test whose
-      // own assertions had all passed. Retried rather than swallowed: the directory still has
-      // to go, and a cleanup that quietly gives up leaves the next run a dirty temp.
-      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      // Windows keeps the image of a process it has just run open, and how long is not this
+      // test's to know: two seconds of retrying was not enough on the arm64 runner. Retried for
+      // longer, and then let go — the subject here is the accessibility probe, whose assertions
+      // have already passed by this point, and a temp directory the OS reclaims anyway is not
+      // worth reporting a working feature as broken. Said out loud rather than swallowed, so a
+      // machine that leaks these can still be noticed.
+      try {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 60, retryDelay: 250 });
+      } catch (error) {
+        console.warn(`left ${dir} behind: ${(error as Error).message}`);
+      }
     }
   }, 40_000);
 });
