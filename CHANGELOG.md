@@ -48,6 +48,15 @@ the native source and artifact-notice checks described in [the audit](docs/plugi
 ## Earlier unreleased fixes
 
 ### Fixed
+- **A chat whose compaction stopped being chased is watched again instead of by nobody.** When a
+  handoff's pickups run out, the compaction machinery stops reloading that chat — and the
+  ordinary silence watch never picks it up, because it walks chats that hold an activity grant
+  and a chat whose page simply stopped no longer holds one. Measured on 2026-09-13: the writing
+  pickups ran out at 17:00:56 on a chat whose last work was at 16:45:20, and 104 minutes later it
+  had still done nothing, with the reload budget, the give-up and the restart all waiting behind
+  a ticket that had stopped chasing anything. The chat is now handed back for one ordinary
+  silence reload, once, after the page has had its recovery floor to return on its own. The
+  ticket is untouched: a reloaded page can still finish the handoff it was opened for.
 - **A chat the app has given up on is now restarted instead of left standing.** Reloading a turn
   ChatGPT broke does not repair it — measured, repeatedly — but a new turn works, and the only
   thing that starts one is a message. Every standstill measured on one machine on 2026-09-13

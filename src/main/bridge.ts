@@ -6429,6 +6429,45 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
       ]);
     }
   }
+  // The same rescue, for a ticket this run opened rather than inherited.
+  //
+  // A restored ticket has no grant because the restart threw it away. A ticket whose pickups
+  // ran out can end up in exactly that state without any restart: the chat's page stopped, its
+  // grant was spent, and the compaction stopped chasing it — so nothing holds it any more. The
+  // loop above walks grants, this chat has none, and it is skipped by every watchdog there is.
+  //
+  // Measured on 2026-09-13: the writing pickups ran out at 17:00:56 on a chat whose last work
+  // was 16:45:20, and at 18:29 it had still done nothing — 104 minutes, the longest standstill
+  // of that day, with the reload budget, the give-up and the restart all waiting behind a
+  // ticket that had stopped chasing anything. The test above this one only passes because its
+  // fixture opens a fresh turn at the end, and a fresh turn is a grant.
+  //
+  // One chance per ticket, like the restored case, and for the same reason: an unbounded
+  // watchdog on a durable ticket is how a chat reloads itself all night.
+  for (const entry of pendingContinuations()) {
+    if (compacting.has(entry.from) || activeUntil.has(entry.from)) continue;
+    if (restoredTokenByChat.has(entry.from) || handedBackTokens.has(entry.token)) continue;
+    const watch = compactionWatch.get(entry.from);
+    if (!watch || watch.token !== entry.token || watch.attempts < COMPACTION_PICKUPS[watch.phase].attempts) continue;
+    // Not while the page is still coming back from the ticket's last reload. The candidate
+    // below exists for one pass only, and the walk answers a chat inside that floor by
+    // deferring — on an object that is discarded when the pass ends. Handing back into the
+    // floor therefore spends the one chance on nothing at all. Wait for it instead: measured,
+    // the walk saw 120s elapsed against a 180s floor and deferred, and the chat was never
+    // considered again.
+    if (now - (lastBrowserRecoveryAt.get(entry.from) ?? 0) < BROWSER_RECOVERY_COOLDOWN_MS) continue;
+    handedBackTokens.add(entry.token);
+    // Its last pickup's reload is finished and recorded, and leaving that record in place is
+    // the same as leaving the chat unwatched: the walk below reads a completed non-turn repair
+    // as "a recovery already ran here" and spends the chat's silence without asking for one.
+    // The asking-phase give-up clears it for exactly this reason; so does this.
+    if (repairsInFlight.get(entry.from)?.reason === 'compaction') repairsInFlight.delete(entry.from);
+    restored.push([
+      entry.from,
+      { sessionId: entry.sessionId, evidenceAt: watch.since, until: watch.since, turnId: null, model: 'other' }
+    ]);
+    logInfo(`bridge: compaction ticket ${entry.token.slice(0, 8)} stopped chasing ${entry.from}; handing it back to the silence watch`);
+  }
   for (const [conversationId, grant] of [...activeUntil, ...restored]) {
     if (compacting.has(conversationId)) continue;
     if (grant.until > now) continue;
@@ -6610,6 +6649,8 @@ const COMPACTION_PICKUPS: Record<CompactionPhase, { every: number; attempts: num
   opening: { every: 15 * 60_000, attempts: 3 }
 };
 const compactionWatch = new Map<string, { token: string; phase: CompactionPhase; since: number; attempts: number }>();
+/** Tickets already handed back to the silence watch once, so the hand-back is not a loop. */
+const handedBackTokens = new Set<string>();
 
 function compactionPhaseOf(entry: ContinuationView): CompactionPhase {
   if (entry.state !== 'awaiting-summary') return 'opening';
