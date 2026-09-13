@@ -8757,6 +8757,32 @@
     return '';
   }
 
+  /**
+   * How hard one compaction pickup tries to get its instruction into the message box.
+   *
+   * The app's own retry is a chat reload on a two-minute cadence, five of them, and then the
+   * ticket is given up. Three attempts a few hundred milliseconds apart cost one pickup almost
+   * nothing and cover every refusal that is transient by construction.
+   */
+  const HANDOFF_INSERT_ATTEMPTS = 3;
+  const HANDOFF_INSERT_RETRY_MS = 400;
+  const HANDOFF_COMPOSER_WAIT_MS = 3000;
+  /**
+   * Why the box would not take it, in words, for the pill the person reads.
+   *
+   * `insertPrompt` already names its refusal from a closed set and the caller used to discard
+   * it, so every one of them — a composer that was not there, an editor replaced mid-edit, a
+   * native edit the browser rejected — was reported as "clear the message box", which is only
+   * true for one of them and was actively misleading for the rest.
+   */
+  function handoffInsertionRefusal(reason) {
+    if (reason === 'existing_draft') {
+      return 'ChatGPT would not accept the handoff instruction — clear the message box and try again.';
+    }
+    return `ChatGPT would not accept the handoff instruction${reason ? ` (${reason})` : ''}. ` +
+      'The message box was not holding a draft; nothing was sent, and compaction will be offered again.';
+  }
+
   /** Submits the marked source prompt after the app durably grants this exact Send. */
   async function runNativeCompaction(prompt, token, forId = conversationId, forEpoch = epoch, forRun = nativeRun) {
     const current = () =>
@@ -8787,7 +8813,7 @@
         // durable checkpoint still proves no Send happened (`not-attempted` or
         // `attempted-unresolved`). If another page crossed sourceDispatch meanwhile, this refuses
         // and the ambiguous attempt remains alive rather than being cancelled underneath it.
-        const lost = await ask({ type: 'compact', conversationId: forId, token, sourceLost: true }).catch(() => null);
+        const lost = await ask({ type: 'compact', conversationId: forId, token, sourceLost: true, reason: 'composer_occupied' }).catch(() => null);
         if (lost && lost.ok === true && lost.data && lost.data.aborted === true) job = null;
         else localError = replyError(lost) || 'The blocked handoff could not be safely retired; it was not sent twice.';
       }
@@ -8804,19 +8830,40 @@
       nativePhase = 'prompting';
       renderControl();
       const squeeze = (value) => String(value || '').replace(/\s+/g, '');
-      const existing = CLF_DOM.composer();
-      const occupiedByOtherDraft =
-        Boolean(existing && (existing.textContent || '').trim()) &&
-        squeeze(existing?.textContent) !== squeeze(prompt);
-      if (squeeze(existing?.textContent) !== squeeze(prompt) && !CLF_DOM.insertPrompt(prompt)) {
+      let insertionFailure = '';
+      // Already holding exactly this instruction — a previous attempt of this same ticket got
+      // that far. Nothing to insert, and re-inserting would be the one case that appends.
+      let inserted = squeeze(CLF_DOM.composer()?.textContent) === squeeze(prompt);
+      // Each pickup used to be one synchronous attempt, and its only retry was the app
+      // reloading the whole chat two minutes later. On 2026-09-12 that spent all five pickups
+      // and twelve minutes on a chat at 464k tokens without the instruction ever reaching
+      // ChatGPT, and gave up. Most of what `insertPrompt` refuses on is transient by
+      // construction — an editor React is remounting, a composer the reload has not mounted
+      // yet, a selection that moved under the edit — so spend a few hundred milliseconds here
+      // instead of a page load out there. A draft in the box is the one durable refusal and
+      // breaks out at once; it is also the only one this flow may retire the ticket for.
+      for (let attempt = 0; !inserted && attempt < HANDOFF_INSERT_ATTEMPTS; attempt++) {
+        if (attempt) await sleep(HANDOFF_INSERT_RETRY_MS);
+        if (!current()) return;
+        insertionFailure = '';
+        const box = await waitForComposer(HANDOFF_COMPOSER_WAIT_MS);
+        if (!current()) return;
+        if (!box) {
+          insertionFailure = 'composer_missing';
+          continue;
+        }
+        inserted = CLF_DOM.insertPrompt(prompt, false, (reason) => { insertionFailure = reason; });
+        if (!inserted && insertionFailure === 'existing_draft') break;
+      }
+      if (!inserted) {
         return void (await abandonBeforeSend(
-          'ChatGPT would not accept the handoff instruction — clear the message box and try again.',
+          handoffInsertionRefusal(insertionFailure),
           // An occupied composer is durable state: ChatGPT restores drafts across reloads. Leaving
           // an automatic ticket open here makes every compaction pickup reload the same draft and
           // hit this same refusal forever. Retire only this provably pre-Send ticket; the draft
           // itself stays untouched. Missing/replaced composer failures remain recoverable on the
           // existing WAL.
-          occupiedByOtherDraft
+          insertionFailure === 'existing_draft'
         ));
       }
       await Promise.resolve();
@@ -8871,7 +8918,7 @@
         // one of them at once. Left unreported, this exact state sat armed for the six-hour TTL
         // with no pickup able to re-ask — and kept the chat out of browser recovery the whole
         // time. The app ends the transaction; nothing is re-sent, here or anywhere.
-        void ask({ type: 'compact', conversationId: forId, token, sourceLost: true }).catch(() => undefined);
+        void ask({ type: 'compact', conversationId: forId, token, sourceLost: true, reason: 'send_refused' }).catch(() => undefined);
         localError = 'ChatGPT did not take the handoff instruction. Nothing was sent twice, and this attempt has been given up; compaction will be offered again.';
         renderControl();
         return;

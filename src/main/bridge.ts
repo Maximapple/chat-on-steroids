@@ -2362,6 +2362,22 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
    * exists, which is the whole of "an interrupted or empty compaction leaves you where you
    * were".
    */
+  /**
+   * What the page ran into, in words, for the one timeline row a person actually reads.
+   *
+   * The durable state stays `handoff_never_sent` — that is the machine fact, and it is what
+   * every caller and test matches on. But it was also the whole of what the user was shown,
+   * and on 2026-09-12 a compaction failed with nothing but that code on screen while the
+   * extension already held the sentence that would have fixed it in five seconds: the message
+   * box was not empty. The page names the barrier it hit, from this closed set, and the app
+   * owns the wording. An unknown or absent name keeps the code, so an older companion, or one
+   * inventing values, changes nothing.
+   */
+  const SOURCE_LOST_NOTES: Record<string, string> = {
+    composer_occupied:
+      'the message box in this chat was not empty, so ChatGPT would not take the handoff instruction — clear it and compaction will be offered again',
+    send_refused: 'ChatGPT did not take the handoff instruction, and nothing was sent twice'
+  };
   if (route === '/compact' && req.method === 'POST') {
     let body: Record<string, unknown>;
     try {
@@ -2437,7 +2453,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       if (!entry || entry.from !== id) return json(res, 409, { error: 'no_such_continuation' }, origin);
       let aborted = false;
       try {
-        aborted = await abortContinuationSourceBeforeSendNow(checkpointToken, 'handoff_never_sent');
+        const named = typeof body['reason'] === 'string' ? SOURCE_LOST_NOTES[body['reason'] as string] : undefined;
+        aborted = await abortContinuationSourceBeforeSendNow(
+          checkpointToken,
+          'handoff_never_sent',
+          named ?? 'handoff_never_sent'
+        );
       } catch (err) {
         logWarn(
           `bridge: could not durably abandon the unsent source handoff for ${entry.sessionId} — ${err instanceof Error ? err.message : String(err)}`
@@ -2539,33 +2560,6 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           commandId: command?.id ?? null
         },
         origin
-      );
-    }
-    // Every request that reaches this line asked to *start* a compaction, and says which keys it
-    // arrived with. Keys only — never a value, so a brief or a conversation id is never written
-    // to the log by this.
-    //
-    // The line exists because a checkpoint lost in transit is invisible from here in exactly the
-    // way that matters: the app falls through to this branch, answers 200 with a plausible
-    // start-compaction reply, and neither end has anything to look at. That has now happened
-    // three times. Twice the service worker dropped a field both ends implemented correctly
-    // (`sourceLost`, and `destinationLost` for two days before it). The third is open as this is
-    // written: a give-up whose page-side call demonstrably held a token, arriving here with
-    // neither the token nor the flag, which is what `compactCheckpointFields` produces when it
-    // decides `message.token` is not a string.
-    //
-    // An earlier version of this logged only when a token survived, and could not see that third
-    // case at all — the shape with nothing left to notice is the one that needed reporting most.
-    // Unconditional is also what makes it useful: `sourceAttempt` and `sourceDispatch` reach this
-    // route with their token intact on every compaction, so their key lists sit in the same log
-    // as the give-up's, and diffing them is the whole diagnosis.
-    logInfo(
-      `bridge: /compact start request — body keys: ${Object.keys(body as Record<string, unknown>).sort().join(', ')}`
-    );
-    if (checkpointToken) {
-      logWarn(
-        `bridge: /compact carried token ${checkpointToken.slice(0, 8)} but matched no checkpoint. ` +
-          'A checkpoint the page reported is not reaching the app; check the service worker forwards it.'
       );
     }
     if (goalWorkerChat(id)) {
@@ -2766,6 +2760,35 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           job: resumeJobFor(sessionId)
         },
         origin
+      );
+    }
+
+    // Every request that reaches this line asked to *start* a compaction, and says which keys it
+    // arrived with. Keys only — never a value, so a brief or a conversation id is never written
+    // to the log by this.
+    //
+    // The line exists because a checkpoint lost in transit is invisible from here in exactly the
+    // way that matters: the app falls through to the start branch, answers 200 with a plausible
+    // reply, and neither end has anything to look at. That has now happened three times. Twice
+    // the service worker dropped a field both ends implemented correctly (`sourceLost`, and
+    // `destinationLost` for two days before it). The third is open as this is written: a give-up
+    // whose page-side call demonstrably held a token, arriving here with neither the token nor
+    // the flag, which is what `compactCheckpointFields` produces when it decides `message.token`
+    // is not a string.
+    //
+    // It sits *after* every branch that legitimately quotes a token, and that position is the
+    // whole of its precision. It used to sit above them, where the capture — which quotes its
+    // token by design and is answered correctly two milliseconds later — tripped the warning on
+    // every single successful handoff: four for four in the maintainer's log, against zero real
+    // losses. A detector that fires on the healthy path teaches everyone to ignore it, and this
+    // one has exactly one job.
+    logInfo(
+      `bridge: /compact start request — body keys: ${Object.keys(body as Record<string, unknown>).sort().join(', ')}`
+    );
+    if (checkpointToken) {
+      logWarn(
+        `bridge: /compact carried token ${checkpointToken.slice(0, 8)} but matched no checkpoint. ` +
+          'A checkpoint the page reported is not reaching the app; check the service worker forwards it.'
       );
     }
 
@@ -6678,7 +6701,11 @@ async function inspectOwedCompactions(now: number): Promise<boolean> {
       compactionWatch.delete(entry.from);
       if (repairsInFlight.get(entry.from)?.reason === 'compaction') repairsInFlight.delete(entry.from);
       try {
-        if (!await abortContinuationSourceBeforeSendNow(entry.token, 'handoff_never_sent')) continue;
+        if (!await abortContinuationSourceBeforeSendNow(
+          entry.token,
+          'handoff_never_sent',
+          `the handoff instruction never reached ChatGPT after ${schedule.attempts} attempts, so this ticket was given up`
+        )) continue;
         logWarn(
           `bridge: compaction ticket ${entry.token.slice(0, 8)} for ${entry.from} was never sent after ${schedule.attempts} pickups — giving up`
         );
