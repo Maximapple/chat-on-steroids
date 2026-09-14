@@ -5829,6 +5829,9 @@ async function sessionRecoveryCountdowns(sessionId: string, conversationId: stri
 const unattributedIncidents = new Map<string, UnattributedIncident>();
 let unattributedTimer: NodeJS.Timeout | null = null;
 const UNATTRIBUTED_REQUEST_MEMORY = 500;
+/** How often the person is told that a chat is calling in without an identity this app can use. */
+const UNIDENTIFIED_NOTICE_EVERY_MS = 15 * 60_000;
+let lastUnidentifiedNoticeAt = 0;
 
 /** One existing browser-action owner per chat: queued, issued, or acknowledged. */
 interface Repair {
@@ -7426,6 +7429,23 @@ function noteCallAttribution(
     `bridge: unattributable call — ${opening.length} repair candidate(s); incident opens ` +
       `${incident.pass === 2 ? 'spent (nothing to reload)' : 'armed'}`
   );
+  // An incident with no candidate is the one this app cannot work its way out of: it has no
+  // conversation to name, so there is nothing to reload and nothing to prove right afterwards.
+  // The tool's own refusal (`CALLER_IDENTITY_REQUIRED`) reaches the model, which cannot reload
+  // its own tab; until now nothing reached the person, who fixes it in five seconds.
+  //
+  // Measured on 2026-09-14: a chat spent half an hour calling tools that were filed under
+  // Unattributed activity, its answers never recorded, while the log filled with warnings and
+  // the app asked for nothing. Said once per quarter hour, because a page in this state produces
+  // a call every few seconds and a notice per call would be its own defect.
+  if (incident.pass === 2 && sessionId && Date.now() - lastUnidentifiedNoticeAt >= UNIDENTIFIED_NOTICE_EVERY_MS) {
+    lastUnidentifiedNoticeAt = Date.now();
+    noticeChatStopped(
+      'A ChatGPT chat cannot be identified',
+      'Its tool calls are being filed under Unattributed activity and this app cannot tell which chat they are. Reload that ChatGPT tab to reconnect it.',
+      sessionId
+    );
+  }
   // Freeze the identities synchronously; read their existing activity projection at T0.
   // Later arrivals cannot become candidates while this asynchronous read completes.
   incident.ready = Promise.all(opening.map(async candidate => {
