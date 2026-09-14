@@ -4279,6 +4279,58 @@ it.each(['matching', 'wrong-document', 'unsafe-draft', 'newer-navigation', 'pinn
   if (scenario === 'matching') expect(sendMessage.mock.calls[0]?.[1]).toMatchObject({ cancelledDecisions: claims });
 });
 
+/**
+ * The empty chat a given-up handoff leaves behind.
+ *
+ * Every other close here is keyed on the conversation a tab is showing. This page has none and
+ * never will: it was opened for a resume, refused its permit, and typed nothing. Two of them
+ * were sitting in the browser on 2026-09-14 before anyone noticed, and nothing in the extension
+ * could have closed them — `retireFailedCommandTab` answers a failed ACK, and this page must
+ * not send one, because a failed resume ACK aborts the continuation and discards the brief.
+ *
+ * So the app names the command it retired and the page confirms it holds it. The proof is the
+ * same as everywhere else, which is what the scenarios below pin.
+ */
+it.each(['matching', 'unsafe', 'became-a-chat', 'wrong-document', 'navigated', 'pinned', 'none-retired'])(
+  'closes the empty chat of a retired handoff command only under its exact safe claim: %s',
+  async scenario => {
+    const tab = { id: 82, url: 'https://chatgpt.com/?clf=cmd-orphan', active: false, pinned: scenario === 'pinned' };
+    const remove = vi.fn();
+    const reply = vi.fn(async (..._args: unknown[]) => ({
+      safe: scenario !== 'unsafe',
+      conversationId: null,
+      navigationEpoch: 0
+    }));
+    const start = backgroundSource.indexOf('async function retireRetiredCommandTabs(');
+    const code = backgroundSource.slice(start, backgroundSource.indexOf('async function pruneManagedTabs(', start));
+    const retire = vm.runInNewContext(`${code}\nretireRetiredCommandTabs`, {
+      conversationForTab: () => (scenario === 'became-a-chat' ? 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' : null),
+      tabDocuments: { '82': 'doc' },
+      tabEpochs: { '82': 0 },
+      ownsDocument: () => scenario !== 'wrong-document',
+      tabReply: (...args: unknown[]) => reply(...args),
+      chrome: {
+        tabs: {
+          get: async () => ({ ...tab, url: scenario === 'navigated' ? 'https://chatgpt.com/c/somewhere-else' : tab.url }),
+          remove
+        }
+      }
+    });
+
+    const remaining = await retire([tab], { retiredCommands: scenario === 'none-retired' ? [] : ['cmd-orphan'] });
+
+    expect(remove).toHaveBeenCalledTimes(scenario === 'matching' ? 1 : 0);
+    expect(remaining).toHaveLength(scenario === 'matching' ? 0 : 1);
+    // The page is asked by command, never by chat: a name is all it can recognise itself by.
+    if (scenario === 'matching') {
+      expect(reply.mock.calls[0]?.[1]).toMatchObject({ conversationId: null, retiredCommands: ['cmd-orphan'] });
+    }
+    // Nothing is asked at all when the app has retired nothing, so an ordinary New Chat the
+    // user opened is never even a candidate.
+    if (scenario === 'none-retired') expect(reply).not.toHaveBeenCalled();
+  }
+);
+
 it.each(['idle', 'selected', 'selected-before-proof', 'selected-during-proof', 'draft', 'pinned', 'navigation', 'journal'])('releases an idle page only while its document remains unused: %s', async scenario => {
   const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
   const tab = { id: 71, url: `https://chatgpt.com/c/${conversationId}`, active: scenario === 'selected', pinned: scenario === 'pinned' };

@@ -2297,6 +2297,46 @@ async function applyRequestedBrowserPreferences(request) {
 }
 
 /** Retire idle app-owned documents and redundant copies, preserving exact unsent drafts. */
+/**
+ * The tab a retired handoff command opened, which never became a chat.
+ *
+ * Everything else here closes a tab by the conversation it is showing, and this page has none:
+ * it was opened for a resume, was refused its permit before anything could be typed, and so
+ * carries an empty New Chat for the rest of the browser's life. `retireFailedCommandTab` is the
+ * one conversation-less route, and it answers a failed ACK — which this page must not send,
+ * because a failed resume ACK aborts the whole continuation and discards the brief that the
+ * next pickup exists to deliver.
+ *
+ * So the app names the retired command instead, and the page confirms it is the one holding it.
+ * The close proof is the same as everywhere else: the exact leased document, the same URL before
+ * and after asking, and the page's own `safe`.
+ */
+async function retireRetiredCommandTabs(tabs, policy) {
+  const retired = (Array.isArray(policy.retiredCommands) ? policy.retiredCommands : [])
+    .filter(id => typeof id === 'string' && id);
+  if (retired.length === 0) return tabs;
+  let remaining = [...tabs];
+  for (const tab of tabs) {
+    if (!Number.isInteger(tab && tab.id) || tab.pinned || tab.pendingUrl) continue;
+    // A tab that did become a chat belongs to the ordinary managed sweep, never to this one.
+    if (conversationForTab(tab)) continue;
+    const source = { tab: tab.id, documentId: tabDocuments[String(tab.id)], navigationEpoch: tabEpochs[String(tab.id)] };
+    if (!ownsDocument(source)) continue;
+    const url = tab.url;
+    try {
+      const proof = await tabReply(tab.id, { type: 'clf-tab-close-check', conversationId: null, retiredCommands: retired },
+        { documentId: source.documentId });
+      const latest = await chrome.tabs.get(tab.id);
+      if (proof?.safe === true && proof.conversationId === null && proof.navigationEpoch === source.navigationEpoch &&
+          latest && !latest.pinned && !latest.pendingUrl && latest.url === url && ownsDocument(source)) {
+        await chrome.tabs.remove(tab.id);
+        remaining = remaining.filter(other => other.id !== tab.id);
+      }
+    } catch { /* A busy, edited, replaced or unreadable page stays open. */ }
+  }
+  return remaining;
+}
+
 async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
   const retired = new Set((Array.isArray(policy.retiredConversations) ? policy.retiredConversations : []).map(cleanConversationId).filter(Boolean));
   const managed = new Set((Array.isArray(policy.managedConversations) ? policy.managedConversations : []).map(cleanConversationId).filter(Boolean));
@@ -2420,7 +2460,8 @@ async function maintainOnce() {
       .filter((conversationId) => conversationId && !nonDiscardable.has(conversationId))
   );
   const managedWork = Array.isArray(reply.data.managedConversations) && reply.data.managedConversations.length > 0;
-  if (!protectionWork && !managedWork && closable.size === 0 && repairs.length === 0) return clearRetryIfIdle();
+  const retiredCommandWork = Array.isArray(reply.data.retiredCommands) && reply.data.retiredCommands.length > 0;
+  if (!protectionWork && !managedWork && !retiredCommandWork && closable.size === 0 && repairs.length === 0) return clearRetryIfIdle();
   let tabs = [];
   try {
     tabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
@@ -2428,6 +2469,7 @@ async function maintainOnce() {
     return;
   }
   tabs = await pruneManagedTabs(tabs, reply.data, nonDiscardable, closable);
+  tabs = await retireRetiredCommandTabs(tabs, reply.data);
   if (protectionWork) {
     let changed = false;
     for (const tab of tabs) {

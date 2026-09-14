@@ -5003,6 +5003,54 @@ describe('targeted open', () => {
   });
 
   /**
+   * The empty chat left behind when this app gives a handoff attempt up.
+   *
+   * The page cannot say it is finished: a failed resume ACK aborts the whole continuation and
+   * discards the brief the next pickup exists to deliver, so it stays silent and its New Chat
+   * stays open. Every tab the extension can close, it closes by the conversation the tab shows,
+   * and this one never got one — so the app has to name the command instead. Measured on
+   * 2026-09-14: three attempts, three empty chats, none of them closable by anything.
+   *
+   * Named only while it could still be somebody's tab, and only for a resume: this says "the
+   * page holding this command may go", never "this chat may go".
+   */
+  it('names a given-up handoff command so its empty chat can be closed', async () => {
+    vi.useFakeTimers();
+    try {
+      setBrowserOpener(async (url) => {
+        opened.push(url);
+      });
+      await pair();
+      const { sessionId, token } = await automaticCompactedSession(
+        '77777777-8888-9999-aaaa-bbbbbbbbbbbb',
+        'the orphaned brief'
+      );
+      const command = queueResume(sessionId, token)!;
+      await waitForOpened(1);
+      expect((await redeem(command.id, 'tab-1')).text).toContain('the orphaned brief');
+
+      // Asked about this command rather than about an empty list: other tests in this file retire
+      // their own, and a page is released by its own name or not at all.
+      const retired = async (): Promise<string[]> =>
+        (await request('POST', '/status', { body: { openConversations: [] } })).body.retiredCommands ?? [];
+
+      // Nothing is reported, so the app eventually releases the attempt — keeping the ticket.
+      expect(await retired()).not.toContain(command.id);
+      await vi.advanceTimersByTimeAsync(16 * 60_000);
+      await vi.waitFor(() => expect(pendingCommands().some((entry) => entry.id === command.id)).toBe(false));
+      expect(continuationByToken(token)?.state).not.toBe('aborted');
+
+      expect(await retired()).toContain(command.id);
+
+      // A name nobody claimed inside the quarter hour is a page that has already gone.
+      await vi.advanceTimersByTimeAsync(15 * 60_000 + 1_000);
+      expect(await retired()).not.toContain(command.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
    * Why BRIDGE_PROTOCOL moved to 14.
    *
    * A destination checkpoint identifies itself with the command its page redeemed and the client

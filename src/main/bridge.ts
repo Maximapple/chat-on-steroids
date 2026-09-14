@@ -6546,6 +6546,8 @@ async function browserTabPolicy(openConversations: Set<string>) {
     idleReuseAfterMs: 120_000,
     idleCloseAfterMs: 300_000,
     cancelledDecisionClaims: cancelledDecisionClaims.map(row => ({ id: row.id, owner: row.owner, conversationId: row.conversationId })),
+    // Names a page, not a chat: the tab a retired handoff command opened never became one.
+    retiredCommands: retiredResumeCommandIds(),
     // Only terminal/blocked helpers and superseded sources grant close authority.
     retiredConversations: [...new Set([...idle, ...supersededSourceConversations()])]
       .filter(id => openConversations.has(id) && !protectedChats.has(id)).sort(),
@@ -8173,6 +8175,36 @@ function describe(command: Command, client: string | null, claimedSummary?: stri
   };
 }
 
+/**
+ * Resume commands this app gave up on, for the page that is still sitting in their tab.
+ *
+ * A chat opened for a handoff that never got its permit is the one page no cleanup path can
+ * see: `pruneManagedTabs` only ever considers a tab that *has* a conversation, and the one
+ * route that does not — `retireFailedCommandTab` — is driven by a failed ACK. The page cannot
+ * send that ACK, because a failed resume ACK aborts the whole continuation and throws away the
+ * brief the next pickup exists to deliver. So it stays silent, correctly, and its empty chat
+ * stays open: two of them were left behind on 2026-09-14 before anyone noticed.
+ *
+ * The app is the only party that knows the attempt is over, so it is the one that says so. This
+ * grants nothing by itself — the worker still has to recognise the tab and the page still has to
+ * prove it is safe to close. It only makes the fact reachable.
+ *
+ * Remembered briefly and by id: a command id names one page, and a name nobody claims within the
+ * quarter hour is a page that has already gone.
+ */
+const RETIRED_COMMAND_MEMORY_MS = 15 * 60_000;
+const retiredResumeCommands = new Map<string, number>();
+
+function noteRetiredResumeCommand(id: string): void {
+  const now = Date.now();
+  for (const [key, at] of retiredResumeCommands) if (now - at >= RETIRED_COMMAND_MEMORY_MS) retiredResumeCommands.delete(key);
+  retiredResumeCommands.set(id, now);
+}
+
+function retiredResumeCommandIds(now = Date.now()): string[] {
+  return [...retiredResumeCommands].filter(([, at]) => now - at < RETIRED_COMMAND_MEMORY_MS).map(([id]) => id).sort();
+}
+
 function drop(command: Command, why: string): boolean {
   if (!commands.includes(command)) return false;
   const resumeToken = command.spec.type === 'resume' ? command.spec.token : null;
@@ -8193,6 +8225,7 @@ function drop(command: Command, why: string): boolean {
       if (command.timer) clearTimeout(command.timer);
       command.timer = null;
       commands = commands.filter(candidate => candidate !== command);
+      noteRetiredResumeCommand(command.id);
       logWarn(`bridge: released ${specKey(command.spec)} browser attempt without closing its ticket — ${why}`);
       changed();
       return true;
@@ -8221,6 +8254,9 @@ function drop(command: Command, why: string): boolean {
   if (command.timer) clearTimeout(command.timer);
   command.timer = null;
   commands = commands.filter((entry) => entry !== command);
+  // The same orphan as in the automatic path above, by the other route: an aborted ticket
+  // leaves its page in exactly the tab this names.
+  if (command.spec.type === 'resume') noteRetiredResumeCommand(command.id);
   // Giving up on a worker's chat has to end the worker, not just the command. Deleting
   // the command alone left the slot `invited` for good: it counted towards the worker
   // limit, it held the one in-flight agent-bearing bootstrap so the next worker never
