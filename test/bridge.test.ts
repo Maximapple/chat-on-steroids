@@ -5797,6 +5797,43 @@ describe('unattributed activity recovery', () => {
     }
   });
 
+  /**
+   * The call this app cannot place, and the person who can.
+   *
+   * An incident with no repair candidate names no conversation, so there is nothing to reload
+   * and nothing that could prove it fixed. The tool's own refusal reaches the model, which
+   * cannot reload its own tab. Measured on 2026-09-14: a chat spent half an hour calling tools
+   * that were filed under Unattributed activity, its answers never recorded, while the log
+   * filled with warnings and the app asked for nothing.
+   *
+   * An incident that *does* have candidates says nothing: that one repairs itself, and a notice
+   * per ordinary attribution hiccup would be noise the user learns to ignore.
+   */
+  it('tells the user when an unattributable call leaves nothing to reload', async () => {
+    vi.useFakeTimers();
+    const seen: Array<{ title: string; body: string }> = [];
+    setStuckNotifier((title, body) => { seen.push({ title, body }); return true; });
+    try {
+      // Past any earlier notice in this file: the report is throttled, not repeated per call.
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      await pair();
+
+      // No open turn anywhere, so the incident has no candidate at all.
+      await unattributedTurn('wfr-nobody-to-ask');
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.body).toMatch(/reload that chatgpt tab/i);
+
+      // A chat with an open turn is a chat this app can repair by itself, and does.
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      await events(PRIME, [openTurn('turn-identifiable')]);
+      await unattributedTurn('wfr-someone-to-ask');
+      expect(seen).toHaveLength(1);
+    } finally {
+      setStuckNotifier(null);
+      vi.useRealTimers();
+    }
+  });
+
   it('waits 15 seconds before handing a lone suspect to the browser once attribution has failed', async () => {
     vi.useFakeTimers();
     try {
