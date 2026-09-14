@@ -7417,6 +7417,15 @@ function noteCallAttribution(
     candidates: opening, proven: new Set(), dismissed: new Set()
   };
   unattributedIncidents.set(key, incident);
+  // Says, once per incident, whether this app could even try. A spent incident repairs nothing
+  // by design — there is no chat it could name — and that is indistinguishable in the log from
+  // one that tried and failed. On 2026-09-14 three chats worked for half an hour behind a stream
+  // of `no page evidence` warnings with no repair attempted, and nothing recorded said which of
+  // the two states the app was in, so the cause could not be settled after the fact.
+  logInfo(
+    `bridge: unattributable call — ${opening.length} repair candidate(s); incident opens ` +
+      `${incident.pass === 2 ? 'spent (nothing to reload)' : 'armed'}`
+  );
   // Freeze the identities synchronously; read their existing activity projection at T0.
   // Later arrivals cannot become candidates while this asynchronous read completes.
   incident.ready = Promise.all(opening.map(async candidate => {
