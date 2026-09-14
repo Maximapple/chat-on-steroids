@@ -2400,6 +2400,9 @@ async function maintainOnce() {
   // The app decides whether there is recovery work; a worker holding no tabs is not a worker
   // with nothing to do, it is the one that has to open the chat the app is owed.
   if (token === null) return;
+  // Before anything reads tab state: a page whose recorder died reports nothing, so every
+  // question asked below about "what is this chat doing" would be answered from silence.
+  await restoreSilentRecorders();
   let observedTabs = [];
   try { observedTabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS }); } catch { /* Status/recovery still runs; no unobserved tab is pruned. */ }
   const openConversations = [...new Set(observedTabs.map(conversationForTab).filter(Boolean))];
@@ -4365,6 +4368,54 @@ async function restoreChatgptTab(id) {
   } catch {
     // Injection failure does not transfer ownership to a replacement tab.
     return false;
+  }
+}
+
+/**
+ * A tab whose recorder stopped answering, found before anyone notices the chat went quiet.
+ *
+ * `restoreChatgptTab` has always been able to repair this — it pings `clf-recorder-ping` and
+ * re-injects the isolated world when nothing answers — but it only ever ran on extension
+ * install. An isolated world can die at other times, and when it does the page keeps rendering
+ * while the app goes blind: its MCP tunnel still carries the model's tool calls, so the work
+ * looks alive, but no observation, no request-id evidence and no turn ever reaches the app.
+ *
+ * That state is the one this app cannot reason its way out of. With no page evidence there is
+ * no conversation to name, so the unattributed incident opens with nothing to reload and the
+ * silence watch never sees a chat at all. Measured on 2026-09-14: the recorder went quiet at
+ * 14:30, the model went on calling tools until 14:49, and then everything stood still for 76
+ * minutes with not one line in the log — until the user reloaded the tab by hand, which is
+ * exactly what this does.
+ *
+ * Cheap on the healthy path: one message per tab per minute, and the re-injection only happens
+ * for a tab that did not answer. A tab that is loading or discarded is skipped rather than
+ * woken — Chrome will run the manifest injection itself when it comes back.
+ */
+const RECORDER_CHECK_EVERY_MS = 60_000;
+let lastRecorderCheckAt = 0;
+
+async function restoreSilentRecorders() {
+  if (Date.now() - lastRecorderCheckAt < RECORDER_CHECK_EVERY_MS) return;
+  lastRecorderCheckAt = Date.now();
+  let tabs = [];
+  try {
+    tabs = await webext.tabs.query({ url: CHATGPT_TAB_URLS });
+  } catch {
+    return;
+  }
+  for (const tab of tabs) {
+    const id = tab && typeof tab.id === 'number' ? tab.id : null;
+    if (id === null || tab.pendingUrl || tab.discarded === true) continue;
+    let answered = false;
+    try {
+      const live = await chrome.tabs.sendMessage(id, { type: 'clf-recorder-ping' });
+      answered = !!live && live.ok === true && live.recorderVersion === PAGE_RECORDER_VERSION;
+    } catch {
+      // No receiver: the isolated world is gone. That is the case this exists for.
+    }
+    if (answered) continue;
+    const repaired = await restoreChatgptTab(id);
+    console.info(`clf: recorder in tab ${id} was not answering — ${repaired ? 're-injected' : 'could not be re-injected'}`);
   }
 }
 
