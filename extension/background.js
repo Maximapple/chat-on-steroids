@@ -4375,10 +4375,15 @@ async function restoreChatgptTab(id) {
  * A tab whose recorder stopped answering, found before anyone notices the chat went quiet.
  *
  * `restoreChatgptTab` has always been able to repair this — it pings `clf-recorder-ping` and
- * re-injects the isolated world when nothing answers — but it only ever ran on extension
- * install. An isolated world can die at other times, and when it does the page keeps rendering
- * while the app goes blind: its MCP tunnel still carries the model's tool calls, so the work
- * looks alive, but no observation, no request-id evidence and no turn ever reaches the app.
+ * re-injects the isolated world when nothing answers — and it already runs for every tab when
+ * this service worker starts. What that misses is the worker that does not restart: the wake
+ * channel below is a WebSocket, and an MV3 worker holding one is not evicted, so a single
+ * worker lifetime routinely spans hours. Measured here: zero worker starts across 79 minutes of
+ * continuous work. An isolated world that dies inside such a window is never asked again.
+ *
+ * When it dies the page keeps rendering while the app goes blind: its MCP tunnel still carries
+ * the model's tool calls, so the work looks alive, but no observation, no request-id evidence
+ * and no turn ever reaches the app.
  *
  * That state is the one this app cannot reason its way out of. With no page evidence there is
  * no conversation to name, so the unattributed incident opens with nothing to reload and the
