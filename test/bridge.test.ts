@@ -5051,6 +5051,55 @@ describe('targeted open', () => {
   });
 
   /**
+   * The browser that is still polling while its wake channel is gone.
+   *
+   * Losing the channel is ordinary — the app restarts, Chrome suspends the worker — and the next
+   * maintenance pass rebuilds it. What could not be told apart is the case where it stays gone:
+   * a worker that polls and cannot reconnect, and a worker that has stopped polling, look
+   * identical from here, and they have opposite causes. A /status request is the worker polling,
+   * so counting those while no channel is up separates the two.
+   *
+   * Observed on 2026-09-14: the channel dropped and was still gone minutes later, with nothing
+   * recorded either way.
+   */
+  it('says when the browser polls with no wake channel, and says it once a minute', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      // Read the newest matching line rather than slicing by length: the log is a bounded ring,
+      // and after a few hundred tests its length no longer grows. The poll count in the message
+      // strictly increases, so a new notice is always a different string.
+      const lastSaid = (): string | null =>
+        getLog().map(entry => entry.message).filter(message => message.includes('without a wake channel')).at(-1) ?? null;
+
+      // No wake socket is attached in these tests, so every poll is such a poll. Counted from
+      // this test's own window rather than from zero: other tests in this file poll too, and the
+      // gap is one continuous episode for the process.
+      await vi.advanceTimersByTimeAsync(60_000);
+      const before = lastSaid();
+      expect((await request('POST', '/status', { body: { openConversations: [] } })).status).toBe(200);
+      const first = lastSaid();
+      expect(first).not.toBe(before);
+      expect(first).toMatch(/\d+ poll\(s\) over \d+s/);
+
+      // The poll runs twice a minute; the notice does not.
+      await request('POST', '/status', { body: { openConversations: [] } });
+      await request('POST', '/status', { body: { openConversations: [] } });
+      expect(lastSaid()).toBe(first);
+
+      // Still gone a minute later, and the count has carried the polls it stayed quiet for.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await request('POST', '/status', { body: { openConversations: [] } });
+      const later = lastSaid();
+      expect(later).not.toBe(first);
+      const polls = (message: string | null): number => Number(/(\d+) poll\(s\)/.exec(message ?? '')?.[1] ?? 0);
+      expect(polls(later)).toBe(polls(first) + 3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
    * Why BRIDGE_PROTOCOL moved to 14.
    *
    * A destination checkpoint identifies itself with the command its page redeemed and the client
