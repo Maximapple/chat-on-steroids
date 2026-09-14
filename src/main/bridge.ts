@@ -595,6 +595,48 @@ export function browserPresent(): boolean {
 export function browserWakeConnected(): boolean { return browserWake?.connected() === true; }
 
 /**
+ * The paired browser that is still polling while its wake channel is gone.
+ *
+ * The channel is how this app reaches the extension between its own polls; without it every
+ * repair waits for the worker's next thirty-second alarm instead of being woken. Losing it is
+ * expected — the app restarts, Chrome suspends the worker — and it is rebuilt by the next
+ * maintenance pass, so the ordinary case needs no attention and gets none.
+ *
+ * What was not distinguishable is the case where it stays gone. Observed on 2026-09-14: the
+ * channel dropped and did not come back for minutes, and the log could not say whether the
+ * worker was polling and failing to reconnect, or had stopped polling altogether — the two
+ * have opposite causes and opposite fixes. A /status request *is* the worker polling, so
+ * counting those while no channel is up separates them in one line.
+ *
+ * Said at most once a minute, and only while the gap lasts: this runs on every poll.
+ */
+const WAKE_GAP_NOTICE_EVERY_MS = 60_000;
+let wakeGapSince = 0;
+let wakeGapPolls = 0;
+let wakeGapNoticedAt = 0;
+
+function noteWakeChannelGap(): void {
+  if (browserWakeConnected()) {
+    wakeGapSince = 0;
+    wakeGapPolls = 0;
+    wakeGapNoticedAt = 0;
+    return;
+  }
+  const now = Date.now();
+  if (!wakeGapSince) { wakeGapSince = now; wakeGapPolls = 0; wakeGapNoticedAt = 0; }
+  wakeGapPolls += 1;
+  // `now >= wakeGapNoticedAt` deliberately: a clock that moves backwards — a correction, a
+  // machine resuming from sleep — would otherwise put the next notice beyond reach for as long
+  // as the jump lasted, and a diagnostic that can be silenced by the clock is not one.
+  if (wakeGapNoticedAt && now >= wakeGapNoticedAt && now - wakeGapNoticedAt < WAKE_GAP_NOTICE_EVERY_MS) return;
+  wakeGapNoticedAt = now;
+  logInfo(
+    `bridge: the browser is polling without a wake channel — ${wakeGapPolls} poll(s) over ` +
+      `${Math.round((now - wakeGapSince) / 1000)}s. Repairs wait for its own alarm until it reconnects.`
+  );
+}
+
+/**
  * Records one authenticated browser sighting and schedules the inverse state transition.
  *
  * Presence is process-local, unlike pairing. The extension polls frequently, so every new
@@ -1569,6 +1611,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   }
 
   if (route === '/status') {
+    noteWakeChannelGap();
     const live = liveConversations();
     let openConversations: string[] = [];
     if (req.method === 'POST') {
