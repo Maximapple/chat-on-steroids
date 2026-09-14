@@ -11803,6 +11803,21 @@
         const failedBootstrap = message.failedCommand?.id === startupCommandId && message.failedCommand?.client === RUN_ID &&
           markerId() === startupCommandId && !OPENED_CONVERSATION && !conversationId && commandsHandled.has(startupCommandId) &&
           (!commandAttempt || (commandAttempt.id === startupCommandId && commandAttempt.phase === 'failed'));
+        // The app gave this command up while this page still holds it. Unlike the failed
+        // bootstrap above there is no ACK to key on — a failed resume ACK would abort the whole
+        // continuation — so the app's own retirement is the authority, and everything below is
+        // this page proving it is the page that command names and that it never sent anything.
+        //
+        // `phase` cannot make that distinction: a page that was refused its permit sits at
+        // `claimed`, exactly like one about to type. `userSendReceipt` can: it is written
+        // immediately before the click and never reached on the refusal path. The app's own
+        // fence is the stronger half — it retires a destination send only while it is still
+        // `not-attempted` — and this is the local one.
+        const retiredBootstrap = (Array.isArray(message.retiredCommands) ? message.retiredCommands : [])
+          .includes(startupCommandId) &&
+          markerId() === startupCommandId && !OPENED_CONVERSATION && !conversationId &&
+          commandsHandled.has(startupCommandId) && !userSendReceipt &&
+          (!commandAttempt || commandAttempt.id === startupCommandId);
         // Maintenance carries the app's terminal tombstone for this exact claimed
         // document. Revocation is independent of whether the renderer is safe to close.
         const retired = (Array.isArray(message.cancelledDecisions) ? message.cancelledDecisions : [])
@@ -11825,7 +11840,7 @@
             safe: alive && epoch === observedEpoch && message.conversationId === conversationId && CLF_DOM.conversationId() === conversationId &&
               !generating && pendingTools === 0 && (!CLF_DOM.generating() ||
                 (terminal && expectedTerminal === fiberTerminalMessageId && fiberTurnFor(currentAssistantTurn())?.endMessageId === expectedTerminal)) && !desktopInputBusy && !modelCatalogBusy && !pluginRefreshBusy && !desktopDecision &&
-              ((!commandAttempt && !commandJournalGate) || failedBootstrap) && (!message.failedCommand || failedBootstrap) &&
+              ((!commandAttempt && !commandJournalGate) || failedBootstrap || retiredBootstrap) && (!message.failedCommand || failedBootstrap) &&
               queue.length === 0 && !flushWork && !!CLF_DOM.composer() &&
               !(CLF_DOM.composer().textContent || '').trim() && !CLF_DOM.hasComposerAttachments() });
         })().catch(() => sendResponse({ safe: false }));

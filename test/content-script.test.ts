@@ -1626,6 +1626,47 @@ describe('desktop input delivery and helper ownership', () => {
  * just been sent to, underneath its own first message, for the rest of that chat's life.
  */
 describe('the brief a successor chat is opened with', () => {
+  /**
+   * The page that was refused its permit, and the empty chat it is sitting in.
+   *
+   * It may not report the refusal: a failed resume ACK aborts the whole continuation and throws
+   * away the brief the next pickup exists to deliver. So it goes quiet — correctly — and nothing
+   * in the browser can close its New Chat, because every other close proof is keyed on the
+   * conversation a tab is showing and this tab will never have one.
+   *
+   * The app names the command it gave up on instead. This is the page recognising that name and
+   * proving the rest: it is still the document that command opened, it made no chat, and it
+   * never reached the line that prepares a send.
+   */
+  it('permits closing the empty chat of a handoff command the app gave up on', async () => {
+    const brief = '[[CLF-RESUME:0123456789abcdef0123456789abcdef]]\n\nContinue the previous ChatGPT session. Handoff: h-orphan';
+    live = await harness(
+      'https://chatgpt.com/?clf=cmd-orphan#clf=cmd-orphan',
+      {
+        redeem: () => ({ ok: true, command: { id: 'cmd-orphan', type: 'resume', text: brief, agent: null } }),
+        // The app refuses the destination permit, which is where this page stops.
+        compact: () => ({ ok: true, data: { allowed: false } }),
+        ack: () => ({ ok: true })
+      }
+    );
+
+    await settle(400);
+
+    // Nothing was sent, and the brief is not left standing in the box either.
+    expect(live.submitted).toEqual([]);
+    expect(composerText(live.document)).toBe('');
+
+    // A close check that does not name this command proves nothing about it.
+    expect(await live.runtimeMessage({ type: 'clf-tab-close-check', conversationId: null }))
+      .toMatchObject({ safe: false });
+    expect(await live.runtimeMessage({ type: 'clf-tab-close-check', conversationId: null, retiredCommands: ['cmd-somebody-else'] }))
+      .toMatchObject({ safe: false });
+
+    // Its own name, from the app that retired it, is what releases the page.
+    expect(await live.runtimeMessage({ type: 'clf-tab-close-check', conversationId: null, retiredCommands: ['cmd-orphan'] }))
+      .toMatchObject({ safe: true, conversationId: null });
+  });
+
   it('leaves nothing behind in the composer once ChatGPT has taken it', async () => {
     const brief = '[[CLF-RESUME:0123456789abcdef0123456789abcdef]]\n\nContinue the previous ChatGPT session. Handoff: h-residue';
     const assigned = 'cccccccc-dddd-eeee-ffff-000000000000';
