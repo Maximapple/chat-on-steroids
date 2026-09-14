@@ -65,5 +65,14 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
  *      which is exactly the silent failure this fence exists to turn into a 426.
  */
 // 13 — native file attachments require exact claimed-input chunk delivery and final
-// draft ownership. A 12 companion would silently send text without these files.
-export const BRIDGE_PROTOCOL = 13;
+//      draft ownership. A 12 companion would silently send text without these files.
+//
+// 14 — every destination checkpoint on /compact must carry the `commandId` and `client` it
+//      belongs to. Without them the app cannot tell which attempt is speaking and refuses the
+//      permit (`destination_send_not_available`), which is correct — but a 13 worker does not
+//      forward either field, so every replacement chat it opens is refused, and it cannot
+//      report that refusal either, because the report is a destination checkpoint too. The app
+//      then learns nothing and waits out the whole lease: measured three times in a row at
+//      fifteen minutes each, with nothing in the log but `did not report back in time`.
+//      The entry for 12 describes this same silence happening to an 11 peer.
+export const BRIDGE_PROTOCOL = 14;

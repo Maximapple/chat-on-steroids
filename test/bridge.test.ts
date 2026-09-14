@@ -4791,6 +4791,45 @@ describe('targeted open', () => {
     }
   });
 
+  /**
+   * Why BRIDGE_PROTOCOL is 14.
+   *
+   * A destination checkpoint identifies itself with the command its page redeemed and the client
+   * that redeemed it, and everything below is refused without them. That is right: the app cannot
+   * otherwise tell which attempt is speaking, and this is the fence that stops a stale tab from
+   * sending somebody's brief twice.
+   *
+   * It is also why a worker older than 14 cannot be allowed to stay paired. Its page sends both
+   * fields and its worker drops them in transit, so every replacement chat it opens is refused —
+   * and it cannot report that either, because the report is a destination checkpoint too. The app
+   * learns nothing at all and waits out the lease, three times over, with `did not report back in
+   * time` as the only trace.
+   */
+  it('refuses a destination checkpoint that names no command', async () => {
+    setBrowserOpener(async (url) => {
+      opened.push(url);
+    });
+    await pair();
+    const { sessionId, token } = await automaticCompactedSession(
+      '66666666-7777-8888-9999-aaaaaaaaaaaa',
+      'the unidentified brief'
+    );
+    const command = queueResume(sessionId, token)!;
+    await waitForOpened(1);
+    expect((await redeem(command.id, 'tab-1')).text).toContain('the unidentified brief');
+
+    for (const flag of ['destinationAttempt', 'destinationDispatch', 'destinationLost']) {
+      // What a worker older than 14 sends: the checkpoint, with no identity attached.
+      expect((await request('POST', '/compact', { body: { token, [flag]: true } })).status).toBe(409);
+      expect((await request('POST', '/compact', { body: { token, client: 'tab-1', [flag]: true } })).status).toBe(409);
+      expect((await request('POST', '/compact', { body: { token, commandId: command.id, [flag]: true } })).status).toBe(409);
+    }
+    // None of that spent anything, and the identified checkpoint still works.
+    expect(continuationByToken(token)?.destinationSend.state).toBe('not-attempted');
+    expect((await request('POST', '/compact',
+      { body: { token, commandId: command.id, client: 'tab-1', destinationAttempt: true } })).body.allowed).toBe(true);
+  });
+
   it('withdraws a cancelled resume so no tab opens for it afterwards', async () => {
     setBrowserOpener(async (url) => {
       opened.push(url);
