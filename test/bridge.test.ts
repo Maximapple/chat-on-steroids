@@ -5050,6 +5050,7 @@ describe('targeted open', () => {
     }
   });
 
+
   /**
    * The browser that is still polling while its wake channel is gone.
    *
@@ -6544,6 +6545,54 @@ describe('unattributed activity recovery', () => {
       await vi.advanceTimersByTimeAsync(180_000);
       expect(await maintenance()).toBeNull();
     } finally { vi.useRealTimers(); }
+  });
+
+  /**
+   * The reload this app decided against, and which bound decided it.
+   *
+   * Every refusal in `queueBrowserRecovery` is deliberate — budgets that exist because an
+   * unbounded watchdog reloads a chat all night. From outside, a refusal and a watchdog that
+   * never noticed are the same silence, so a chat sitting broken cannot be told apart from one
+   * this app is deliberately leaving alone.
+   *
+   * Measured on 2026-09-15: a turn failed, the page then reported that ChatGPT could not deliver
+   * a message four minutes later, and nothing happened until the ordinary silence window came
+   * round ten minutes after that — while a manual tab reload fixed it in seconds. Which of three
+   * bounds refused the second reload could not be read from the log, so the fix could not be
+   * aimed at it.
+   */
+  it('says which bound refused an error reload, once a minute', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const said = (): string[] =>
+        getLog().map(entry => entry.message).filter(message => message.includes('did not reload'));
+      const wedge = (text: string) => events(PRIME, [{ kind: 'chat_error', time: Date.now(), text, recoverable: true }]);
+
+      await events(PRIME, [openTurn('turn-one-reload')]);
+      await wedge('Connection interrupted. Waiting for the complete answer');
+      const repair = await maintenance();
+      expect(repair?.reason).toBe('assistant-error');
+      await maintenance(repair!.token);
+
+      // The same turn, a different failure: refused on purpose, and now it says so.
+      const before = said().length;
+      await wedge('Message delivery timed out. Please try again.');
+      const first = said();
+      expect(first.length).toBe(before + 1);
+      expect(first.at(-1)).toMatch(/already spent its error reload/);
+
+      // Not once per failure: a wedged page reports every few seconds.
+      await wedge('Message delivery timed out. Please try again. Retry');
+      expect(said().length).toBe(first.length);
+
+      // A minute on, the state is still worth knowing.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await wedge('Message delivery timed out. Please try again.');
+      expect(said().length).toBe(first.length + 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([false, undefined])('does not spend recovery on an informational alert (recoverable: %s)', async recoverable => {
