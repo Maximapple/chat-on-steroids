@@ -6075,6 +6075,38 @@ function turnKeyFor(live: { activeTurnId: string | null; endedTurns: number } | 
  * episode key; the three-minute floor then protects distinct error/no-tab failures. Silence,
  * Goal and compaction carry their own schedules and therefore bypass that unrelated floor.
  */
+/**
+ * Why a recovery this app wanted did not happen.
+ *
+ * Every trigger converges on `queueBrowserRecovery`, and every refusal there is deliberate —
+ * budgets that exist because an unbounded watchdog reloads a chat all night. What none of them
+ * did was say so, and from outside a refusal is indistinguishable from a watchdog that never
+ * noticed: both are silence.
+ *
+ * Measured on 2026-09-15: a chat's turn failed, the page then reported that ChatGPT could not
+ * deliver a message, and nothing happened for ten minutes until the ordinary silence window came
+ * round — while a manual tab reload fixed it in seconds. Which of three bounds refused that
+ * second reload could not be read from the log, so the fix could not be aimed. One line per
+ * refused reason per chat per minute makes it readable without turning a busy chat's budget into
+ * a log of its own.
+ */
+const RECOVERY_DECLINE_NOTICE_EVERY_MS = 60_000;
+const recoveryDeclineNoticedAt = new Map<string, number>();
+
+function declineRecovery(conversationId: string, reason: Repair['reason'], why: string): false {
+  const key = `${conversationId}:${reason}:${why}`;
+  const now = Date.now();
+  const last = recoveryDeclineNoticedAt.get(key) ?? 0;
+  if (!last || now < last || now - last >= RECOVERY_DECLINE_NOTICE_EVERY_MS) {
+    recoveryDeclineNoticedAt.set(key, now);
+    if (recoveryDeclineNoticedAt.size > 500) {
+      for (const [old] of [...recoveryDeclineNoticedAt].slice(0, 100)) recoveryDeclineNoticedAt.delete(old);
+    }
+    logInfo(`bridge: did not reload ${conversationId} for ${reason} — ${why}`);
+  }
+  return false;
+}
+
 function queueBrowserRecovery(
   conversationId: string,
   sessionId: string,
@@ -6090,7 +6122,9 @@ function queueBrowserRecovery(
   // for. Every trigger converges on this function — silence, no-tab, unattributed,
   // assistant-error, goal, compaction — so refusing here refuses all of them, and none of them
   // needs its own exemption.
-  if (!sessionId || isChatBlocked(conversationId) || stopRequestedFor(conversationId)) return false;
+  if (!sessionId || isChatBlocked(conversationId) || stopRequestedFor(conversationId)) {
+    return declineRecovery(conversationId, reason, !sessionId ? 'no session' : isChatBlocked(conversationId) ? 'chat blocked' : 'stop requested');
+  }
   // The turn's one error reload, already spent. Checked before the episode and state guards
   // below because it outlives both: those forget a repair the moment its episode changes, and
   // the whole point here is that a *new* error on the same broken turn buys nothing.
@@ -6099,10 +6133,12 @@ function queueBrowserRecovery(
     // the browser's pass, and an error on the next turn can arrive before that pass does.
     const spent = turnRepairSpent.get(conversationId);
     const live = liveConversations().find((entry) => entry.conversationId === conversationId);
-    if (spent && turnKeyFor(live) === spent.turnKey) return false;
+    if (spent && turnKeyFor(live) === spent.turnKey) return declineRecovery(conversationId, reason, 'this turn already spent its error reload');
     if (spent) turnRepairSpent.delete(conversationId);
     // ...and the chat-level bound the per-turn one cannot be: see ERROR_REPAIR_CEILING.
-    if ((errorRepairsSpent.get(conversationId) ?? 0) >= ERROR_REPAIR_CEILING) return false;
+    if ((errorRepairsSpent.get(conversationId) ?? 0) >= ERROR_REPAIR_CEILING) {
+      return declineRecovery(conversationId, reason, `chat spent its ${ERROR_REPAIR_CEILING} error reloads`);
+    }
   }
   // The reload this chat has already answered the same way. Bounded per chat rather than per
   // turn, because a wedged turn never ends and so never releases a turn-scoped budget.
