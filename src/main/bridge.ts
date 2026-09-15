@@ -7190,6 +7190,47 @@ async function inspectOwedGoals(now: number): Promise<boolean> {
  * page until explicit cancel or the marked bootstrap's durable commit in chat B.
  * Auto Off additionally cancels threshold-created tickets, never manual requests.
  */
+/**
+ * The handoff that was armed, clicked, and never confirmed.
+ *
+ * `dispatched-unresolved` is the one state this app cannot resolve by itself. The page took the
+ * irreversible transition immediately before the click, and then could not prove ChatGPT
+ * accepted it — so it deliberately says nothing, because replaying an ambiguous click is how the
+ * same brief gets sent twice. Nothing else can speak for it either: without an ACK this app
+ * never learns which conversation the replacement chat became, so it has no page to ask and no
+ * chat to reload.
+ *
+ * What resolves it is a reload of that tab: a fresh document reads the pending ticket and
+ * reconciles the marker in the chat's own transcript, which settles whether the brief landed.
+ * Measured five times between 2026-09-13 and 2026-09-15, the person did exactly that and the
+ * handoff finished within seconds — after the app had waited out its fifteen-minute lease in
+ * silence, once for five hours and forty minutes.
+ *
+ * So this says so, once per handoff, ninety seconds in: long enough that an ordinary confirmation
+ * has had its chance, short enough to be worth acting on. It changes nothing about the fence —
+ * the brief is still never sent twice by this app.
+ */
+const UNCONFIRMED_HANDOFF_MS = 90_000;
+const unconfirmedHandoffTold = new Set<string>();
+
+function noticeUnconfirmedHandoff(entry: ContinuationView, now: number): void {
+  if (entry.destinationSend.state !== 'dispatched-unresolved') {
+    unconfirmedHandoffTold.delete(entry.token);
+    return;
+  }
+  if (now - entry.touchedAt < UNCONFIRMED_HANDOFF_MS || unconfirmedHandoffTold.has(entry.token)) return;
+  unconfirmedHandoffTold.add(entry.token);
+  if (unconfirmedHandoffTold.size > 200) {
+    for (const old of [...unconfirmedHandoffTold].slice(0, 50)) unconfirmedHandoffTold.delete(old);
+  }
+  logWarn(`bridge: handoff ${entry.token.slice(0, 8)} was dispatched but never confirmed — its replacement chat needs one reload`);
+  noticeChatStopped(
+    'A handoff needs one reload',
+    'The replacement chat was given the brief but never confirmed it. Reload that ChatGPT tab and the handoff finishes by itself; nothing is sent twice.',
+    entry.sessionId
+  );
+}
+
 async function inspectOwedCompactions(now: number): Promise<boolean> {
   if (compactionWatchFloor === null) return false;
   const owed = new Map(pendingContinuations().map((entry) => [entry.from, entry]));
@@ -7201,6 +7242,7 @@ async function inspectOwedCompactions(now: number): Promise<boolean> {
 
   let queued = false;
   for (const entry of owed.values()) {
+    noticeUnconfirmedHandoff(entry, now);
     if (entry.automatic && !automaticCompactionAllowed(await getSession(entry.sessionId))) {
       await cancelAutomaticResumesNow(entry.sessionId);
       continue;

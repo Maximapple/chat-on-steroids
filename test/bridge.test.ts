@@ -2285,6 +2285,55 @@ describe('delivering a bootstrap', () => {
     expect((await request('POST', '/commands/redeem', { body: { id: command.id, client: 'tab-4' } })).status).toBe(409);
   });
 
+  /**
+   * The handoff that was armed, clicked, and never confirmed.
+   *
+   * `dispatched-unresolved` is the one state this app cannot resolve by itself: the page took the
+   * irreversible transition before the click and then could not prove ChatGPT accepted it, so it
+   * says nothing rather than risk sending the same brief twice — and without an ACK this app
+   * never learns which conversation the replacement chat became, so it has no page to ask.
+   *
+   * A reload of that tab settles it in seconds, because a fresh document reconciles the marker in
+   * the chat's own transcript. Measured five times between 2026-09-13 and 2026-09-15: the person
+   * reloaded and the handoff finished, after the app had waited out its lease in silence — once
+   * for five hours and forty minutes. So the app says so instead of waiting.
+   */
+  it('asks for one reload when a dispatched handoff is never confirmed', async () => {
+    vi.useFakeTimers();
+    const told: Array<{ title: string; body: string }> = [];
+    setStuckNotifier((title, body) => { told.push({ title, body }); return true; });
+    try {
+      await pair();
+      const { sessionId, token } = await compactedSession('99999999-8888-7777-6666-555555555557', 'the unconfirmed brief');
+      const command = queueResume(sessionId, token)!;
+      expect((await redeem(command.id, 'tab-1')).text).toContain('the unconfirmed brief');
+      expect((await request('POST', '/compact',
+        { body: { token, commandId: command.id, client: 'tab-1', destinationAttempt: true } })).body.allowed).toBe(true);
+      expect((await request('POST', '/compact',
+        { body: { token, commandId: command.id, client: 'tab-1', destinationDispatch: true } })).body.armed).toBe(true);
+
+      // Armed and clicked. Nothing follows — which is exactly what the page does when it cannot
+      // prove the click landed, and it is not yet worth saying anything about.
+      await sweepStaleSwarm(Date.now());
+      expect(told).toEqual([]);
+
+      // Ninety seconds on, an ordinary confirmation has had every chance.
+      await vi.advanceTimersByTimeAsync(90_000);
+      await sweepStaleSwarm(Date.now());
+      expect(told).toHaveLength(1);
+      expect(told[0]!.body).toMatch(/reload that chatgpt tab/i);
+      expect(told[0]!.body).toMatch(/nothing is sent twice/i);
+
+      // Once per handoff: this sweep runs every thirty seconds.
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await sweepStaleSwarm(Date.now());
+      expect(told).toHaveLength(1);
+    } finally {
+      setStuckNotifier(null);
+      vi.useRealTimers();
+    }
+  });
+
   it('offers the brief to a fresh chat once the page proves it lost the draft before Send', async () => {
     // 2026-09-02: the replacement chat opened, the brief landed, and the user's Escape emptied
     // the composer in the same instant. The ticket then sat armed for its six hours, the page
