@@ -2538,6 +2538,17 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         return transition();
       });
     };
+    // The three steps this app has repeatedly been blind at. A replacement chat that opens,
+    // works, and never commits looks identical from the log to one that never asked at all —
+    // and those have opposite causes. Logged per checkpoint, not per poll: there are three of
+    // them per handoff at most.
+    if (body['destinationAttempt'] === true || body['destinationDispatch'] === true || body['destinationLost'] === true) {
+      logInfo(
+        `bridge: destination checkpoint — ${body['destinationAttempt'] === true ? 'attempt' : body['destinationDispatch'] === true ? 'dispatch' : 'lost'} ` +
+          `for token ${checkpointToken.slice(0, 8)}, command ${String(body['commandId'] ?? '(none)').slice(0, 24)}, ` +
+          `client ${String(body['client'] ?? '(none)').slice(0, 24)}${destinationCommand ? '' : ' — no matching command'}`
+      );
+    }
     if (body['destinationAttempt'] === true) {
       let result: Awaited<ReturnType<typeof beginContinuationDestinationSendNow>> = null;
       await destinationTransition(async () => { result = await beginContinuationDestinationSendNow(checkpointToken); return !!result; });
