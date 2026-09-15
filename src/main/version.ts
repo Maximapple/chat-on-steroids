@@ -12,7 +12,7 @@
  * extension does nothing" into a diagnosable mismatch.
  */
 
-export const APP_VERSION = '2.1.11';
+export const APP_VERSION = '2.1.12';
 
 /**
  * The commit this build came from, or 'unknown' outside a build.
