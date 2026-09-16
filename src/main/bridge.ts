@@ -2679,12 +2679,24 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         : json(res, 409, { error: 'source_message_conflict' }, origin);
     }
     if (typeof body['destinationMessageId'] === 'string') {
+      // The path that is supposed to make an ACK unnecessary: the replacement page reads the
+      // marker out of its own transcript and names the conversation holding it, which is the
+      // one fact this app cannot obtain any other way. When a handoff ends `dispatched but
+      // never confirmed`, the question is whether this arrived at all — and until now the log
+      // could not say, so the search went looking at the send instead. Logged with its outcome
+      // below; at most one line per replacement chat.
       const entry = continuationByToken(checkpointToken);
-      if (!entry) return json(res, 409, { error: 'no_such_continuation' }, origin);
+      if (!entry) {
+        logInfo(`bridge: marked replacement ${id} named token ${checkpointToken.slice(0, 8)} — no such continuation`);
+        return json(res, 409, { error: 'no_such_continuation' }, origin);
+      }
       const bound = await bindContinuationDestinationMessageNow(
         checkpointToken,
         id,
         body['destinationMessageId'].slice(0, 200)
+      );
+      logInfo(
+        `bridge: marked replacement ${id} named token ${checkpointToken.slice(0, 8)} — ${bound ? 'bound, committing' : 'refused: another message already holds it'}`
       );
       if (!bound) return json(res, 409, { error: 'destination_message_conflict' }, origin);
       const result = await commitContinuationResult(checkpointToken, id);
