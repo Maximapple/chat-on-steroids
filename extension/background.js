@@ -4411,16 +4411,21 @@ async function restoreSilentRecorders() {
   for (const tab of tabs) {
     const id = tab && typeof tab.id === 'number' ? tab.id : null;
     if (id === null || tab.pendingUrl || tab.discarded === true) continue;
-    let answered = false;
-    try {
-      const live = await chrome.tabs.sendMessage(id, { type: 'clf-recorder-ping' });
-      answered = !!live && live.ok === true && live.recorderVersion === PAGE_RECORDER_VERSION;
-    } catch {
-      // No receiver: the isolated world is gone. That is the case this exists for.
-    }
-    if (answered) continue;
-    const repaired = await restoreChatgptTab(id);
-    console.info(`clf: recorder in tab ${id} was not answering — ${repaired ? 're-injected' : 'could not be re-injected'}`);
+    // Deliberately unconditional, and this corrects a mistake in the first version: it pinged
+    // first and skipped every tab whose content.js answered. `restoreChatgptTab` says in its own
+    // words why that is wrong — "healthy content.js does not prove the independently running
+    // MAIN-world helper is still present" — and it re-executes fiber.js for exactly that case,
+    // idempotently, because the helper keeps one listener per protocol version. It pings first
+    // itself, so this loop only has to name the tabs.
+    //
+    // A page without fiber.js is not a quiet page, it is a blind one, and it fails where nothing
+    // else is watching. `markedContinuationTurns()` reads the [[CLF-RESUME]] marker out of the
+    // Fiber turns and needs each message's id from there; with no fiber it finds nothing, so a
+    // replacement chat never reconciles the marker that commits its own handoff, and the journal
+    // gate it raised on seeing that marker in the DOM never opens again. Measured on 2026-09-16:
+    // such a chat recorded 1 event from the browser against 475 MCP calls, while a healthy chat
+    // of the same age recorded 61, including 47 page tools.
+    await restoreChatgptTab(id);
   }
 }
 

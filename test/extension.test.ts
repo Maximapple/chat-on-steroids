@@ -4319,16 +4319,18 @@ it.each(['healthy', 'dead', 'stale-version', 'loading', 'discarded'])(
 
     await run();
 
-    const shouldRepair = scenario === 'dead' || scenario === 'stale-version';
-    expect(restore).toHaveBeenCalledTimes(shouldRepair ? 1 : 0);
+    // Every live tab is handed to restoreChatgptTab, healthy ones included: it pings first and
+    // decides what to repair, and a content.js that answers still proves nothing about the
+    // MAIN-world fiber.js that request-id ownership and marker reconciliation depend on.
+    const live = scenario !== 'loading' && scenario !== 'discarded';
+    expect(restore).toHaveBeenCalledTimes(live ? 1 : 0);
     // A tab mid-navigation or unloaded by Chrome is left alone: the manifest injection covers
     // it when it comes back, and waking it here would be this app opening pages by itself.
-    if (scenario === 'loading' || scenario === 'discarded') expect(sendMessage).not.toHaveBeenCalled();
 
     // One check a minute, not one per maintenance pass: this runs beside every /status poll.
-    sendMessage.mockClear();
+    restore.mockClear();
     await run();
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(restore).not.toHaveBeenCalled();
   }
 );
 
