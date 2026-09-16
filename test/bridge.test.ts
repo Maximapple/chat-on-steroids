@@ -1406,6 +1406,42 @@ describe('automatic compaction', () => {
     }
   }
 
+  /**
+   * The chat whose turn ChatGPT just killed, which is too big to be rescued.
+   *
+   * `chatIsWorking` keeps an old chat that merely opens above the line from compacting on
+   * sight. A chat whose turn has just died is the opposite case, and requiring a running turn
+   * there closes a loop instead of breaking it: measured over 154 `Connection interrupted`
+   * events, the ones that were rescued sat at a median of ~247k context tokens and the ones
+   * that went on to `Message delivery timed out` at ~431k — because ChatGPT allows a fixed four
+   * minutes after the interruption and a chat that large takes longer than that to reload. One
+   * session on 2026-09-15 ran the whole circle three times: a 45-to-56-minute turn died, the
+   * handoff that followed never landed, the session stayed in the same oversized chat, and its
+   * next turn died the same way.
+   */
+  it('files a ticket for an oversized chat whose turn died, with no turn left running', async () => {
+    await pair();
+    const conversationId = 'a1a1a1a1-0000-4000-8000-00000000ac95';
+    await withThreshold(10_000, async () => {
+      // The turn is already over when the failure is reported, so nothing is running.
+      await request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'turn_start', time: Date.now(), turnId: 'died-oversized' },
+        ...over(),
+        { kind: 'turn_end', time: Date.now(), turnId: 'died-oversized', outcome: 'failed' }
+      ] } });
+      await settled();
+      const activity = await request('GET', `/activity?conversationId=${conversationId}`);
+      const sessionId = activity.body.sessionId;
+
+      // ChatGPT says the answer is gone. That is the moment this chat needs a smaller one.
+      await request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'chat_error', time: Date.now(), turnId: 'died-oversized', recoverable: true,
+          text: 'Connection interrupted. Waiting for the complete answer' }
+      ] } });
+      await vi.waitFor(() => expect(continuationForSession(sessionId)).toMatchObject({ automatic: true }), { timeout: 3000 });
+    });
+  });
+
   it('observes Astra per chat, refuses automatic tickets, and preserves manual compaction', async () => {
     await pair();
     const conversationId = 'a1a1a1a1-0000-4000-8000-00000000ac90';
