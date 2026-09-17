@@ -199,10 +199,18 @@ try {
       child.stderr.setEncoding('utf8').on('data', text => { stderr += text; });
       // Keep the launcher alive until tree termination owns its WPF child. A
       // spawnSync timeout kills only PowerShell and strands the fixture executable.
+      //
+      // Generous on purpose: this bound exists so a hung probe fails instead of hanging, not
+      // to assert how fast a loaded runner starts PowerShell, builds a WPF window and drives
+      // several UI Automation round-trips through it. At sixty seconds it was asserting the
+      // latter, and failed three hosted runs on 2026-09-17 with `timedOut` true while the same
+      // job passed on other runs of the same code — including on PRs that changed nothing but
+      // number formatting in an unrelated test. A probe that is genuinely stuck still fails,
+      // two and a half minutes later instead of one.
       const timer = setTimeout(() => {
         timedOut = true;
         if (child.pid) void terminateProcessTree(child.pid, true);
-      }, 60_000);
+      }, 150_000);
       try {
         const status = await new Promise<number | null>((resolve, reject) => {
           child.once('error', reject);
@@ -225,5 +233,5 @@ try {
         console.warn(`left ${dir} behind: ${(error as Error).message}`);
       }
     }
-  }, 70_000);
+  }, 180_000);
 });
