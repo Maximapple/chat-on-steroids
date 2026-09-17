@@ -1201,6 +1201,41 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     expect(asked).toEqual(['status', 'status', 'status']);
   });
 
+
+  it.each([['blind', 1], ['stalled', 0]])(
+    'projects reason %s into the right contract for a live page: %i reload(s)',
+    async (reason, expected) => {
+      // The join, not the endpoint. `performBrowserRepairs` was already covered directly, and
+      // that is exactly how this bug survived: the app never sets `suspended`, the worker
+      // derives it here from the reason, and a probe that passed the flag itself asked a
+      // question that never occurs. Measured 2026-09-17 — a `blind` repair handed over twice
+      // for a live page and carried out neither time, because it arrived as a shell reload.
+      const conversationId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+      const fetch = vi.fn(async (input: string) => {
+        const url = new URL(input);
+        if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (url.pathname === '/status') {
+          return response(200, {
+            ok: true,
+            repairs: url.searchParams.get('repaired') ? [] : [{ conversationId, token: `t-${reason}`, reason }]
+          });
+        }
+        return response(404, {});
+      });
+      const worker = loadWorker({
+        local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+        session: new FakeStorageArea(),
+        fetch
+      });
+      // Alive: neither discarded nor frozen, which is the whole point of the distinction.
+      await worker.createTab({ id: 74, url: `https://chatgpt.com/c/${conversationId}` });
+      await worker.send({ type: 'bind', conversationId }, 74);
+      await worker.fireAlarm();
+
+      expect(worker.tabsReload.mock.calls.filter((call) => call[0] === 74)).toHaveLength(expected);
+    }
+  );
+
   it('asks nobody while it is not paired', async () => {
     const { fetch, asked } = appWith(null);
     const worker = loadWorker({ local: new FakeStorageArea({}), session: new FakeStorageArea(), fetch });
