@@ -6013,7 +6013,15 @@ describe('unattributed activity recovery', () => {
       // can reload exactly this page and used to decline it, because its `working` gate reads the
       // page's account of the turn — the half that is broken.
       await vi.waitFor(() => expect(getLog().some((entry) =>
-        entry.message.includes('is a stalled browser tab — asking the browser to reload'))).toBe(true));
+        entry.message.includes('asking the browser to reload the exact chat once'))).toBe(true));
+      // Its own route, not the suspended-shell one. The worker turns `stalled` into
+      // `suspended: true`, and the browser then reloads only a genuinely discarded or frozen
+      // tab — measured 2026-09-17, that request was handed over twice for a live blind page and
+      // carried out neither time, while `silence` and `compaction` repairs for the same chat
+      // landed in 34 and 107 milliseconds.
+      expect(getLog().some((entry) =>
+        entry.message.includes('is a page that stopped reporting — asking the browser to reload'))).toBe(true);
+      expect(getLog().some((entry) => entry.message.includes('is a stalled browser tab'))).toBe(false);
 
       // The report is once a quarter hour, however many calls that page makes.
       await vi.advanceTimersByTimeAsync(3 * 60_000);
