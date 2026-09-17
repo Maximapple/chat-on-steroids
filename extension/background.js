@@ -2593,8 +2593,24 @@ async function performBrowserRepairs(repairs, policy) {
         const claim = await call('/repairs/claim', { method: 'POST', body: JSON.stringify({ token }) });
         if (!claim.ok || claim.data?.allowed !== true) continue;
       }
-      if (target) await chrome.tabs.reload(target.id);
-      else {
+      if (target) {
+        // A reload discards whatever the person has typed and not sent. Every close path in
+        // this extension already proves the composer is empty before acting, and a recovery
+        // reload had no such proof at all — it targets a page that is generating, which is
+        // exactly when someone is most likely to be writing the next message. So ask, and
+        // stand down if the page says there is a draft: the chat staying unwatched for another
+        // pass is recoverable, the sentence is not.
+        //
+        // Only an answer counts. A page whose content script is gone cannot answer and cannot
+        // be protecting anything this reload could preserve, so silence reloads as before —
+        // which is also the state this recovery exists for.
+        const status = await tabReply(target.id, { type: 'clf-page-status' });
+        if (status?.ok === true && status.draft === true) {
+          await call(`/status?repairFailed=${encodeURIComponent(token)}&repairAction=${repairAction}`);
+          continue;
+        }
+        await chrome.tabs.reload(target.id);
+      } else {
         await createChatTab(`https://chatgpt.com/c/${encodeURIComponent(conversationId)}`, policy.background === true, focus);
       }
     } catch {
