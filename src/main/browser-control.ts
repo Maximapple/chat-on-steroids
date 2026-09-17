@@ -1,168 +1,114 @@
-/**
- * The app's side of browser control.
- *
- * The driver that does the work lives in the extension's service worker, because only an
- * extension can hold a DevTools session and only a DevTools session produces trusted input.
- * This is the other end: a place to park one command per conversation, hand it to the browser
- * that asks, and wake the caller when the answer comes back.
- *
- * ## Why it rides on `/activity`
- *
- * The alternatives were a WebSocket the bridge does not speak, or a native messaging host that
- * would need an installer change on every platform. Neither is necessary. A browser command is
- * always issued *by* a ChatGPT conversation, so the tab that will carry it is open by
- * definition, and its content script is already polling `/activity` several times a second
- * while work is live. Riding that poll costs one field in a reply that is already in flight,
- * inherits the ownership model that decides which conversation a request belongs to, and
- * cannot outlive the page it belongs to.
- *
- * ## One at a time
- *
- * A conversation may have exactly one command outstanding. Browser actions are ordered — a
- * click after a scroll means something different from the reverse — and a queue that could
- * reorder or interleave them would be a queue that occasionally does the wrong thing on a page
- * nobody is watching.
- */
+/** Short-lived browser RPCs. Claims are never replayed, including after response loss. */
+import { randomUUID } from 'node:crypto';
+import { BROWSER_LIMITS, type BrowserCommand, type BrowserResult, type BrowserTool } from '../shared/browser-control.js';
+import { wakeBrowserWork } from './browser-wake.js';
 
-/**
- * How long a command may wait to be collected and answered before the caller gives up.
- *
- * Has to outlast the driver, not merely match it. The extension allows a navigate or a reload 30
- * seconds and a screenshot the same, an observe walks up to a dozen frames before it captures,
- * and none of that starts until the page collects the command on its next activity poll — up to
- * two seconds later. Sharing the driver's own number meant a slow navigate reported
- * BROWSER_TIMEOUT for an action that had in fact succeeded, and abandoned the rest of the batch
- * on the strength of it.
- */
-const BROWSER_COMMAND_TIMEOUT_MS = 45_000;
-
-export interface BrowserCommandResult {
-  ok: boolean;
-  /** Whatever the driver returned; shape depends on the action. */
-  data?: Record<string, unknown>;
-  error?: string;
-  detail?: string;
+interface Pending {
+  browserId: string;
+  command: BrowserCommand;
+  claimed: boolean;
+  claiming: boolean;
+  allowed: () => Promise<boolean>;
+  finish: (result: BrowserResult) => void;
 }
+const uuid = /^[a-f\d-]{36}$/i;
+const tabHandle = /^([a-f\d-]{36}):(\d+)$/i;
 
-interface PendingCommand {
-  id: string;
-  conversationId: string;
-  action: Record<string, unknown>;
-  /** Set once a browser has actually taken the command, so a re-poll does not run it twice. */
-  collectedAt: number | null;
-  settle: (result: BrowserCommandResult) => void;
-  timer: NodeJS.Timeout;
-}
+export class BrowserControlBroker {
+  private epoch = randomUUID();
+  private clients = new Map<string, { name: string; seen: number; enabled: boolean }>();
+  private pending = new Map<string, Pending>();
 
-const pending = new Map<string, PendingCommand>();
+  constructor(private wake = () => wakeBrowserWork('browser-control')) {}
 
-let counter = 0;
-const nextId = (): string => `bc-${Date.now().toString(36)}-${(++counter).toString(36)}`;
+  browsers(): Array<{ id: string; name: string; enabled: boolean }> {
+    const now = Date.now();
+    return [...this.clients].filter(([, client]) => now - client.seen < BROWSER_LIMITS.presenceMs)
+      .map(([id, { name, enabled }]) => ({ id, name, enabled }));
+  }
 
-function finish(command: PendingCommand, result: BrowserCommandResult): void {
-  clearTimeout(command.timer);
-  if (pending.get(command.conversationId) === command) pending.delete(command.conversationId);
-  command.settle(result);
-}
+  poll(browserId: string, name: string, enabled: boolean): { epoch: string; requests: string[] } {
+    if (!uuid.test(browserId)) throw new Error('Invalid browser identity');
+    for (const [id, client] of this.clients) if (Date.now() - client.seen >= BROWSER_LIMITS.presenceMs) this.clients.delete(id);
+    if (!this.clients.has(browserId) && this.clients.size >= BROWSER_LIMITS.clients) throw new Error('Too many browser connections');
+    this.clients.set(browserId, { name: name.slice(0, 80), seen: Date.now(), enabled });
+    return { epoch: this.epoch, requests: enabled ? [...this.pending].filter(([, p]) => p.browserId === browserId && !p.claimed && !p.claiming)
+      .map(([id]) => id) : [] };
+  }
 
-/**
- * Queues one action for the browser showing this conversation and waits for its answer.
- *
- * Rejects rather than queues when something is already outstanding: the caller is a tool call
- * that is itself waiting, so a second one arriving means the model issued two actions at once,
- * and running them in an order nobody chose is worse than refusing the second.
- */
-export function runBrowserCommand(
-  conversationId: string,
-  action: Record<string, unknown>
-): Promise<BrowserCommandResult> {
-  const existing = pending.get(conversationId);
-  if (existing) {
-    return Promise.resolve({
-      ok: false,
-      error: 'BROWSER_BUSY',
-      detail: 'another browser action for this conversation is still running'
+  async claim(browserId: string, id: string, epoch: string): Promise<BrowserCommand | null> {
+    const p = this.pending.get(id);
+    if (!p || p.browserId !== browserId || epoch !== this.epoch || p.claimed || p.claiming) return null;
+    p.claiming = true;
+    const allowed = await p.allowed().catch(() => false);
+    // Async policy reads cannot revive an expired/retired request.
+    if (this.pending.get(id) !== p || p.command.expiresAt <= Date.now()) return null;
+    if (!allowed) { p.finish({ error: 'BROWSER_PERMISSION_REVOKED: request was not dispatched.' }); return null; }
+    p.claimed = true;
+    return p.command;
+  }
+
+  result(browserId: string, id: string, epoch: string, result: BrowserResult): boolean {
+    const p = this.pending.get(id);
+    if (!p || p.browserId !== browserId || epoch !== this.epoch || !p.claimed) return false;
+    if (Buffer.byteLength(JSON.stringify(result), 'utf8') > BROWSER_LIMITS.resultBytes) {
+      p.finish({ error: 'BROWSER_RESULT_TOO_LARGE: operation may have completed; inspect before repeating it.' });
+    } else p.finish(result);
+    return true;
+  }
+
+  async check(browserId: string, id: string, epoch: string): Promise<boolean> {
+    const p = this.pending.get(id);
+    if (!p || p.browserId !== browserId || epoch !== this.epoch || !p.claimed) return false;
+    const allowed = await p.allowed().catch(() => false);
+    return allowed && this.pending.get(id) === p && p.command.expiresAt > Date.now();
+  }
+
+  async execute(tool: BrowserTool, input: Record<string, unknown>, owner: string, conversationId: string | null,
+    allowed: () => Promise<boolean>): Promise<BrowserResult> {
+    const args = { ...input };
+    const browsers = this.browsers();
+    let browserId = typeof args.browserId === 'string' ? args.browserId : undefined;
+    if (typeof args.tabId === 'string') {
+      const match = tabHandle.exec(args.tabId);
+      if (!match || !Number.isSafeInteger(Number(match[2]))) return { error: 'BROWSER_TAB_INVALID: use a tabId returned by browser_tabs.' };
+      browserId = match[1]!;
+      args.tabId = Number(match[2]);
+    }
+    if (!browserId) {
+      if (browsers.length !== 1) return tool === 'browser_tabs' && args.action === 'list'
+        ? { value: { browsers, tabs: [], message: browsers.length ? 'Choose browserId to list its tabs.' : 'Open Chrome with the companion extension connected.' } }
+        : { error: 'BROWSER_REQUIRED: list browsers, then specify the returned browserId.' };
+      browserId = browsers[0]!.id;
+    }
+    const client = browsers.find(b => b.id === browserId);
+    if (!client) return { error: 'BROWSER_OFFLINE: this browser incarnation is no longer connected. List browsers again.' };
+    if (!client.enabled) return { error: 'BROWSER_EXTENSION_PERMISSION: Chrome must grant the companion its debugger and tabs permissions. Reload/update the extension.' };
+    if (this.pending.size >= BROWSER_LIMITS.pending) return { error: 'BROWSER_BUSY: too many pending requests; no operation was dispatched.' };
+    delete args.browserId;
+    const id = randomUUID();
+    const command: BrowserCommand = { id, epoch: this.epoch, owner, conversationId, tool, args, expiresAt: Date.now() + BROWSER_LIMITS.timeoutMs };
+    return new Promise(resolve => {
+      const timer = setTimeout(() => p.finish({ error: p.claimed
+        ? 'BROWSER_RESULT_UNCONFIRMED: the operation was dispatched but its result was not received. Inspect the tab before repeating any action.'
+        : 'BROWSER_NOT_DISPATCHED: the extension did not claim this request before its deadline.' }), BROWSER_LIMITS.timeoutMs);
+      timer.unref?.();
+      const p: Pending = { browserId, command, claimed: false, claiming: false, allowed, finish: result => {
+        if (this.pending.get(id) !== p) return;
+        this.pending.delete(id); clearTimeout(timer);
+        resolve(result);
+      } };
+      this.pending.set(id, p);
+      this.wake();
     });
   }
 
-  return new Promise<BrowserCommandResult>((resolve) => {
-    const command: PendingCommand = {
-      id: nextId(),
-      conversationId,
-      action,
-      collectedAt: null,
-      settle: resolve,
-      timer: setTimeout(() => {
-        finish(command, {
-          ok: false,
-          error: 'BROWSER_TIMEOUT',
-          // The two cases differ in what the caller may safely do next, and only one of them is
-          // safe to retry. QA hit the second: the click landed, the page changed, and the reply
-          // was a failure — a blind retry would have clicked twice. So the message says what to
-          // do rather than only what went wrong.
-          detail: command.collectedAt === null
-            ? 'no browser tab collected the action, so it did not run; is the ChatGPT tab still open and paired? Safe to retry.'
-            : 'the browser took the action and did not report back, so it may well have happened. Do NOT retry it — observe first and decide from what the page now shows.'
-        });
-      }, BROWSER_COMMAND_TIMEOUT_MS)
-    };
-    pending.set(conversationId, command);
-  });
-}
-
-/**
- * The command this conversation should carry, if any, marked as collected.
- *
- * Handed out once. A second poll before the result arrives gets nothing, so two tabs showing
- * the same conversation cannot both perform the same click.
- */
-export function collectBrowserCommand(
-  conversationId: string
-): { id: string; action: Record<string, unknown> } | null {
-  const command = pending.get(conversationId);
-  if (!command || command.collectedAt !== null) return null;
-  command.collectedAt = Date.now();
-  return { id: command.id, action: command.action };
-}
-
-/**
- * Delivers a browser's answer.
- *
- * Returns false for an id this conversation does not have outstanding — a late result from a
- * command that already timed out, or a report aimed at another chat. Neither is trusted.
- */
-export function settleBrowserCommand(
-  conversationId: string,
-  id: string,
-  result: BrowserCommandResult
-): boolean {
-  const command = pending.get(conversationId);
-  if (!command || command.id !== id) return false;
-  finish(command, result);
-  return true;
-}
-
-/** Gives up anything outstanding for a conversation whose page has gone. */
-export function abandonBrowserCommands(conversationId: string): void {
-  const command = pending.get(conversationId);
-  if (!command) return;
-  finish(command, {
-    ok: false,
-    error: 'BROWSER_GONE',
-    // Same distinction as the timeout, for the same reason: whether it was collected decides
-    // whether it may have run, and that decides whether a retry is safe.
-    detail:
-      command.collectedAt === null
-        ? 'the ChatGPT page closed before any tab collected the action, so it did not run. Safe to retry once a page is back.'
-        : 'the ChatGPT page closed after a tab took the action, so it may well have happened. Do NOT retry it — observe first.'
-  });
-}
-
-/** Tests only: no command may survive from one case into the next. */
-export function resetBrowserControlForTests(): void {
-  for (const command of [...pending.values()]) {
-    clearTimeout(command.timer);
-    command.settle({ ok: false, error: 'BROWSER_GONE', detail: 'reset' });
+  reset(): void {
+    for (const p of this.pending.values()) p.finish({ error: p.claimed
+      ? 'BROWSER_RESULT_UNCONFIRMED: bridge stopped after dispatch. Inspect before repeating the operation.'
+      : 'BROWSER_NOT_DISPATCHED: bridge stopped.' });
+    this.clients.clear(); this.epoch = randomUUID();
   }
-  pending.clear();
 }
+
+export const browserControl = new BrowserControlBroker();

@@ -13,7 +13,8 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { SessionEvent, SessionSummary, StoredText } from '../../shared/session.js';
-import { getSession, indexedSessions, readEvents, readEventsAfter } from '../session/store.js';import { noteCount, noteDetail } from './call-context.js';
+import { getSession, indexedSessions, readEvents } from '../session/store.js';
+import { noteCount, noteDetail } from './call-context.js';
 import { toolDeclaration } from './tool-declarations.js';
 import { expandStored, fail, guard, ok, type SurfaceRegistrar, type ToolResult } from './kernel.js';
 
@@ -406,7 +407,7 @@ async function readRange(
     // it takes the same bounded walk readUpdate does rather than re-reading the whole journal.
     // readRangeFrom only reads this array to decide which delivered assistant messages are still
     // unfinished, and every row it can deliver is in the page it was handed.
-    const relevant = (await readEventsAfter(summary.id, cursor.after ?? 0)).filter(
+    const relevant = (await readEvents(summary.id, { from: (cursor.after ?? 0) + 1 })).filter(
       (event) => event.seq <= cursor.snapshot
     );
     const items = await updateItems(summary.id, relevant, cursor.include, cursor.open ?? []);
@@ -426,7 +427,7 @@ async function readUpdate(
   // #after — and reading the whole journal to answer it made every tick cost the session's
   // entire history. The bounded walk stops at the checkpoint, so a quiet poll reads almost
   // nothing and a busy one reads only what is new.
-  const fresh = await readEventsAfter(summary.id, cursor.after);
+  const fresh = await readEvents(summary.id, { from: cursor.after + 1 });
   const snapshot = maxSeq(fresh);
   if (snapshot <= cursor.after) {
     noteCount(0);

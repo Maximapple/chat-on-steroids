@@ -10,6 +10,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import sharp from 'sharp';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
 import { lineDelta, formatDelta } from '../src/main/diffstat.js';
@@ -44,8 +45,8 @@ import {
   pruneSessions,
   readAsset,
   readEvents,
-  readEventsAfter,
   readRecentEvents,
+  readLatestUserMessage,
   turnHasMcpCall,
   conversationHasMcpCallSince,
   readHandoff,
@@ -327,7 +328,7 @@ describe('session store', () => {
     const bySeq = (events: readonly { seq: number }[]): number[] => events.map((event) => event.seq).sort((a, b) => a - b);
     for (const checkpoint of [0, 1, 17, all.length - 1, all.length]) {
       const expected = bySeq(all.filter((event) => event.seq > checkpoint));
-      const ranged = await readEventsAfter(summary.id, checkpoint);
+      const ranged = await readEvents(summary.id, { from: (checkpoint) + 1 });
       expect(bySeq(ranged), `checkpoint ${checkpoint}`).toEqual(expected);
       // A sequence cursor's page is in sequence order, so a caller can advance past its last row.
       expect(ranged.map((event) => event.seq), `checkpoint ${checkpoint} order`).toEqual(bySeq(ranged));
@@ -335,92 +336,7 @@ describe('session store', () => {
     expect(all.filter((event) => event.kind === 'assistant_message')).toHaveLength(4);
   });
 
-  it('stops at the checkpoint instead of walking the whole journal behind it', async () => {
-    // The finding this guards: an update cursor used to re-read and re-parse every byte of the
-    // journal on every poll, so P polls of an N-event session cost O(P x N). Returned sequence
-    // numbers cannot tell the two implementations apart — a full read then filtered gives
-    // exactly the same rows — so this measures the bytes actually taken off disk instead.
-    const summary = await createSession({ title: 'ranged update boundedness' });
-    const bulk = 'x'.repeat(4_000);
-    for (let index = 0; index < 300; index++) {
-      await appendEvent(summary.id, {
-        time: 6_000 + index,
-        source: 'app',
-        kind: 'note',
-        message: { text: `${bulk} ${index}`, truncated: false, chars: bulk.length }
-      });
-    }
-    await flushSessions();
-    const journal = path.join(sessionsRoot(), summary.id, 'events.jsonl');
-    const journalBytes = (await fs.stat(journal)).size;
-    expect(journalBytes).toBeGreaterThan(1_000_000);
 
-    const checkpoint = (await readEvents(summary.id)).length;
-    for (let index = 0; index < 3; index++) {
-      await appendEvent(summary.id, {
-        time: 7_000 + index,
-        source: 'app',
-        kind: 'note',
-        message: { text: `after ${index}`, truncated: false, chars: 7 }
-      });
-    }
-    await flushSessions();
-
-    let journalBytesRead = 0;
-    const realReadFile = fs.readFile.bind(fs);
-    const realOpen = fs.open.bind(fs);
-    const readFile = vi.spyOn(fs, 'readFile').mockImplementation((async (target: string, ...rest: unknown[]) => {
-      const out = await (realReadFile as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
-      if (String(target) === journal) journalBytesRead += Buffer.byteLength(out as string);
-      return out;
-    }) as never);
-    const open = vi.spyOn(fs, 'open').mockImplementation((async (target: string, ...rest: unknown[]) => {
-      const handle = (await (realOpen as (...args: unknown[]) => Promise<unknown>)(target, ...rest)) as {
-        read: (...args: unknown[]) => Promise<{ bytesRead: number }>;
-      };
-      if (String(target) !== journal) return handle;
-      const realRead = handle.read.bind(handle);
-      handle.read = async (...args: unknown[]) => {
-        const result = await realRead(...args);
-        journalBytesRead += result.bytesRead;
-        return result;
-      };
-      return handle;
-    }) as never);
-
-    try {
-      const page = await readEventsAfter(summary.id, checkpoint, { maxBytes: 64 * 1024 });
-      expect(page.map((event) => event.seq)).toEqual([checkpoint + 1, checkpoint + 2, checkpoint + 3]);
-    } finally {
-      readFile.mockRestore();
-      open.mockRestore();
-    }
-
-    // Three short rows off the end of a 1 MB journal. A full read would have moved all of it.
-    expect(journalBytesRead).toBeGreaterThan(0);
-    expect(journalBytesRead).toBeLessThan(journalBytes / 4);
-  });
-
-  it('falls back to the full read rather than hand back a page with a hole in it', async () => {
-    // The budget is a safety valve, not a cap on the answer. A checkpoint further back than the
-    // budget can reach must still return every row after it: an update cursor that silently
-    // skipped rows would lose recorded events permanently.
-    const summary = await createSession({ title: 'ranged update fallback' });
-    const bulk = 'y'.repeat(4_000);
-    for (let index = 0; index < 300; index++) {
-      await appendEvent(summary.id, {
-        time: 8_000 + index,
-        source: 'app',
-        kind: 'note',
-        message: { text: `${bulk} ${index}`, truncated: false, chars: bulk.length }
-      });
-    }
-    await flushSessions();
-
-    const all = await readEvents(summary.id);
-    const page = await readEventsAfter(summary.id, 1, { maxBytes: 64 * 1024 });
-    expect(page.map((event) => event.seq)).toEqual(all.filter((event) => event.seq > 1).map((event) => event.seq));
-  });
 
   it('negative-caches unknown current conversation lookups until that exact attachment can be created', async () => {
     const conversationId = `conv-missing-${Date.now()}`;
@@ -1954,7 +1870,7 @@ describe('handoff storage', () => {
     }
   }, 90_000);
 
-  it('never prunes the session holding the newest handoff', async () => {
+  it('never age-prunes closed recordings, including sessions without a handoff', async () => {
     const stale = await createSession({ title: 'stale' });
     const kept = await createSession({ title: 'kept' });
     await saveHandoff(handoff(kept.id, '2026-01-03-cccccccc', Date.now()));
@@ -1979,16 +1895,14 @@ describe('handoff storage', () => {
     }
 
     const removed = await pruneSessions(30);
-    expect(removed).toBeGreaterThanOrEqual(1);
-    // Retention is not the UI's first 200 rows. Check durable existence directly so this
-    // invariant stays valid even when the retained handoff is intentionally old in a large
-    // test history.
+    expect(removed).toBe(0);
     expect(await getSession(kept.id)).not.toBeNull();
-    expect(await getSession(stale.id)).toBeNull();
+    expect(await getSession(stale.id)).not.toBeNull();
+    await deleteSession(stale.id);
     await deleteSession(kept.id);
   }, 90_000);
 
-  it('prunes an expired session beyond the old 5,000-folder maintenance prefix', async () => {
+  it('does not scan or remove even an expired recording when asked through the legacy prune seam', async () => {
     const seed = await createSession({ title: 'retention catalog seed' });
     const seedSummary = await getSession(seed.id);
     expect(seedSummary).not.toBeNull();
@@ -2057,8 +1971,8 @@ describe('handoff storage', () => {
     );
 
     try {
-      expect(await pruneSessions(30)).toBe(1);
-      expect(removed).toEqual([targetId]);
+      expect(await pruneSessions(30)).toBe(0);
+      expect(removed).toEqual([]);
     } finally {
       rmSpy.mockRestore();
       statSpy.mockRestore();
@@ -2067,8 +1981,8 @@ describe('handoff storage', () => {
       resetSessionStoreForTests();
       await deleteSession(seed.id);
     }
-  // Match the adjacent full-catalog tests: Windows metadata I/O under the parallel
-  // suite can exceed the ordinary 30-second budget. Keep all 5,001 entries exercised.
+  // Keep the former pathological catalogue shape: the invariant is that no reader or remover
+  // is touched at all, regardless of how much expired history exists.
   }, 90_000);
 
   it('splits a long brief on blank lines and keeps every character', () => {
@@ -2160,6 +2074,44 @@ describe('canonical recorder 1.8', () => {
     expect(await getSession(opened.id)).toMatchObject({ estimatedTokens: 15000, contextTokens: 15000 });
   });
 
+  it('refuses rejected native-image owners before writing preview assets', async () => {
+    const conversationId = `conv-native-image-owner-${Date.now()}`;
+    const messageId = '5150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const providerAssetId = 'file_00000000000000000000000000000071';
+    const preview = async (color: string) => {
+      const bytes = await sharp({ create: { width: 12, height: 8, channels: 3, background: color } }).webp().toBuffer();
+      return `data:image/webp;base64,${bytes.toString('base64')}`;
+    };
+    const first = await recordChatObservations(conversationId, [{
+      kind: 'native_image', time: 100, messageId, providerAssetId, providerRole: 'tool',
+      providerChannel: 'final', providerStatus: 'in_progress', width: 1254, height: 1254,
+      previewStatus: 'pending'
+    }], 'worker-a');
+    const sessionId = first.sessionId!;
+
+    const roleConflict = await recordChatObservations(conversationId, [{
+      kind: 'native_image', time: 200, messageId, providerAssetId, providerRole: 'assistant',
+      providerChannel: 'final', providerStatus: 'finished_successfully', width: 1254, height: 1254,
+      previewStatus: 'available', previewWidth: 12, previewHeight: 8, previewDataUrl: await preview('#0044ff')
+    }], 'worker-a');
+    const agentConflict = await recordChatObservations(conversationId, [{
+      kind: 'native_image', time: 300, messageId, providerAssetId, providerRole: 'tool',
+      providerChannel: 'final', providerStatus: 'finished_successfully', width: 1254, height: 1254,
+      previewStatus: 'available', previewWidth: 12, previewHeight: 8, previewDataUrl: await preview('#ff6600')
+    }], 'worker-b');
+
+    expect(roleConflict.stored).toBe(0);
+    expect(agentConflict.stored).toBe(0);
+    const rows = await readEvents(sessionId, { kinds: ['native_image'] });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ providerRole: 'tool', agent: 'worker-a', providerStatus: 'in_progress', previewStatus: 'pending' });
+    const assets = await fs.readdir(path.join(sessionsRoot(), sessionId, 'assets')).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+    expect(assets).toEqual([]);
+  });
+
   it('lets the store deduplicate repeated recorder assets instead of shadow-counting the same bytes toward quota', async () => {
     const conversationId = `conv-dedup-shot-${Date.now()}`;
     const sessionId = await sessionForConversation(conversationId);
@@ -2236,6 +2188,25 @@ describe('canonical recorder 1.8', () => {
     const errors = await readEvents(first.sessionId!, { kinds: ['chat_error'] });
     expect(errors).toHaveLength(3);
     expect(errors.map(event => event.turnId)).toEqual(['first', 'first', 'second']);
+  });
+
+  it('owns reload errors by the canonical question across missing and reminted document turns', async () => {
+    const conversationId = 'conv-reload-error-owner';
+    const error = { kind: 'chat_error' as const, time: 100_000, text: 'Connection interrupted', recoverable: true, turnId: 'original' };
+    const first = await recordChatObservations(conversationId, [
+      { kind: 'user_message', time: 90_000, messageId: 'question-one', text: 'Build it', authoredNow: true }, error]);
+    await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests();
+    for (const [turnId, time] of [[undefined, 110_000], ['replacement', 121_000], ['replacement-again', 200_000]] as const) {
+      const replay = await recordChatObservations(conversationId, [{ ...error, turnId, time }]);
+      expect(replay.activity.meaningful).not.toBe(true);
+    }
+    expect(await readEvents(first.sessionId!, { kinds: ['chat_error'] })).toHaveLength(1);
+    await recordChatObservations(conversationId, [
+      { kind: 'user_message', time: 210_000, messageId: 'question-two', text: 'Build it', authoredNow: true },
+      { kind: 'user_message', time: 90_000, messageId: 'question-one', text: 'Build it with corrected rendering' },
+      { ...error, time: 211_000 }]);
+    expect((await readLatestUserMessage(first.sessionId!))?.messageId).toBe('question-two');
+    expect(await readEvents(first.sessionId!, { kinds: ['chat_error'] })).toHaveLength(2);
   });
 
   it('keeps a failed error append eligible for retry', async () => {

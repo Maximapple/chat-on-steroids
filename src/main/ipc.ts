@@ -1,5 +1,6 @@
 import { applyLoginStartup, supportsLoginStartup } from './window-lifecycle.js';
-import { prepareSessionPrompt } from './session/prompt.js';
+import { prepareSessionPrompt, prepareSkillFollowup } from './session/prompt.js';
+import { importSkillFile, listSkills } from './skills.js';
 import { noteChatOrigin } from './session/recorder.js';
 import { REASONING_EFFORTS } from '../shared/session.js';
 import { safeExternalLink } from '../shared/external-link.js';
@@ -35,6 +36,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } fr
 import { z } from 'zod';
 import {
   CAPABILITIES,
+  browserExtensionRequired,
   CHAT_BROWSERS,
   GOAL_MODES,
   GOAL_PROVIDERS,
@@ -73,7 +75,9 @@ import { extensionDir } from './extension-path.js';
 import { extensionDownloadUrl } from './version.js';
 import {
   deleteSession,
+  clearImageStorage,
   getSession,
+  getImageStorage,
   listSessionPage,
   findSessionByConversation,
   readEvents,
@@ -460,7 +464,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       before.goal.objectivePrompt !== next.goal.objectivePrompt ||
       before.goal.loopPrompt !== next.goal.loopPrompt
     ) {
-      retireGoalDrafts();
+      retireGoalDrafts(before.goal.enabled && !next.goal.enabled);
     }
     // The app-wide switch going off is the master stop, and has to actually stop things. Chats
     // carry their own Goal/Loop answer now, so without this the one control that looks like it
@@ -491,12 +495,11 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
         authorityPersistError = error instanceof Error ? error : new Error(String(error));
       }
     }
-    // The extension bridge serves both features: recording needs it to observe the
-    // chat, and multi-agent mode needs it to open worker tabs. Either one being on is
-    // enough, and this must match the startup rule in index.ts exactly — a bridge that
-    // runs at startup but not after a settings save is the worst of both.
-    if (next.sessions.record || next.multiAgent.enabled) await startBridge();
+    // Recording, workers and direct browser tools share the same extension transport.
+    // Startup and settings saves use one eligibility rule.
+    if (browserExtensionRequired(next)) await startBridge();
     else await stopBridge();
+    if (before.capabilities.screen !== next.capabilities.screen || before.capabilities.control !== next.capabilities.control || before.readOnly !== next.readOnly) wakeBrowserWork('browser-control');
     // Permissions and the second tunnel id both decide whether the optional Desktop
     // connector should be published. Without this, enabling desktop access or pasting its
     // tunnel id left the connector unpublished until the user happened to reconnect, with
@@ -545,6 +548,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   });
 
   handle('projects:list', () => listProjects());
+  handle('skills:list', () => listSkills());
+  handle('skills:import', async () => {
+    const window = getWindow();
+    if (!window) throw new Error('No window');
+    const result = await dialog.showOpenDialog(window, { title: 'Import skill', properties: ['openFile'],
+      filters: [{ name: 'Skill instructions', extensions: ['md', 'txt'] }] });
+    return result.canceled || !result.filePaths[0] ? null : importSkillFile(result.filePaths[0]);
+  });
   handle('projects:remove', async (payload) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(payload);
     const project = await removeProject(id);
@@ -780,6 +791,13 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   handle('sessions:image', async (payload) => {
     const { id, assetId } = z.object({ id: z.string().min(8).max(64).regex(/^[0-9a-z-]+$/i), assetId: z.string().max(100).regex(/^[a-f0-9]{8,64}\.(?:bin|png|jpg)$/) }).parse(payload);
     return recordedInputImage(id, assetId);
+  });
+  handle('sessions:imageStorage', async () => getImageStorage());
+  handle('sessions:clearImageStorage', async (payload) => {
+    const { mode } = z.object({ mode: z.enum(['oldest-gib', 'all']) }).parse(payload);
+    const result = await clearImageStorage(mode);
+    push('session:changed');
+    return result;
   });
   handle('sessions:events', async (payload) => {
     const { id, from, before, limit } = z
@@ -1085,16 +1103,17 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       await noteChatOrigin(conversationId, { kind: 'helper', fromSessionId, agentId: null, task: '' });
     },
     changed: () => push('session:changed'),
-    recordDelivered: (entry) => getConfig().sessions.record ? recordDeliveredInput(entry) : Promise.resolve(true),
-    prepareText: async (entry, limits) => {
+    recordDelivered: (entry, anchorCommitted) => getConfig().sessions.record ? recordDeliveredInput(entry, anchorCommitted) : Promise.resolve(true),
+    prepareText: async (entry, limits, authored) => {
       const control = entry.conversationId ? goalSwitchFor(entry.conversationId) : getConfig().goal;
       const mode = entry.automation ?? (control.enabled ? control.mode : 'off');
       const text = mode === 'goal' && goalBackendFor('goal') === 'templates' && !entry.text.includes(GOAL_MARKER_INSTRUCTION)
         ? entry.text + GOAL_MARKER_INSTRUCTION : entry.text;
       // Only the opening user input owns executor setup. Existing chats, queued
       // checkpoints and automatic continuations already have their instructions.
-      return !entry.sessionId && !entry.conversationId && !entry.finishOwner && entry.mode !== 'finish'
-        ? prepareSessionPrompt(text, entry, limits) : text;
+      return (entry.opening || !entry.sessionId) && !entry.conversationId && !entry.finishOwner && entry.mode !== 'finish'
+        ? prepareSessionPrompt(text, entry, limits, authored)
+        : !entry.finishOwner && entry.purpose !== 'decision' ? prepareSkillFollowup(text, authored, limits) : text;
     },
     applyAutomation: async (conversationId, automation, phase, objective, loopAfterTurn) => {
       // This message supersedes the old final; never pick that old final up merely
@@ -1143,7 +1162,10 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   });
   configureChatModelDiscovery({ changed: () => push('chatModels:changed', getChatModels()), wake: async (nonce, allowOpen) => {
     if (!await startBridge()) throw new Error('The browser bridge could not start');
-    if (allowOpen) await wakeBrowserUrl(`https://chatgpt.com/?cos-model-catalog=${nonce}`, true, true);
+    if (allowOpen) {
+      await wakeBrowserUrl(`https://chatgpt.com/?cos-model-catalog=${nonce}`, true, true);
+      push('setup:toolApprovalNotice');
+    }
   } });
   onUpdateChange(pushState);
   onMacOSDesktopAccessChange(pushState);

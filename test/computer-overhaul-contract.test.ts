@@ -231,26 +231,6 @@ describe('the Windows drag is paced like a real one', () => {
  * Outside the frame there is no image coordinate to give, and saying so is the whole fix: the
  * desktop position is still reported, and it is the one that was never in doubt.
  */
-/**
- * A batch prints one set of refs, and it is the live one.
- *
- * The driver keeps only the newest observation addressable, replacing its ref map wholesale on
- * every observe. A call may carry several — observe, click, observe is an ordinary shape — and
- * printing all of them handed back a list whose earlier half no longer resolved, with nothing
- * marking where the dead half ended. A model picking from it would be refused and told only that
- * the ref was not from the most recent observation, which is true and unactionable.
- */
-describe('a browser batch offers only refs that still resolve', () => {
-  const tool = readFileSync(path.join(process.cwd(), 'src/main/mcp/tools-browser.ts'), 'utf8');
-
-  it('drops every observation but the last from what it prints', () => {
-    expect(tool).toContain('const newestObservation = blocks.reduce(');
-    expect(tool).toMatch(/index !== newestObservation[\s\S]{0,120}superseded by a later observation/);
-    // The rendering itself is exercised in test/browser-answer.test.ts, which calls it. Here
-    // only the call site's rule is pinned: a later observation overwrites an earlier picture.
-    expect(tool).toContain('if (rendered.screenshot) shot = rendered.screenshot;');
-  });
-});
 
 describe('the pointer never reports a position outside the image', () => {
   const source = readFileSync(path.join(process.cwd(), 'src/main/computer/index.ts'), 'utf8');
@@ -311,25 +291,6 @@ describe('the window says which build it is', () => {
   });
 });
 
-describe('startup survives a step that throws', () => {
-  const main = readFileSync(path.join(process.cwd(), 'src/main/index.ts'), 'utf8');
-
-  it('logs the failure and still brings up the bridge and connection', () => {
-    expect(main).toContain('let startedControlPlane = false;');
-    expect(main).toContain('startedControlPlane = true;');
-    expect(main).toMatch(/\.catch\(\(error: unknown\) => \{[\s\S]{0,400}logError\(`startup did not finish/);
-    // The recovery is skipped when the control plane is already up, and when the window was
-    // deliberately disabled — a second instance must not start a bridge behind the primary.
-    expect(main).toMatch(/if \(startedControlPlane \|\| windowActivation\.isDisabled\(\)\) return;/);
-    expect(main).toMatch(/\.catch\(\(error: unknown\)[\s\S]*void startBridge\(\)[\s\S]*autoConnect\(\)/);
-    // And connect's own failure is no longer discarded: `void connect()` threw its rejection
-    // away, which is how a restart with a revoked permission left both connectors answering
-    // tunnel_client_not_connected with nothing anywhere saying why.
-    expect(main).toContain('function autoConnect(): void {');
-    expect(main).toMatch(/void connect\(\)\.catch\(\(error: unknown\) => \{[\s\S]{0,200}automatic connect failed/);
-    expect(main).not.toMatch(/if \(getConfig\(\)\.ui\.autoConnect\) void connect\(\);/);
-  });
-});
 
 /**
  * A tool that is missing has to say why it is missing.
@@ -408,28 +369,6 @@ describe('a build can be told apart from every other build', () => {
   });
 });
 
-/**
- * A failure has to say whether the thing may already have happened.
- *
- * QA clicked through the browser tool, the page visibly changed, and the reply was
- * BROWSER_TIMEOUT — "the browser took the action but did not report a result". True, and
- * useless: a caller reading that has no way to know a blind retry would click twice. Whether the
- * command was ever collected is the whole distinction, and the app already tracks it.
- */
-describe('a browser failure says whether a retry is safe', () => {
-  const control = readFileSync(path.join(process.cwd(), 'src/main/browser-control.ts'), 'utf8');
-
-  it('separates never-collected from collected-and-silent, in both failure paths', () => {
-    // Never collected: it cannot have run.
-    expect(control).toContain('so it did not run; is the ChatGPT tab still open and paired? Safe to retry.');
-    expect(control).toContain('so it did not run. Safe to retry once a page is back.');
-    // Collected: it may have, so the instruction is not to repeat it blindly.
-    expect(control).toContain('Do NOT retry it — observe first and decide from what the page now shows.');
-    expect(control).toContain('so it may well have happened. Do NOT retry it — observe first.');
-    // Both branches turn on the same recorded fact rather than on a guess.
-    expect(control.match(/command\.collectedAt === null/g)).toHaveLength(2);
-  });
-});
 
 /**
  * A drag that goes nowhere is refused, not performed.

@@ -12,7 +12,7 @@
  * extension does nothing" into a diagnosable mismatch.
  */
 
-export const APP_VERSION = '2.1.12';
+export const APP_VERSION = '2.1.13';
 
 /**
  * The commit this build came from, or 'unknown' outside a build.
@@ -96,16 +96,17 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
 // 13 — native file attachments require exact claimed-input chunk delivery and final
 //      draft ownership. A 12 companion would silently send text without these files.
 //
-// 14 — every destination checkpoint on /compact must carry the `commandId` and `client` it
-//      belongs to; without them the app cannot tell which attempt is speaking and refuses the
-//      permit (see 'refuses a destination checkpoint that names no command' in
-//      test/bridge.test.ts). A 13 worker's page sends both fields but its worker drops them on
-//      the way through, so every replacement chat it opens is refused in silence: measured on
-//      2026-09-14, a 467k-token chat filed its ticket at 03:31, wrote a 58k-character brief,
-//      opened its successor — and the app then waited out the whole fifteen-minute lease with
-//      nothing in the log but `did not report back in time`, three times over. That is the
-//      failure this fence exists to turn into a 426 that names the remedy.
+// 14 — two contracts landed on this number independently, which is why 15 exists below.
+//      Upstream's: exact native generated-image metadata and bounded preview observations; a 13
+//      app would ACK the journal while silently discarding that new event kind.
+//      This fork's: every destination checkpoint on /compact must carry the `commandId` and
+//      `client` it belongs to; without them the app cannot tell which attempt is speaking and
+//      refuses the permit. A worker without it sends both fields from its page and drops them
+//      on the way through, so every replacement chat it opens is refused in silence — measured
+//      on 2026-09-14, three fifteen-minute leases in a row with nothing in the log but
+//      `did not report back in time`.
 //
-//      Upstream 2.1.0 shipped this contract change at 13. The rule above is the repo's own, and
-//      it is what the entry for 12 already describes happening to an 11 peer.
-export const BRIDGE_PROTOCOL = 14;
+// 15 — both of the above at once, and the reason the number had to move again. A peer reporting
+//      14 satisfies one of those two contracts with no way to tell which, and accepting it is
+//      exactly the silent half-compatibility this fence exists to prevent.
+export const BRIDGE_PROTOCOL = 15;

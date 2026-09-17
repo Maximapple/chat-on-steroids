@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { capabilityTools, DESKTOP_CAPABILITIES, type Capabilities } from '../src/shared/types.js';
+import { BROWSER_READ_TOOLS, BROWSER_WRITE_TOOLS } from '../src/shared/browser-control.js';
 
 const native = vi.hoisted(() => ({ act: vi.fn(), getWindowState: vi.fn(), call: null as any, apis: [] as any[], allowUnattributed: false }));
 vi.mock('../src/main/config.js', () => ({ getConfig: () => ({ multiAgent: { allowUnattributedCalls: native.allowUnattributed } }) }));
@@ -34,9 +35,10 @@ describe('Windows Desktop public registrar', () => {
   it('matches the settings tool names to registration for each Desktop permission', () => {
     for (const capability of DESKTOP_CAPABILITIES) {
       const caps = { screen: false, control: false, clipboardRead: false, clipboardWrite: false, [capability]: true };
-      expect(capabilityTools(capability, 'windows')).toEqual([...surface(caps).tools.keys()]);
-      expect(capabilityTools(capability, 'linux')).toEqual([]);
-      expect(capabilityTools(capability)).toEqual([]);
+      const browser = capability === 'screen' ? BROWSER_READ_TOOLS : capability === 'control' ? BROWSER_WRITE_TOOLS : [];
+      expect(capabilityTools(capability, 'windows')).toEqual([...browser, ...surface(caps).tools.keys()]);
+      expect(capabilityTools(capability, 'linux')).toEqual(browser);
+      expect(capabilityTools(capability)).toEqual(browser);
     }
   });
 
@@ -123,15 +125,18 @@ describe('Windows Desktop public registrar', () => {
     await expect(api.call('get_window_state', { window })).rejects.toThrow(/DESKTOP_RESULT_TOO_LARGE/);
   });
 
-  it('checks browser chords against the exact target including popup handles', async () => {
+  it.each(['Control_L+w', 'Control_L+t'])('checks %s against the exact browser target and directs testing into a separate window', async key => {
     const api = surface();
     native.getWindowState.mockResolvedValue({ window: { id: 71, title: 'Owned browser popup', process: 'chrome' } });
-    const result = await api.call('press_key', { window, key: 'Control_L+w' });
+    const result = await api.call('press_key', { window, key });
     expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('New window control');
+    expect(result.content[0].text).toContain('verify a separate window id');
+    expect(result.content[0].text).toContain('Never fall back to replacing a ChatGPT page through its address bar');
     expect(native.getWindowState).toHaveBeenCalledExactlyOnceWith({ window: 71, includeScreenshot: false, includeUi: false });
     expect(native.apis).toHaveLength(0);
     native.getWindowState.mockResolvedValue({ window: { id: 71, title: 'Editor', process: 'notepad' } });
-    await api.call('press_key', { window, key: 'Control_L+w' });
-    expect(native.apis[0].press_key).toHaveBeenCalledExactlyOnceWith({ window, key: 'Control_L+w' });
+    await api.call('press_key', { window, key });
+    expect(native.apis[0].press_key).toHaveBeenCalledExactlyOnceWith({ window, key });
   });
 });

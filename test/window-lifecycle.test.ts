@@ -13,6 +13,30 @@ import {
 } from '../src/main/window-lifecycle.js';
 
 describe('native window activation', () => {
+  it.each(['darwin', 'win32', 'linux'])('keeps native fullscreen available on macOS (%s)', (platform) => {
+    const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
+    const constructor = source.slice(source.indexOf('  window = new BrowserWindow({'), source.indexOf("  if (process.platform === 'win32') window.removeMenu();"))
+      .replace(' as const', '');
+    let options: Record<string, unknown> | undefined;
+    vm.runInNewContext(constructor, {
+      // This fork attaches listeners inside the extracted range; the options under test are
+      // still the constructor's, so the instance only has to tolerate them.
+      BrowserWindow: function (this: Record<string, unknown>, value: Record<string, unknown>) {
+        options = value;
+        this.on = () => this;
+        this.once = () => this;
+        this.webContents = { on: () => undefined, once: () => undefined, setWindowOpenHandler: () => undefined };
+      },
+      layout: {}, icon: null, process: { platform },
+      // This fork puts the build version in the window title; the options under test are unaffected.
+      BUILD_VERSION: 'test',
+      titleBarOverlayForTheme: () => ({}), getConfig: () => ({ ui: { theme: 'dark' } }),
+      UI_BASE_ZOOM: 1, path: { join: () => 'preload.js' }, __dirname: '/app'
+    });
+    expect(options?.fullscreenable).toBe(platform === 'darwin');
+    expect(options?.webPreferences).toMatchObject({ sandbox: true, contextIsolation: true, nodeIntegration: false });
+  });
+
   it('maximizes only on initial presentation and preserves user-sized geometry on reopen', () => {
     const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
     const present = source.slice(source.indexOf('function showWindow()'), source.indexOf('\nsetFinishNotifier(', source.indexOf('function showWindow()'))).replace('function showWindow(): void', 'function showWindow()');

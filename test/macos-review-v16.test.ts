@@ -20,7 +20,7 @@ describe('macOS review v16 and bootstrap send safety', () => {
   });
 
   it('replaces a stale bootstrap draft and verifies the exact text before Send', () => {
-    expect(content).toContain('const RECORDER_VERSION = 11');
+    expect(content).toContain('const RECORDER_VERSION = 13');
     // Unattended startup owns the composer on a redeemed command page: 2.0.6 settled this as
     // an unconditional replace, so what protects the user is the send-time check below, not a
     // refusal to write. See issue #30 for the setting that was proposed and not taken.
