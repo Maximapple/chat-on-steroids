@@ -6860,6 +6860,51 @@ function nonDiscardableAgentConversations(): string[] {
 }
 
 /**
+ * Chats whose handoff landed, remembered for as long as their tab is still open.
+ *
+ * A finished source is what makes its tab closable, and the continuation layer is the only
+ * thing that knows one when it sees it — but it is a transaction log, not a registry: a
+ * committed ticket is kept just long enough to answer a repeated ack and is then forgotten,
+ * twenty minutes after the commit. Every safety check the close has to pass first — the page
+ * proving it has no draft, no generation, no queued observation, nothing unflushed — is allowed
+ * to fail on any one pass, and several of them are true for the first seconds after a handoff.
+ * So the twenty minutes were not a grace period but a deadline, and a tab that was merely busy
+ * at the wrong moment was never offered again: the chat had stopped being superseded as far as
+ * this policy could tell, and its tab stayed open for good.
+ *
+ * Remembering it here has an end that means the right thing: the tab being gone. A conversation
+ * this app can no longer see is dropped on the next pass, so the set holds open tabs only.
+ */
+const supersededSourcesSeen = new Set<string>();
+/** First time each one was offered for closing, so a tab that never goes says so once. */
+const supersededSinceAt = new Map<string, number>();
+const SUPERSEDED_TAB_LINGER_MS = 5 * 60_000;
+const supersededLingerTold = new Set<string>();
+
+function rememberSupersededSources(openConversations: Set<string>): Set<string> {
+  const now = Date.now();
+  for (const id of supersededSourceConversations()) {
+    supersededSourcesSeen.add(id);
+    if (!supersededSinceAt.has(id)) supersededSinceAt.set(id, now);
+  }
+  for (const id of supersededSourcesSeen) {
+    if (openConversations.has(id)) continue;
+    supersededSourcesSeen.delete(id);
+    supersededSinceAt.delete(id);
+    supersededLingerTold.delete(id);
+  }
+  // Closing is the extension's call and it has no way to report a refusal back here, so this
+  // is the only place a tab that outlives its handoff becomes visible at all. Once each.
+  for (const id of supersededSourcesSeen) {
+    const since = supersededSinceAt.get(id) ?? now;
+    if (now - since < SUPERSEDED_TAB_LINGER_MS || supersededLingerTold.has(id)) continue;
+    supersededLingerTold.add(id);
+    logInfo(`bridge: ${id} handed its work over five minutes ago and its tab is still open — the page is refusing to be closed`);
+  }
+  return supersededSourcesSeen;
+}
+
+/**
  * Idle app-owned pages are a reusable resource, independent of durable chat/worker life.
  * Two minutes gives follow-ups a warm page; five minutes releases an unused renderer.
  * The extension still proves the exact document has no draft or generation before closing.
@@ -6868,7 +6913,8 @@ async function browserTabPolicy(openConversations: Set<string>) {
   // Existing cached metadata is the ownership index; never scan transcripts per browser poll.
   const summaries = await listUsageSessions();
   const managed = new Set(summaries.filter(row => row.origin && row.conversationId && openConversations.has(row.conversationId)).map(row => row.conversationId!));
-  for (const id of [...supersededSourceConversations(), ...closableWorkerConversations(0)]) if (openConversations.has(id)) managed.add(id);
+  const superseded = rememberSupersededSources(openConversations);
+  for (const id of [...superseded, ...closableWorkerConversations(0)]) if (openConversations.has(id)) managed.add(id);
   for (const agent of swarmState().agents) if (agent.conversationId && openConversations.has(agent.conversationId)) managed.add(agent.conversationId);
   const protectedChats = new Set(nonDiscardableAgentConversations());
   for (const entry of pendingContinuations()) protectedChats.add(entry.from);
@@ -6961,15 +7007,15 @@ async function browserTabPolicy(openConversations: Set<string>) {
     // Names a page, not a chat: the tab a retired handoff command opened never became one.
     retiredCommands: retiredResumeCommandIds(),
     // Only terminal/blocked helpers and superseded sources grant close authority.
-    retiredConversations: [...new Set([...idle, ...supersededSourceConversations()])]
+    retiredConversations: [...new Set([...idle, ...superseded])]
       .filter(id => openConversations.has(id) && !protectedChats.has(id)).sort(),
     conversationActivityAt: Object.fromEntries(lastActivity),
     managedConversations: [...managed].sort(),
     reusableConversations: available.filter(id => quietFor(id, 120_000) && !isGoalDecisionChat(id) &&
-      !supersededSourceConversations().includes(id)).sort(),
+      !superseded.has(id)).sort(),
     nonDiscardableConversations: [...protectedChats].sort(),
     blockedConversations: blocked.sort(),
-    closableConversations: [...new Set([...idlePages, ...idle, ...supersededSourceConversations().filter(id => openConversations.has(id) && !protectedChats.has(id))])].sort()
+    closableConversations: [...new Set([...idlePages, ...idle, ...[...superseded].filter(id => openConversations.has(id) && !protectedChats.has(id))])].sort()
   };
 }
 
