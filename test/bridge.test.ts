@@ -2580,6 +2580,47 @@ describe('delivering a bootstrap', () => {
     expect((await request('POST', '/compact', { body: { token: 'ffffffffffffffffffffffffffffffff', destinationLost: true } })).status).toBe(409);
   });
 
+  it('stops opening fresh chats for a brief ChatGPT keeps refusing, and says so', async () => {
+    // Since 2026-09-17 a destination also reports loss when ChatGPT answers the send with its own
+    // "Message delivery timed out", and that is usually a statement about ChatGPT rather than
+    // about this brief. Unbounded, the answer to a bad afternoon would be a new chat every couple
+    // of minutes for the six hours of the handover TTL.
+    try {
+      await pair();
+      const { sessionId, token } = await compactedSession('99999999-8888-7777-6666-555555555557', 'the refused brief');
+      const clf = (url: string): string => new URL(url).searchParams.get('clf')!;
+      let commandId = queueResume(sessionId, token)!.id;
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        expect((await redeem(commandId, `tab-${attempt}`)).text).toContain('the refused brief');
+        expect((await request('POST', '/compact',
+          { body: { token, commandId, client: `tab-${attempt}`, destinationAttempt: true } })).body.allowed).toBe(true);
+        expect((await request('POST', '/compact',
+          { body: { token, commandId, client: `tab-${attempt}`, destinationDispatch: true } })).body.armed).toBe(true);
+        const lost = await request('POST', '/compact',
+          { body: { token, commandId, client: `tab-${attempt}`, destinationLost: true } });
+        expect(lost.status).toBe(200);
+        const spent = commandId;
+        if (attempt > 3) {
+          // Nothing further is opened; the refusal is recorded instead of answered with a tab.
+          await vi.waitFor(() => expect(getLog().some((entry) =>
+            entry.message.includes('was lost before Send 4 times'))).toBe(true));
+          expect(opened.filter((url) => clf(url) !== spent)).toEqual([]);
+          break;
+        }
+        // The brief's own tab may still be arriving; wait for one carrying a different command.
+        await vi.waitFor(() => expect(opened.some((url) => clf(url) !== spent)).toBe(true));
+        commandId = clf(opened[opened.length - 1]!);
+        expect(commandId).not.toBe(spent);
+        opened.length = 0;
+      }
+      // Newest first: the log is a bounded ring, so never index it by an earlier length.
+      expect([...getLog()].reverse().find((entry) =>
+        entry.message.includes('was lost before Send 4 times'))?.message).toMatch(/nothing was sent twice/i);
+    } finally {
+      /* no global state to restore */
+    }
+  });
+
   it('aborts a resume whose commit the session layer refused, so chat A is not left waiting on it', async () => {
     // 2026-09-01: the marked replacement message committed, the session layer refused the
     // commit, and the 409 went back with the continuation still `claimed`. Nothing retries a
