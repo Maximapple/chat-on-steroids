@@ -7284,6 +7284,18 @@ const BLIND_WORK_NOTICE_EVERY_MS = 15 * 60_000;
 const blindWorkSince = new Map<string, number>();
 /** Last reload asked for per chat. `queueStalledTabRecovery` does not bound this by itself. */
 const blindWorkRepairAt = new Map<string, number>();
+/**
+ * Reloads one blind page may be asked for before this app stops asking.
+ *
+ * The first version had a cadence and no ceiling, and its own comment claimed one attempt per
+ * stretch — which the code did not do. Watching it run on 2026-09-17 showed the difference: a
+ * page that a reload cannot repair was reloaded every three minutes for as long as it kept
+ * calling tools, and each of those interrupts a live page. Three is what the silence watch
+ * already spends before it declares reloading useless, and the same reasoning applies here: if
+ * three fresh documents in a row do not report a turn, the fault is not one a fourth fixes.
+ */
+const BLIND_WORK_RELOAD_ATTEMPTS = 3;
+const blindWorkRepairsSpent = new Map<string, number>();
 let lastBlindWorkNoticeAt = 0;
 
 function noticeBlindWork(conversationId: string, sessionId: string, filed: SessionSummary | null): void {
@@ -7294,6 +7306,7 @@ function noticeBlindWork(conversationId: string, sessionId: string, filed: Sessi
   if (filed.activeTurnId) {
     blindWorkSince.delete(conversationId);
     blindWorkRepairAt.delete(conversationId);
+    blindWorkRepairsSpent.delete(conversationId);
     return;
   }
   const since = blindWorkSince.get(conversationId);
@@ -7314,8 +7327,16 @@ function noticeBlindWork(conversationId: string, sessionId: string, filed: Sessi
   // request survived to the next. One attempt per chat per stretch is the honest cadence: a
   // reload either restores reporting, which ends the stretch, or it does not, and repeating it
   // four times a minute makes that no more true.
-  if (now - (blindWorkRepairAt.get(conversationId) ?? 0) >= BLIND_WORK_MS) {
+  const spent = blindWorkRepairsSpent.get(conversationId) ?? 0;
+  if (spent < BLIND_WORK_RELOAD_ATTEMPTS && now - (blindWorkRepairAt.get(conversationId) ?? 0) >= BLIND_WORK_MS) {
     blindWorkRepairAt.set(conversationId, now);
+    blindWorkRepairsSpent.set(conversationId, spent + 1);
+    if (spent + 1 === BLIND_WORK_RELOAD_ATTEMPTS) {
+      logWarn(
+        `bridge: ${conversationId} did not report a turn after ${BLIND_WORK_RELOAD_ATTEMPTS} reloads — ` +
+          'not reloading it again; its page needs the extension reloaded'
+      );
+    }
     void queueStalledTabRecovery(conversationId, now, 'blind');
   }
   if (now - lastBlindWorkNoticeAt < BLIND_WORK_NOTICE_EVERY_MS) return;
