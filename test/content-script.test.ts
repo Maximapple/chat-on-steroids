@@ -15161,6 +15161,26 @@ describe('the goal loop', () => {
     expect(live.sent.filter((message) => message.type === 'compact' && message.destinationLost === true)).toEqual([]);
   });
 
+  it('reports the page-model helper it is the only one who can see', async () => {
+    // Fiber-derived observations are how the app learns thought activity, the authored answer
+    // and — the one that costs a run — the `[[CLF-RESUME]]` marker a handoff commits from. With
+    // no helper the chat looks merely quiet from the app, which is exactly how five handoffs
+    // died here on 2026-09-17 with their brief sitting in a chat that was working normally.
+    const commandId = 'cmd-fiber-health';
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, {
+      ack: () => ({ ok: true }),
+      activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null } })
+    });
+    await live.hook.pullActivity();
+    await settle(200);
+
+    const pulls = live.sent.filter((message) => message.type === 'activity');
+    expect(pulls.length).toBeGreaterThan(0);
+    // With no helper answering in the harness, the page says so rather than staying silent.
+    expect(pulls.at(-1)!.fiber).toBe('absent');
+    expect(String(commandId)).toBe('cmd-fiber-health');
+  });
+
   it('recovers the exact observed resumed generation when it finishes before Goal config arrives', async () => {
     const commandId = 'cmd-resume-goal-config-race';
     const objective = 'finish the overnight release';
