@@ -751,6 +751,44 @@ describe('active agent tab discard projection', () => {
     } finally { await writeDurableNow('session-input', []); resetInputForTests(); }
   });
 
+  it('keeps offering a handed-over chat for closing after its ticket is forgotten', async () => {
+    // The continuation layer keeps a committed ticket for twice the ten-minute TTL and then
+    // drops it, which used to end the source's closability with it. Every guard the close has
+    // to pass first — an empty composer, no generation, nothing queued or unflushed — may fail
+    // on any single pass, and several are true for the first seconds after a handoff. So the
+    // twenty minutes were a deadline, not a grace period, and a tab busy at the wrong moment
+    // stayed open for good. The tab going away is the only end that means anything here.
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const from = 'cafe0293-0000-4000-8000-000000000295';
+      const to = 'cafe0294-0000-4000-8000-000000000296';
+      const source = await createSession({ conversationId: from, title: 'Plan source' });
+      const continuation = await openContinuationNow(source.id, from);
+      await attachSummary(continuation.token, SAMPLE_BRIEF);
+      await claimContinuationNow(continuation.token, 'plan-resume');
+      expect(await commitContinuation(continuation.token, to)).toBe(true);
+
+      const ask = async (open: string[]) =>
+        (await request('POST', '/status', { body: { openConversations: open } })).body;
+      expect((await ask([from, to])).retiredConversations).toContain(from);
+
+      // Long past the ticket's own memory.
+      await vi.advanceTimersByTimeAsync(25 * 60_000);
+      const late = await ask([from, to]);
+      expect(late.retiredConversations).toContain(from);
+      expect(late.retiredConversations).not.toContain(to);
+      // A finished source is never handed back out as a warm page to reuse.
+      expect(late.reusableConversations).not.toContain(from);
+
+      // The tab is gone: so is the memory, and it does not come back on the next pass.
+      expect((await ask([to])).retiredConversations).not.toContain(from);
+      expect((await ask([from, to])).retiredConversations).not.toContain(from);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('projects only the owning prime worker status without task or conversation details', async () => {
     await pair();
     const primeConversation = '11223344-1111-4222-8333-444444444444';
