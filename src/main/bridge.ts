@@ -5594,16 +5594,26 @@ async function chatStillWorking(conversationId: string, turnId: string, sessionI
  * (`chatIsWorking`), a worker or blocked chat never (`goalFencedChat`), and a session already
  * carrying a continuation is not given a second.
  */
-async function considerAutomaticCompaction(conversationId: string, sessionId: string): Promise<void> {
+async function considerAutomaticCompaction(conversationId: string, sessionId: string, lostItsTurn = false): Promise<void> {
   if (!getConfig().compaction.auto || compactionFilings.has(conversationId)) return;
-  if (goalFencedChat(conversationId) || continuationForSession(sessionId) || !chatIsWorking(conversationId)) return;
+  // `chatIsWorking` keeps an old chat that merely opens above the line from compacting on
+  // sight — the edge-trigger that makes the advisory line usable. A chat whose turn ChatGPT
+  // just killed is the opposite case: it was working a second ago, it is over the line, and
+  // the reason its turn died is that it is too big to recover. Requiring a running turn there
+  // is what closes the loop instead of breaking it — measured on one session on 2026-09-15,
+  // three times in a row: a 45-to-56-minute turn died, the app compacted, the handoff did not
+  // land, the session stayed in the same oversized chat, and the next turn died the same way.
+  if (goalFencedChat(conversationId) || continuationForSession(sessionId)) return;
+  if (!lostItsTurn && !chatIsWorking(conversationId)) return;
   compactionFilings.add(conversationId);
   try {
     const summary = await getSession(sessionId).catch(() => null);
     if (!summary || summary.conversationId !== conversationId || !autoCompactionReady(summary)) return;
     if (await conversationWasSuperseded(conversationId)) return;
     // Re-read after the awaits: the turn may have ended, or a page may have filed by hand.
-    if (!chatIsWorking(conversationId) || continuationForSession(sessionId) || goalFencedChat(conversationId) ||
+    // The same exception as above — a chat called here because its turn just died has no turn
+    // to re-read, and losing it is the reason it is being asked about.
+    if ((!lostItsTurn && !chatIsWorking(conversationId)) || continuationForSession(sessionId) || goalFencedChat(conversationId) ||
         !automaticCompactionAllowed(await getSession(sessionId))) return;
     const opened = await openContinuationNow(sessionId, conversationId, true);
     rememberToken(sessionId, opened.token);
@@ -6308,6 +6318,15 @@ async function noteRecoveryObservations(
     ) {
       logInfo(`bridge: assistant transport failure — asking the browser to recover ${conversationId}`);
     }
+    // The reload above is worth trying and often is not enough: ChatGPT gives the page a fixed
+    // window to produce the answer after it says `Connection interrupted` — measured here at a
+    // median of 243 seconds, with 23 of 31 pairable cases between 235 and 245 — and a turn that
+    // has been running a long time does not come back inside it. Of 44 interrupted turns, the 23
+    // that went on to time out had been running a median of 49 minutes when the interruption
+    // arrived; the 21 that did not had been running a median of 2.6. So the reload loses the race
+    // exactly where the work is most expensive, and the only remedy that changes anything is a
+    // chat small enough that the next turn is not another 49-minute one.
+    if (sessionId) void considerAutomaticCompaction(conversationId, sessionId, true);
     break;
   }
 }
