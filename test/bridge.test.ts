@@ -5983,6 +5983,47 @@ describe('unattributed activity recovery', () => {
     }
   });
 
+  /**
+   * The page that answers about request ids and nothing else.
+   *
+   * Attribution proves the join, not that the page still reports. On 2026-09-17 a chat worked
+   * from 06:45 to 08:51 with 195 attributed calls and no `turn_start` at all, so every
+   * turn-keyed guard was off: no silence timing, no automatic compaction, and no notice when
+   * the turn finally died. A tool call only happens inside a turn, so a call arriving while the
+   * app holds no turn for that chat is a contradiction, not a quiet page.
+   */
+  it('says which chat is calling tools with no turn its page ever reported', async () => {
+    // Attribution proves the request-id join, not that the page still reports; both halves fail
+    // apart. A tool call happens only inside a turn, so a call arriving while the app holds no
+    // turn for that chat is a contradiction, not a quiet page — and every turn-keyed guard is
+    // off while it lasts. Said once a quarter hour, because such a page calls every few seconds.
+    vi.useFakeTimers();
+    try {
+      await pair();
+      await attributed(PRIME);
+      expect(getLog().some((entry) => entry.message.includes('with no turn reported by its page'))).toBe(false);
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      await attributed(PRIME);
+      const line = [...getLog()].reverse().find((entry) =>
+        entry.message.includes('with no turn reported by its page'))?.message;
+      expect(line).toContain('has been calling tools for');
+      expect(line).toContain('asking the browser to reload it');
+
+      // And it asks for the repair, which is the half that was missing: `queueStalledTabRecovery`
+      // can reload exactly this page and used to decline it, because its `working` gate reads the
+      // page's account of the turn — the half that is broken.
+      await vi.waitFor(() => expect(getLog().some((entry) =>
+        entry.message.includes('is a stalled browser tab — asking the browser to reload'))).toBe(true));
+
+      // The report is once a quarter hour, however many calls that page makes.
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      await attributed(PRIME);
+      expect(getLog().filter((entry) =>
+        entry.message.includes('with no turn reported by its page'))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it('waits 15 seconds before handing a lone suspect to the browser once attribution has failed', async () => {
     vi.useFakeTimers();
     try {
