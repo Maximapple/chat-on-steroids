@@ -2315,6 +2315,9 @@ async function maintainOnce() {
   // The app decides whether there is recovery work; a worker holding no tabs is not a worker
   // with nothing to do, it is the one that has to open the chat the app is owed.
   if (token === null) return;
+  // Before anything reads tab state: a page whose recorder died reports nothing, so every
+  // question asked below about "what is this chat doing" would be answered from silence.
+  await restoreSilentRecorders();
   let observedTabs = [];
   try { observedTabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS }); } catch { /* Status/recovery still runs; no unobserved tab is pruned. */ }
   const openConversations = [...new Set(observedTabs.map(conversationForTab).filter(Boolean))];
@@ -3889,6 +3892,64 @@ async function restoreChatgptTab(id) {
   } catch {
     // Injection failure does not transfer ownership to a replacement tab.
     return false;
+  }
+}
+
+/**
+ * A tab whose recorder stopped answering, found before anyone notices the chat went quiet.
+ *
+ * `restoreChatgptTab` has always been able to repair this — it pings `clf-recorder-ping` and
+ * re-injects the isolated world when nothing answers — and it already runs for every tab when
+ * this service worker starts. What that misses is the worker that does not restart: the wake
+ * channel below is a WebSocket, and an MV3 worker holding one is not evicted, so a single
+ * worker lifetime routinely spans hours. Measured here: zero worker starts across 79 minutes of
+ * continuous work. An isolated world that dies inside such a window is never asked again.
+ *
+ * When it dies the page keeps rendering while the app goes blind: its MCP tunnel still carries
+ * the model's tool calls, so the work looks alive, but no observation, no request-id evidence
+ * and no turn ever reaches the app.
+ *
+ * That state is the one this app cannot reason its way out of. With no page evidence there is
+ * no conversation to name, so the unattributed incident opens with nothing to reload and the
+ * silence watch never sees a chat at all. Measured on 2026-09-14: the recorder went quiet at
+ * 14:30, the model went on calling tools until 14:49, and then everything stood still for 76
+ * minutes with not one line in the log — until the user reloaded the tab by hand, which is
+ * exactly what this does.
+ *
+ * Cheap on the healthy path: one message per tab per minute, and the re-injection only happens
+ * for a tab that did not answer. A tab that is loading or discarded is skipped rather than
+ * woken — Chrome will run the manifest injection itself when it comes back.
+ */
+const RECORDER_CHECK_EVERY_MS = 60_000;
+let lastRecorderCheckAt = 0;
+
+async function restoreSilentRecorders() {
+  if (Date.now() - lastRecorderCheckAt < RECORDER_CHECK_EVERY_MS) return;
+  lastRecorderCheckAt = Date.now();
+  let tabs = [];
+  try {
+    tabs = await webext.tabs.query({ url: CHATGPT_TAB_URLS });
+  } catch {
+    return;
+  }
+  for (const tab of tabs) {
+    const id = tab && typeof tab.id === 'number' ? tab.id : null;
+    if (id === null || tab.pendingUrl || tab.discarded === true) continue;
+    // Deliberately unconditional, and this corrects a mistake in the first version: it pinged
+    // first and skipped every tab whose content.js answered. `restoreChatgptTab` says in its own
+    // words why that is wrong — "healthy content.js does not prove the independently running
+    // MAIN-world helper is still present" — and it re-executes fiber.js for exactly that case,
+    // idempotently, because the helper keeps one listener per protocol version. It pings first
+    // itself, so this loop only has to name the tabs.
+    //
+    // A page without fiber.js is not a quiet page, it is a blind one, and it fails where nothing
+    // else is watching. `markedContinuationTurns()` reads the [[CLF-RESUME]] marker out of the
+    // Fiber turns and needs each message's id from there; with no fiber it finds nothing, so a
+    // replacement chat never reconciles the marker that commits its own handoff, and the journal
+    // gate it raised on seeing that marker in the DOM never opens again. Measured on 2026-09-16:
+    // such a chat recorded 1 event from the browser against 475 MCP calls, while a healthy chat
+    // of the same age recorded 61, including 47 page tools.
+    await restoreChatgptTab(id);
   }
 }
 

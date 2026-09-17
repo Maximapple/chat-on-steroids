@@ -3872,6 +3872,62 @@ it.each(['matching', 'wrong-document', 'unsafe-draft', 'newer-navigation', 'pinn
   if (scenario === 'matching') expect(sendMessage.mock.calls[0]?.[1]).toMatchObject({ cancelledDecisions: claims });
 });
 
+/**
+ * The recorder that stopped answering, and the chat that goes blind with it.
+ *
+ * `restoreChatgptTab` could always repair this, but only ever ran on extension install. An
+ * isolated world that dies at any other time leaves a page that still renders and a model that
+ * still calls tools through the MCP tunnel, while no observation reaches the app at all — and
+ * that is the one state the app cannot reason its way out of, because with no page evidence
+ * there is no conversation it could name and nothing it could ask to be reloaded.
+ *
+ * Measured on 2026-09-14: the recorder went quiet at 14:30, tool calls continued until 14:49,
+ * then 76 minutes of standstill with not one line in the log, ended by the user reloading the
+ * tab by hand. This is that reload, found a minute after it is needed instead of an hour.
+ */
+it.each(['healthy', 'dead', 'stale-version', 'loading', 'discarded'])(
+  're-injects a recorder that stopped answering: %s',
+  async scenario => {
+    const tab = {
+      id: 91,
+      url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      ...(scenario === 'loading' ? { pendingUrl: 'https://chatgpt.com/' } : {}),
+      ...(scenario === 'discarded' ? { discarded: true } : {})
+    };
+    const restore = vi.fn(async () => true);
+    const sendMessage = vi.fn(async (..._args: unknown[]) => {
+      if (scenario === 'dead') throw new Error('Could not establish connection. Receiving end does not exist.');
+      return { ok: true, recorderVersion: scenario === 'stale-version' ? 1 : 11 };
+    });
+    const start = backgroundSource.indexOf('const RECORDER_CHECK_EVERY_MS');
+    const code = backgroundSource.slice(start, backgroundSource.indexOf('async function restoreOpenChatgptTabs(', start));
+    const run = vm.runInNewContext(`${code}\nrestoreSilentRecorders`, {
+      CHATGPT_TAB_URLS: ['https://chatgpt.com/*'],
+      PAGE_RECORDER_VERSION: 11,
+      restoreChatgptTab: restore,
+      webext: { tabs: { query: async () => [tab] } },
+      chrome: { tabs: { sendMessage } },
+      console: { info: () => undefined }
+    });
+
+    await run();
+
+    // Every live tab is handed to restoreChatgptTab, healthy ones included: it pings first and
+    // decides what to repair, and a content.js that answers still proves nothing about the
+    // MAIN-world fiber.js that request-id ownership and marker reconciliation depend on.
+    const live = scenario !== 'loading' && scenario !== 'discarded';
+    expect(restore).toHaveBeenCalledTimes(live ? 1 : 0);
+    // A tab mid-navigation or unloaded by Chrome is left alone: the manifest injection covers
+    // it when it comes back, and waking it here would be this app opening pages by itself.
+
+    // One check a minute, not one per maintenance pass: this runs beside every /status poll.
+    restore.mockClear();
+    await run();
+    expect(restore).not.toHaveBeenCalled();
+  }
+);
+
+
 it.each(['idle', 'selected', 'selected-before-proof', 'selected-during-proof', 'draft', 'pinned', 'navigation', 'journal'])('releases an idle page only while its document remains unused: %s', async scenario => {
   const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
   const tab = { id: 71, url: `https://chatgpt.com/c/${conversationId}`, active: scenario === 'selected', pinned: scenario === 'pinned' };
