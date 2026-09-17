@@ -898,6 +898,46 @@ function journalOf(session: FakeStorageArea): any[] {
  * for one chat, while `silence` and `compaction` repairs for that same chat landed in 34 and
  * 107 milliseconds.
  */
+/**
+ * The sentence someone is in the middle of writing.
+ *
+ * A recovery reload discards whatever is in the composer, and it targets a page that is
+ * generating — which is exactly when the next message is being typed. Every close path in this
+ * extension already proves the composer is empty before acting; this one had no such proof at
+ * all. `clf-tab-close-check` cannot serve here because it also requires `!generating`.
+ *
+ * Only an answer counts. A page whose content script is gone cannot answer and cannot be
+ * holding anything this reload could preserve, so silence still reloads — which is also the
+ * state the recovery exists for.
+ */
+it.each([
+  ['a draft the page reports', { ok: true, draft: true }, 0, 1],
+  ['an empty composer', { ok: true, draft: false }, 1, 0],
+  ['a page that cannot answer', null, 1, 0]
+])('stands down for %s', async (_name, status, reloads, failures) => {
+  const conversationId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const tab = { id: 75, url: `https://chatgpt.com/c/${conversationId}`, discarded: false, frozen: false };
+  const reload = vi.fn();
+  const call = vi.fn(async () => ({ ok: true }));
+  const source = backgroundSource.slice(backgroundSource.indexOf('async function performBrowserRepairs('),
+    backgroundSource.indexOf('\nfunction conversationStillOpen('));
+  const repair = vm.runInNewContext(`${source}\nperformBrowserRepairs`, {
+    tabConversations: { '75': conversationId }, tabDocuments: { '75': 'live-document' },
+    conversationForTab: (value: { url?: string }) => value.url?.split('/c/')[1] ?? null,
+    createChatTab: vi.fn(), call, tabReply: async () => status,
+    chrome: { tabs: { query: async () => [tab], reload, get: async () => tab, update: vi.fn() } },
+    CHATGPT_TAB_URLS: ['https://chatgpt.com/*']
+  });
+  await repair([{ conversationId, token: 'draft-guard', suspended: false }], {});
+
+  expect(reload).toHaveBeenCalledTimes(reloads);
+  // Standing down is reported as a failed handout, so the app can say so rather than believe
+  // a reload happened — and the repair stays retryable for when the draft is gone.
+  const reported = call.mock.calls.map((args: unknown[]) => String(args[0]));
+  expect(reported.filter((url) => url.includes('repairFailed='))).toHaveLength(failures);
+  expect(reported.filter((url) => url.includes('repaired='))).toHaveLength(reloads);
+});
+
 it.each([['blind', 1], ['stalled', 0]])('reloads a live page for reason %s: %i time(s)', async (reason, expected) => {
   const conversationId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
   const tab = { id: 72, url: `https://chatgpt.com/c/${conversationId}`, discarded: false, frozen: false };
@@ -908,7 +948,7 @@ it.each([['blind', 1], ['stalled', 0]])('reloads a live page for reason %s: %i t
   const repair = vm.runInNewContext(`${source}\nperformBrowserRepairs`, {
     tabConversations: { '72': conversationId }, tabDocuments: { '72': 'live-document' },
     conversationForTab: (value: { url?: string }) => value.url?.split('/c/')[1] ?? null,
-    createChatTab: create, call: vi.fn(async () => ({ ok: true })),
+    createChatTab: create, call: vi.fn(async () => ({ ok: true })), tabReply: async () => null,
     chrome: { tabs: { query: async () => [tab], reload, get: async () => tab, update: vi.fn() } },
     CHATGPT_TAB_URLS: ['https://chatgpt.com/*']
   });
@@ -930,7 +970,7 @@ it.each(['discarded', 'frozen', 'woke', 'navigated', 'loading', 'closed', 'missi
     const repair = vm.runInNewContext(`${source}\nperformBrowserRepairs`, {
       tabConversations: { '71': conversationId }, tabDocuments: { '71': 'suspended-document' },
       conversationForTab: (value: { url?: string }) => value.url?.split('/c/')[1] ?? null,
-      createChatTab: create, call,
+      createChatTab: create, call, tabReply: async () => null,
       chrome: { tabs: {
         query: async () => state === 'missing' ? [] : [tab], reload,
         get: async () => {

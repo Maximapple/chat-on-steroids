@@ -12035,6 +12035,12 @@
       if (message.type === 'clf-page-status') {
         sendResponse({
           ok: true,
+          // Whether this page is holding text the person has not sent. A recovery reload
+          // discards it, and every close path in this extension already refuses to act
+          // without proving the composer is empty — `clf-tab-close-check` cannot serve that
+          // purpose here because it also requires `!generating`, and the page a recovery
+          // reload targets is generating by definition.
+          draft: Boolean((CLF_DOM.composer()?.textContent || '').trim()) || CLF_DOM.hasComposerAttachments(),
           recorderVersion: RECORDER_VERSION,
           runId: RUN_ID,
           conversationId,
