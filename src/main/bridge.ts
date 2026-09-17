@@ -7963,9 +7963,16 @@ async function queueStalledTabRecovery(conversationId: string, now = Date.now())
   if (!agent && !compacting && !goalActiveFor(conversationId) && (session.toolCalls ?? 0) === 0) {
     return declined('it has never called a tool');
   }
+  // The page's own account of the turn, and — for the case this recovery exists for — the app's.
+  // A tool call happens only inside a turn, so an attributed call arriving moments ago proves one
+  // is running however little the page is saying. Without this the gate below declines exactly
+  // the chat that needs reloading: `no turn is running in it` is what a blind page always looks
+  // like, and asking the broken half whether it is broken is how a chat stayed dark for 33
+  // minutes on 2026-09-17 while 453 tool calls went through it.
   const working =
     liveConversations().some((entry) => entry.conversationId === conversationId && (entry.generating || Boolean(entry.activeTurnId))) ||
-    (activeUntil.get(conversationId)?.until ?? 0) > now;
+    (activeUntil.get(conversationId)?.until ?? 0) > now ||
+    now - (lastAttributedCallAt.get(conversationId) ?? 0) < BLIND_WORK_MS;
   if (!working && !compacting && agent?.role !== 'worker' && !(goalActiveFor(conversationId) && goalPendingReplyFor(conversationId))) {
     return declined('no turn is running in it');
   }
@@ -8068,16 +8075,22 @@ function noticeBlindWork(conversationId: string, sessionId: string, filed: Sessi
     blindWorkSince.set(conversationId, now);
     return;
   }
-  if (now - since < BLIND_WORK_MS || now - lastBlindWorkNoticeAt < BLIND_WORK_NOTICE_EVERY_MS) return;
+  if (now - since < BLIND_WORK_MS) return;
+  // Repair first, and on the condition rather than on the notice: the notice is throttled to one
+  // a quarter hour across every chat, and a reload that waits for a free notice slot is a reload
+  // that does not happen. `queueStalledTabRecovery` declines by itself when a browser action for
+  // this chat is already pending, which is the bound that matters here.
+  void queueStalledTabRecovery(conversationId, now);
+  if (now - lastBlindWorkNoticeAt < BLIND_WORK_NOTICE_EVERY_MS) return;
   lastBlindWorkNoticeAt = now;
   logWarn(
     `bridge: ${conversationId} has been calling tools for ${Math.round((now - since) / 60_000)} minutes ` +
-      'with no turn reported by its page — every turn-keyed guard is off for this chat'
+      'with no turn reported by its page — asking the browser to reload it'
   );
   noticeChatStopped(
     'A ChatGPT page has stopped reporting',
-    'Its tool calls are arriving but the app cannot see the turn they belong to, so nothing is watching it — ' +
-      'no recovery, no compaction, no handoff. Reload the Chat On Steroids extension to reconnect the page.',
+    'Its tool calls are arriving but the app cannot see the turn they belong to, so nothing was watching it. ' +
+      'The app is reloading that tab; if it stays quiet, reload the Chat On Steroids extension.',
     sessionId
   );
 }
