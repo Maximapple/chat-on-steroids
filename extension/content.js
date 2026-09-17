@@ -594,6 +594,7 @@
   }
   let stallReported = false;
   let userStopped = false;
+  let recoveryStopping = false;
   /**
    * Final public ChatGPT message that already terminalised the local turn while the page's
    * Stop control was still mounted. A stale Stop must not reopen the same finished turn on
@@ -2006,6 +2007,7 @@
    */
   function endOutcome(turn, nativeFinal = false) {
     if (userStopped) return { outcome: 'stopped' };
+    if (recoveryStopping && !nativeFinal) return { outcome: 'interrupted', detail: 'Automatic Continue stopped an unchanged silent turn.' };
     // Only this turn's failures. An error inside another turn's section is that turn's,
     // and a toast still on screen from an earlier failure was already on screen when this
     // turn began — neither says anything about how this one ended.
@@ -3365,7 +3367,8 @@
       // Whole markup or none, for the same reason the wire bound above drops it.
       const renderedHtml =
         typeof entry.renderedHtml === 'string' && entry.renderedHtml.length <= 120_000 ? entry.renderedHtml : '';
-      if (!rawText && !renderedHtml && !attachments.length) continue;
+      if (!rawText && !renderedHtml && !attachments.length &&
+          !(entry.role === 'assistant' && entry.rawMessageId && entry.rawMessageId === raw.endMessageId)) continue;
       const message = {
         messageId,
         rawMessageId: cap(entry.rawMessageId, 200),
@@ -10031,10 +10034,23 @@
     const pending = goalConfig && goalConfig.pending;
     if (!pending || !pending.replyId || !pending.turnId || !conversationId) return;
     if (!goalUsable() || goalConfig?.queuePending || goalBusy || (pending.listenUntil ?? 0) > Date.now()) return;
-    if (pending.silencePro && CLF_DOM.generating()) {
+    if (CLF_DOM.generating()) {
       goalBusy = true;
-      void ask({ type: 'goal_draft', conversationId, turnId: pending.turnId, nativeBusy: true })
-        .finally(() => { goalBusy = false; });
+      const target = conversationId, forEpoch = epoch, revision = turnProgressRevision;
+      const safe = () => alive && epoch === forEpoch && conversationId === target && CLF_DOM.conversationId() === target &&
+        turnProgressRevision === revision && goalConfig?.pending?.replyId === pending.replyId &&
+        goalConfig?.pending?.acceptedAt === pending.acceptedAt && goalUsable() &&
+        !userStopped && pendingTools === 0 && !nativeBusy && !job?.busy &&
+        CLF_DOM.composerVisible() && !(CLF_DOM.composer()?.textContent || '').trim() && !CLF_DOM.hasComposerAttachments() &&
+        !CLF_DOM.errors().some(error => error.blocking === true);
+      void (async () => {
+        if (!safe() || !await confirmedProviderTerminal(true) || !safe()) return;
+        const permit = await ask({ type: 'goal_draft', conversationId: target, turnId: pending.turnId, nativeBusy: true });
+        if (permit?.data?.recovery?.stop !== true || !safe() || !await confirmedProviderTerminal(true) || !safe()) return;
+        await stopAutomationGeneration(safe);
+      })()
+        .catch(() => undefined)
+        .finally(() => { if (epoch === forEpoch && conversationId === target) goalBusy = false; });
       return;
     }
     if (goalDraft || (generating && !goalRecoveryReady(pending)) || CLF_DOM.generating()) return;
@@ -11222,16 +11238,6 @@
     // whole point of the report: for a worker it is what binds the slot to this chat and
     // starts it, and for a resume it is what the session is moved onto. Bounded by the same
     // clock the app is running, so this page never outlives the command it is working on.
-    //
-    // ChatGPT can also answer this send with a visible transport failure of its own — in the
-    // field, "Message delivery timed out. Please try again." on the brief's first message. That
-    // banner is not the ambiguity an armed click is protected from. It is ChatGPT stating that
-    // the message did not get through, and while this page still has no conversation id there is
-    // no chat the brief could be sitting in. So it is reported as lost, which hands the same
-    // brief to a fresh chat immediately. Without this the handoff died in the quietest possible
-    // way: the page waited out the loop below, acked a send it could not name, and the journal
-    // gate stayed shut until the lease expired a quarter of an hour later with the brief gone.
-    let failedFor = 0;
     for (let tries = 0; tries < 80; tries++) {
       await sleep(500);
       const found = boot.type === 'resume' ? bootstrapConversation() : CLF_DOM.conversationId();
@@ -11242,19 +11248,10 @@
         await clearAcknowledgedBootstrap(acknowledged);
         return;
       }
-      if (boot.type !== 'resume' || !stillOnTarget() || CLF_DOM.conversationId()) { failedFor = 0; continue; }
-      // `recoverable` is what the DOM layer's narrow transport vocabulary marks; a rate-limit
-      // dialog and "Thinking failed" are not it, and neither may release an armed ticket.
-      if (!CLF_DOM.errors().some(error => error.recoverable === true)) { failedFor = 0; continue; }
-      // Two consecutive sightings a half-second apart. A card that renders for a single poll
-      // and is gone on the next was never ChatGPT's verdict on this send.
-      if (++failedFor < 2) continue;
-      continuationJournalPending = false;
-      await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationLost: true });
-      return;
     }
-    // Sent, but this tab never saw an id, so nothing can be bound to it. Reported honestly:
-    // the app ends the slot or the continuation rather than waiting on a chat it cannot name.
+    // An unnamed resume remains ambiguous, including after a native transport banner.
+    // The bridge retains its leased dispatch; only exact reconciliation may bind it later.
+    if (boot.type === 'resume') return;
     await ask({ type: 'ack', id: boot.id, status: 'sent', agent, client: RUN_ID });
     } finally { bootstrapDraft.dispose(); }
   }
@@ -11263,7 +11260,7 @@
 
   const noteStopClick = (event) => {
     const stop = CLF_DOM.stopButton();
-    if (stop && event.target instanceof Node && stop.contains(event.target)) userStopped = true;
+    if (stop && event.target instanceof Node && stop.contains(event.target) && (!recoveryStopping || event.isTrusted)) userStopped = true;
   };
   listen(document, 'click', noteStopClick, true);
 
@@ -11549,8 +11546,8 @@
     }).catch(() => undefined).finally(() => { decision.partialPublishing = false; });
   }
   /** Fresh exact terminal proof, shared by stuck-composer recovery and idle-tab retirement. */
-  async function confirmedProviderTerminal() {
-    const terminal = fiberTerminalMessageId;
+  async function confirmedProviderTerminal(recordedFinal = false) {
+    const terminal = fiberTerminalMessageId || (recordedFinal ? fiberTurnFor(currentAssistantTurn())?.endMessageId : null);
     const pageTurn = currentAssistantTurn();
     const observedEpoch = epoch;
     const observedConversation = conversationId;
@@ -11558,7 +11555,17 @@
     const recovered = await refreshFiber({ pageTurnId: pageTurn.id, pageTurn: pageTurn.node || pageTurn.nodes?.[0], terminalProbe: terminal });
     return Boolean(recovered && alive && epoch === observedEpoch && conversationId === observedConversation &&
       CLF_DOM.conversationId() === observedConversation && !generating && pendingTools === 0 &&
-      fiberTerminalMessageId === terminal && fiberTurnFor(currentAssistantTurn())?.endMessageId === terminal);
+      (recordedFinal || fiberTerminalMessageId === terminal) && fiberTurnFor(currentAssistantTurn())?.endMessageId === terminal);
+  }
+
+  /** Both final-driven Goal/Loop and unfinished Continue settle the same native control. */
+  async function stopAutomationGeneration(safe) {
+    if (!safe()) return false;
+    recoveryStopping = true;
+    try {
+      if (CLF_DOM.generating() && !CLF_DOM.stopGeneration(safe)) return false;
+      return Boolean(await waitPageView(() => !CLF_DOM.generating(), safe, INTERRUPT_WAIT_MS) && safe());
+    } finally { recoveryStopping = false; }
   }
 
   async function acceptDesktopInput(message) {
@@ -11577,10 +11584,36 @@
       (!message.directTurn || sendAttempted || (CLF_DOM.messages().filter(row => row.role === 'user').at(-1)?.id === sourceUser &&
         (!turnId || turnId === sourceTurn)));
     if (!onTarget()) return false;
+    if (message.recovery && (!sourceUser || sourceUser !== message.recovery.questionId || userStopped)) return false;
     if (silencePickup && CLF_DOM.generating() && !await confirmedProviderTerminal()) {
       if (!onTarget()) return false;
-      await ask({ type: 'desktop_input', id: message.id, conversationId: target, silenceBusyTurnId: message.silenceTurnId });
-      return false;
+      if (message.recovery?.stop === true) {
+        desktopInputBusy = true;
+        let input = null;
+        try {
+          const safe = () => onTarget() && !userStopped && pendingTools === 0 &&
+            CLF_DOM.composerVisible() && !(CLF_DOM.composer()?.textContent || '').trim() &&
+            !CLF_DOM.hasComposerAttachments() && !CLF_DOM.errors().some(error => error.blocking === true);
+          if (!safe()) return false;
+          const claim = await ask({ type: 'desktop_input', id: message.id, conversationId: target, requiresAuthorization: true });
+          input = claim?.data?.input;
+          if (!input?.recovery || !safe()) return false;
+          const permit = await ask({ type: 'desktop_input', id: input.id, owner: input.owner, conversationId: target, recoveryAction: 'stop' });
+          if (permit?.data?.ok !== true || !safe() || await confirmedProviderTerminal() || !safe()) return false;
+          if (!await stopAutomationGeneration(safe)) return false;
+          if (generating) finishGeneration(currentAssistantTurn(), { outcome: 'interrupted', detail: 'Automatic Continue stopped an unchanged silent turn.' }, false);
+          await flush();
+          if (!safe()) return false;
+          const stopped = await ask({ type: 'desktop_input', id: input.id, owner: input.owner, conversationId: target, recoveryAction: 'stopped' });
+          if (stopped?.data?.ok !== true || !safe()) return false;
+        } finally {
+          recoveryStopping = false;
+          desktopInputBusy = false;
+        }
+      } else {
+        await ask({ type: 'desktop_input', id: message.id, conversationId: target, silenceBusyTurnId: message.silenceTurnId });
+        return false;
+      }
     }
     if (message.directTurn && (!target || ((generating || CLF_DOM.generating()) &&
         (!sourceUser || sourceTurn !== message.directTurn.id)))) return false;

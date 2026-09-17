@@ -73,7 +73,7 @@ import {
 } from './session/continuation.js';
 import { runShutdownSequence } from './shutdown.js';
 import { applyStagedUpdate, startUpdateChecks } from './update.js';
-import { UI_BASE_ZOOM, windowLayoutForWorkArea, titleBarOverlayForTheme } from './window-layout.js';
+import { UI_BASE_ZOOM, windowLayoutForWorkArea, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
 import { openInPreferredBrowser } from './browser.js';
 import {
   applyLoginStartup,
@@ -121,10 +121,10 @@ function createWindow(): void {
     autoHideMenuBar: true,
     ...(process.platform === 'win32' ? {
       titleBarStyle: 'hidden' as const,
-      titleBarOverlay: titleBarOverlayForTheme(getConfig().ui.theme)
+      titleBarOverlay: titleBarOverlayForTheme(getConfig().ui.theme, getConfig().ui.appearance)
     } : {}),
     // Painted before the renderer loads, so a dark window never flashes white.
-    backgroundColor: getConfig().ui.theme === 'dark' ? '#0e0e11' : '#ffffff',
+    backgroundColor: windowBackgroundForTheme(getConfig().ui.theme, getConfig().ui.appearance),
     // The window carries it too, because that is the one place nobody has to go looking. Two
     // builds with the same name and version is how a QA run came to measure the wrong app.
     title: `Chat On Steroids ${BUILD_VERSION}`,
@@ -163,9 +163,9 @@ function createWindow(): void {
   if (process.platform === 'win32') window.removeMenu();
 
   // First use discovers the account once. A restored catalog is immediately usable;
-  // showing the window again cannot refresh it or open another browser attempt.
+  // showing the window again may observe an existing page, never open another browser attempt.
   window.on('show', () => {
-    if (!quitting && getChatModels().state === 'unknown') void startChatModelDiscovery(true)
+    if (!quitting && getChatModels().state === 'unknown') void startChatModelDiscovery(false)
       .catch(error => logWarn(`model discovery on window open: ${error.message}`));
   });
   window.once('ready-to-show', () => {
@@ -478,7 +478,7 @@ void app.whenReady().then(async () => {
       responseHeaders: {
         ...details.responseHeaders,
         'Content-Security-Policy': [
-          "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+          "default-src 'none'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
         ]
       }
     });
