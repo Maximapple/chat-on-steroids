@@ -7791,6 +7791,64 @@ function retireSpentRepairs(): void {
 }
 
 /**
+ * A chat whose tool calls keep arriving while its page reports no turn at all.
+ *
+ * Attribution is the existing health signal, and it is the wrong one on its own: it proves the
+ * request-id join works, not that the page is still reporting. Both halves can fail apart. The
+ * comment above already names one direction — "a document can keep reporting turns and progress
+ * while its request-id reporting is dead" — and this is the other, which nothing watched.
+ *
+ * Measured on 2026-09-17. A chat worked from 06:45 to 08:51 and the app never learned a turn had
+ * started: 195 attributed tool calls, one `session_start`, no `turn_start`, no thought activity,
+ * no answer. Every guard is keyed on the turn, so every guard was off — the silence watch saw no
+ * open turn to time, automatic compaction needs `chatIsWorking` and got false, and when the turn
+ * finally died at 09:13 nothing noticed for half an hour. Three worker chats died the same way
+ * at 06:49, and a handoff whose brief demonstrably landed was never confirmed, because the
+ * marker is reconciled out of Fiber turns that this page was not producing.
+ *
+ * An attributed call is itself the proof that a turn is running: tool calls only happen inside
+ * one. So a call arriving while the app holds no turn for that chat is not a quiet page, it is a
+ * contradiction, and after three unbroken minutes of it the page is the half that is wrong. Said
+ * once a quarter hour, because such a page produces a call every few seconds.
+ *
+ * Deliberately not a recovery: the remedy that works is reloading the extension, which no
+ * extension can do to itself, and the person does it in five seconds once they know.
+ */
+const BLIND_WORK_MS = 3 * 60_000;
+const BLIND_WORK_NOTICE_EVERY_MS = 15 * 60_000;
+const blindWorkSince = new Map<string, number>();
+let lastBlindWorkNoticeAt = 0;
+
+function noticeBlindWork(conversationId: string, sessionId: string, filed: SessionSummary | null): void {
+  // Only the just-filed summary for this exact chat. A browser poll's older view of the turn
+  // would make every call look blind for as long as the poll lagged behind the recording.
+  if (!filed || filed.conversationId !== conversationId || filed.id !== sessionId) return;
+  const now = Date.now();
+  if (filed.activeTurnId) {
+    blindWorkSince.delete(conversationId);
+    return;
+  }
+  const since = blindWorkSince.get(conversationId);
+  // A clock that moved backwards restarts the stretch rather than satisfying it instantly.
+  if (since === undefined || now < since) {
+    blindWorkSince.set(conversationId, now);
+    return;
+  }
+  if (now - since < BLIND_WORK_MS || now - lastBlindWorkNoticeAt < BLIND_WORK_NOTICE_EVERY_MS) return;
+  lastBlindWorkNoticeAt = now;
+  logWarn(
+    `bridge: ${conversationId} has been calling tools for ${Math.round((now - since) / 60_000)} minutes ` +
+      'with no turn reported by its page — every turn-keyed guard is off for this chat'
+  );
+  noticeChatStopped(
+    'A ChatGPT page has stopped reporting',
+    'Its tool calls are arriving but the app cannot see the turn they belong to, so nothing is watching it — ' +
+      'no recovery, no compaction, no handoff. Reload the Chat On Steroids extension to reconnect the page.',
+    sessionId
+  );
+}
+
+/**
  * The recorder's verdict on one finished call: the conversation it proved, or null for a call
  * that finished the request-id grace with no page evidence at all.
  *
@@ -7820,7 +7878,10 @@ function noteCallAttribution(
     // canonical summary, not a later browser poll, owns the worker's context meter.
     if (currentConversation && filedSession?.id === sessionId && filedSession.conversationId === conversationId)
       noteAgentContextTokens(conversationId, filedSession.contextTokens);
-    if (currentConversation && !endsActivity) lastAttributedCallAt.set(conversationId, Date.now());
+    if (currentConversation && !endsActivity) {
+      lastAttributedCallAt.set(conversationId, Date.now());
+      noticeBlindWork(conversationId, sessionId, filedSession);
+    }
     // The recorder has just withdrawn a completed end the page reported: the same server turn
     // went on calling tools. Whatever Goal was drafting for that end — or had filed as owed —
     // was a reply to an answer that has not been given. The real end, when the page sees it,

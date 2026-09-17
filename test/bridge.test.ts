@@ -6540,6 +6540,53 @@ describe('unattributed activity recovery', () => {
     }
   });
 
+  /**
+   * The page that answers about request ids and nothing else.
+   *
+   * Attribution proves the join, not that the page still reports. On 2026-09-17 a chat worked
+   * from 06:45 to 08:51 with 195 attributed calls and no `turn_start` at all, so every
+   * turn-keyed guard was off: no silence timing, no automatic compaction, and no notice when
+   * the turn finally died. A tool call only happens inside a turn, so a call arriving while the
+   * app holds no turn for that chat is a contradiction, not a quiet page.
+   */
+  it('tells the user about a chat whose calls arrive with no turn its page ever reported', async () => {
+    vi.useFakeTimers();
+    const seen: Array<{ title: string; body: string }> = [];
+    setStuckNotifier((title, body) => { seen.push({ title, body }); return true; });
+    try {
+      // Past any earlier notice in this file: this report is throttled, not repeated per call.
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      await pair();
+
+      // Three unbroken minutes of calls that name the chat while its page reports no turn.
+      await attributed(PRIME);
+      expect(seen).toEqual([]);
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      await attributed(PRIME);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.title).toMatch(/stopped reporting/i);
+      expect(seen[0]!.body).toMatch(/reload the chat on steroids extension/i);
+      expect(getLog().some((entry) => entry.message.includes('with no turn reported by its page'))).toBe(true);
+
+      // Once per quarter hour, however many calls that page makes.
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      await attributed(PRIME);
+      expect(seen).toHaveLength(1);
+
+      // A turn the page does report ends the stretch, and the next call starts it over rather
+      // than inheriting the minutes already spent.
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      await events(PRIME, [openTurn('turn-reported-again')]);
+      await attributed(PRIME);
+      await events(PRIME, [endTurn('turn-reported-again', 'completed')]);
+      await attributed(PRIME);
+      expect(seen).toHaveLength(1);
+    } finally {
+      setStuckNotifier(null);
+      vi.useRealTimers();
+    }
+  });
+
   it('waits 15 seconds before handing a lone suspect to the browser once attribution has failed', async () => {
     vi.useFakeTimers();
     try {
