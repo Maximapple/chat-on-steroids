@@ -3480,6 +3480,38 @@ describe('extension observation journal', () => {
     ]);
   });
 
+  it('forwards the page-model helper health, and only the words the page may say', async () => {
+    // This field crosses three files, and that join is where two checkpoint fields have already
+    // been lost with every unit test still green — see scripts/verify-compact-chain.mjs. The
+    // page is the only thing that can see the MAIN-world helper, and the app is the only thing
+    // that can say a handoff will never reconcile its marker without it.
+    const conversationId = '22222222-3333-4444-5555-666666666666';
+    const seen: Array<string | null> = [];
+    const fetch = vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/activity') {
+        seen.push(url.searchParams.get('fiber'));
+        return response(200, { sessionId: 'session', entries: [], stream: [], nextSince: 0 });
+      }
+      return response(404, {});
+    });
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session: new FakeStorageArea(),
+      fetch
+    });
+
+    for (const fiber of ['absent', 'empty', 'ok']) {
+      await worker.send({ type: 'activity', conversationId, since: 0, fiber }, 73);
+    }
+    // Anything else is dropped rather than passed on for the app to validate a second time.
+    await worker.send({ type: 'activity', conversationId, since: 0, fiber: 'maybe' }, 73);
+    await worker.send({ type: 'activity', conversationId, since: 0 }, 73);
+
+    expect(seen).toEqual(['absent', 'empty', 'ok', null, null]);
+  });
+
   it('selects only the exact owned Goal tab without activating Chrome or opening a duplicate', async () => {
     const conversationId = '22222222-3333-4444-5555-666666666666';
     const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
