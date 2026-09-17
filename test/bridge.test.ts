@@ -6565,6 +6565,38 @@ describe('unattributed activity recovery', () => {
    * the turn finally died. A tool call only happens inside a turn, so a call arriving while the
    * app holds no turn for that chat is a contradiction, not a quiet page.
    */
+  it('reports the page-model helper as absent or empty, once per state change', async () => {
+    // Everything Fiber-derived arrives through that helper, including the `[[CLF-RESUME]]`
+    // marker a handoff commits from. Measured 2026-09-14 to 09-17: `page_tool` fell from 5.3
+    // per turn to 0.08 while turn boundaries arrived throughout, and five handoffs ended
+    // `dispatched-unresolved` with the brief in a chat that was on its 272nd tool call. Nothing
+    // in the log said why, because nothing reported on this half.
+    await pair();
+    const ask = (fiber: string | null) =>
+      request('GET', `/activity?conversationId=${PRIME}&since=0${fiber === null ? '' : `&fiber=${fiber}`}`);
+    const lines = () => getLog().filter((entry) => entry.message.includes('page-model helper as'));
+
+    expect((await ask('absent')).status).toBe(200);
+    expect(lines().at(-1)?.message).toContain('cannot reconcile its marker');
+
+    // Once per state, however many pulls that page makes.
+    await ask('absent');
+    await ask('absent');
+    expect(lines()).toHaveLength(1);
+
+    // The other fault is named differently, because only one of the two can be acted on here.
+    expect((await ask('empty')).status).toBe(200);
+    expect(lines().at(-1)?.message).toContain('answers and finds no turns');
+    expect(lines()).toHaveLength(2);
+
+    // Recovery is worth one line too, and a pull that says nothing changes nothing.
+    await ask('ok');
+    expect(getLog().some((entry) => entry.message.includes('reading ChatGPT’s own page model again')) ||
+      getLog().some((entry) => entry.message.includes("reading ChatGPT's own page model again"))).toBe(true);
+    await ask(null);
+    expect(lines()).toHaveLength(2);
+  });
+
   it('reloads the chat whose calls arrive with no turn its page ever reported', async () => {
     // Reporting was half the job. `queueStalledTabRecovery` can repair exactly this page, and
     // declined it: its `working` gate reads the page's account of the turn, which is the half

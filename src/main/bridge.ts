@@ -2504,6 +2504,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const since = Number(url.searchParams.get('since') ?? 0);
     const goalClient = (url.searchParams.get('goalClient') ?? '').slice(0, 100);
     if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    noteFiberHealth(id, url.searchParams.get('fiber'));
     const retiredWorker = retiredWorkerForConversation(id);
     const superseded = await conversationWasSuperseded(id);
     /**
@@ -7139,6 +7140,47 @@ function rememberSupersededSources(openConversations: Set<string>): Set<string> 
  * Two minutes gives follow-ups a warm page; five minutes releases an unused renderer.
  * The extension still proves the exact document has no draft or generation before closing.
  */
+
+/**
+ * The MAIN-world helper's health, which only the page can see.
+ *
+ * Everything Fiber-derived arrives through it: the thought activity a turn renders, the
+ * canonical assistant message keyed by ChatGPT's own id, and — the reason this matters —
+ * the `[[CLF-RESUME]]` marker that `markedContinuationTurns()` reads to commit a handoff. When
+ * it stops delivering, a replacement chat works normally and its handoff can never commit,
+ * and from here that is indistinguishable from a page that is merely quiet.
+ *
+ * Measured here between 2026-09-14 and 2026-09-17: `page_tool` observations fell from 5.3 per
+ * turn to 0.08, one event across 1,253 tool calls on the last day, while `turn_start` and
+ * `turn_end` arrived throughout — so the isolated world was alive the whole time. Five handoffs
+ * ended `dispatched-unresolved` with the brief demonstrably in a chat that was on its 272nd
+ * tool call. Nothing in the log said why, because nothing reported on this half at all.
+ *
+ * `absent` and `empty` are the two faults, and telling them apart is the whole point: absent is
+ * an injection that is not landing, which this app can act on; empty is a helper that answers
+ * and finds nothing, which is a change in what it reads and cannot be fixed from here. Said
+ * once per chat per state change, so a page that stays broken does not repeat itself.
+ */
+const fiberHealthTold = new Map<string, string>();
+
+function noteFiberHealth(conversationId: string, raw: string | null): void {
+  if (raw !== 'absent' && raw !== 'empty' && raw !== 'ok') return;
+  if (fiberHealthTold.get(conversationId) === raw) return;
+  fiberHealthTold.set(conversationId, raw);
+  if (fiberHealthTold.size > 200) {
+    for (const old of [...fiberHealthTold.keys()].slice(0, 50)) fiberHealthTold.delete(old);
+  }
+  if (raw === 'ok') {
+    logInfo(`bridge: ${conversationId} is reading ChatGPT's own page model again`);
+    return;
+  }
+  logWarn(
+    `bridge: ${conversationId} reports its page-model helper as ${raw} — ` +
+      (raw === 'absent'
+        ? 'nothing it renders reaches this app, and a handoff in this chat cannot reconcile its marker'
+        : 'the helper answers and finds no turns, so this chat contributes no thought activity, no authored answer and no resume marker')
+  );
+}
 
 async function browserTabPolicy(openConversations: Set<string>) {
   // Existing cached metadata is the ownership index; never scan transcripts per browser poll.

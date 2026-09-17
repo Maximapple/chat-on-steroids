@@ -3345,7 +3345,12 @@ const HANDLERS = {
       `?conversationId=${encodeURIComponent(message.conversationId)}` +
       `&since=${Number(message.since) || 0}` +
       `&goalClient=${encodeURIComponent(String(source.tab))}` +
-      `&compactToken=${encodeURIComponent(typeof message.compactToken === 'string' ? message.compactToken : '')}`;
+      `&compactToken=${encodeURIComponent(typeof message.compactToken === 'string' ? message.compactToken : '')}` +
+      // Forwarded verbatim, and only the three words the page may say. The join between these
+      // three files is where two checkpoint fields have already been lost — see
+      // scripts/verify-compact-chain.mjs — so an unrecognised value is dropped rather than
+      // passed on as something the app would have to validate a second time.
+      (['absent', 'empty', 'ok'].includes(message.fiber) ? `&fiber=${message.fiber}` : '');
     const result = await call(`/activity${query}`);
     // Every reply passes through here, so this is where the app's own view of "still running"
     // is available to act on. Not awaited: the tab flag must never delay an activity reply.

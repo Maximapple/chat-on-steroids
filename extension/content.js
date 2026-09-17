@@ -6379,6 +6379,14 @@
         type: 'activity',
         conversationId,
         since,
+        // The MAIN-world helper's health, which only this page knows and the app could never
+        // see. `absent` and `empty` are two different faults with the same symptom: no
+        // Fiber-derived observation reaches the app, so `markedContinuationTurns()` finds no
+        // resume marker and a handoff can never commit. `absent` means the helper did not
+        // answer even after a repair; `empty` means it answered and had nothing, which is what
+        // a provider-side change to the tree this reads would look like. Reported as one word
+        // on the pull this page already makes.
+        fiber: !fiberPresent ? 'absent' : fiberTurns.size === 0 ? 'empty' : 'ok',
         ...(compactCapture && typeof compactCapture.token === 'string'
           ? { compactToken: compactCapture.token }
           : {})
