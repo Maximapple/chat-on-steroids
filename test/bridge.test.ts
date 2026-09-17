@@ -751,6 +751,41 @@ describe('active agent tab discard projection', () => {
     } finally { await writeDurableNow('session-input', []); resetInputForTests(); }
   });
 
+  it('records what the browser\'s recorder sweep did, and stays quiet when every page was healthy', async () => {
+    // On 2026-09-17 a chat sat orphaned for forty minutes — `session_start` before an extension
+    // reload, then hundreds of tool calls and no turn — while two tabs created after that same
+    // reload reported normally. Nothing said whether the sweep had skipped it, tried and failed,
+    // or never run: the worker has no channel of its own. These four counters are that answer.
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const post = (recorderSweep: unknown) =>
+        request('POST', '/status', { body: { openConversations: [], recorderSweep } });
+
+      // Every page answered its ping: nothing to say.
+      expect((await post({ checked: 3, repaired: 0, failed: 0, skipped: 0 })).status).toBe(200);
+      expect(getLog().some((entry) => entry.message.includes('for a live recorder'))).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect((await post({ checked: 3, repaired: 1, failed: 1, skipped: 2 })).status).toBe(200);
+      const line = [...getLog()].reverse().find((entry) => entry.message.includes('for a live recorder'))?.message;
+      expect(line).toContain('checked 3 ChatGPT page(s)');
+      expect(line).toContain('1 repaired, 1 could not be, 2 skipped');
+
+      // The sweep runs once a minute; so does this line, however many passes report it.
+      expect((await post({ checked: 3, repaired: 0, failed: 3, skipped: 0 })).status).toBe(200);
+      expect(getLog().filter((entry) => entry.message.includes('for a live recorder'))).toHaveLength(1);
+
+      // Nonsense from a peer is dropped rather than logged as a measurement.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect((await post({ checked: 'lots', failed: -4 })).status).toBe(200);
+      expect((await post('not an object')).status).toBe(200);
+      expect(getLog().filter((entry) => entry.message.includes('for a live recorder'))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps offering a handed-over chat for closing after its ticket is forgotten', async () => {
     // The continuation layer keeps a committed ticket for twice the ten-minute TTL and then
     // drops it, which used to end the source's closability with it. Every guard the close has
@@ -2941,7 +2976,6 @@ describe('delivering a bootstrap', () => {
     expect((await redeem(command.id, 'tab-b2')).text).toContain('the brief for the armed move');
     expect((await request('POST', '/compact', { body: { token, commandId: command.id, client: 'tab-b2', destinationAttempt: true } })).body.allowed).toBe(true);
     expect((await request('POST', '/compact', { body: { token, commandId: command.id, client: 'tab-b2', destinationDispatch: true } })).body.armed).toBe(true);
-    const logged = getLog().length;
 
     const reply = await request('POST', '/compact', {
       body: { conversationId: chatB, token, destinationMessageId: 'm-b2-marked-resume' }
@@ -2949,10 +2983,11 @@ describe('delivering a bootstrap', () => {
     expect(reply.status).toBe(200);
     expect(reply.body.committed).toBe(true);
     expect((await getSession(sessionId))?.conversationId).toBe(chatB);
+    // Counted across the whole log rather than sliced from an earlier length: `getLog()` is a
+    // bounded ring, so an absolute index stops meaning anything once the suite fills it. `chatB`
+    // is unique to this test, which makes the match itself the scope.
     expect(
-      getLog()
-        .slice(logged)
-        .some((entry) => entry.message.includes(`resumed chat ${chatB} armed`))
+      getLog().some((entry) => entry.message.includes(`resumed chat ${chatB} armed`))
     ).toBe(true);
     expect((await request('GET', '/status')).body.recoveryMonitoring).toBe(true);
 
@@ -2962,9 +2997,7 @@ describe('delivering a bootstrap', () => {
     });
     expect(again.status).toBe(200);
     expect(
-      getLog()
-        .slice(logged)
-        .filter((entry) => entry.message.includes(`resumed chat ${chatB} armed`))
+      getLog().filter((entry) => entry.message.includes(`resumed chat ${chatB} armed`))
     ).toHaveLength(1);
   });
 

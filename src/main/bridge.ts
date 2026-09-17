@@ -1865,11 +1865,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const live = liveConversations();
     let openConversations: string[] = [];
     if (req.method === 'POST') {
-      const body = await readBody(req) as { openConversations?: unknown };
+      const body = await readBody(req) as { openConversations?: unknown; recorderSweep?: unknown };
       if (!Array.isArray(body?.openConversations) || body.openConversations.length > 10_000 || body.openConversations.some(id => !conversationId(id))) {
         return json(res, 400, { error: 'invalid_open_conversations' }, origin);
       }
       openConversations = body.openConversations as string[];
+      noteRecorderSweep(body.recorderSweep);
     }
     const tabPolicy = await browserTabPolicy(new Set(openConversations));
     // The extension's maintenance pass, and the whole conversation about repairs: `repaired`
@@ -6911,6 +6912,43 @@ function rememberSupersededSources(openConversations: Set<string>): Set<string> 
  * Two minutes gives follow-ups a warm page; five minutes releases an unused renderer.
  * The extension still proves the exact document has no draft or generation before closing.
  */
+/**
+ * What the extension's last recorder sweep did, so the log can say whether it reached a tab.
+ *
+ * `restoreChatgptTab` is the only thing that revives a page whose isolated world an extension
+ * reload invalidated, and whether it reached a given tab was invisible from here: the worker has
+ * no channel of its own and its console is not the app's. On 2026-09-17 one chat sat orphaned for
+ * forty minutes — `session_start` before the reload, then hundreds of tool calls and no turn —
+ * while two tabs created after that same reload reported normally, and nothing recorded said
+ * whether the sweep had skipped it, tried and failed, or never run at all.
+ *
+ * Logged only when it did something other than find every tab healthy, and at most once a
+ * minute, which is also the sweep's own cadence. A repair that worked is worth one line; a
+ * failure and a skipped (discarded, still loading) tab are the two answers that were missing.
+ */
+type RecorderSweep = { checked: number; repaired: number; failed: number; skipped: number };
+const RECORDER_SWEEP_NOTICE_EVERY_MS = 60_000;
+let lastRecorderSweepNoticeAt = 0;
+
+function noteRecorderSweep(raw: unknown): void {
+  if (!raw || typeof raw !== 'object') return;
+  const value = raw as Partial<RecorderSweep>;
+  const count = (input: unknown): number =>
+    typeof input === 'number' && Number.isFinite(input) && input >= 0 && input <= 10_000 ? Math.floor(input) : 0;
+  const sweep: RecorderSweep = {
+    checked: count(value.checked), repaired: count(value.repaired),
+    failed: count(value.failed), skipped: count(value.skipped)
+  };
+  if (sweep.failed === 0 && sweep.skipped === 0 && sweep.repaired === 0) return;
+  const now = Date.now();
+  if (now >= lastRecorderSweepNoticeAt && now - lastRecorderSweepNoticeAt < RECORDER_SWEEP_NOTICE_EVERY_MS) return;
+  lastRecorderSweepNoticeAt = now;
+  logInfo(
+    `bridge: the browser checked ${sweep.checked} ChatGPT page(s) for a live recorder — ` +
+      `${sweep.repaired} repaired, ${sweep.failed} could not be, ${sweep.skipped} skipped (discarded or still loading)`
+  );
+}
+
 async function browserTabPolicy(openConversations: Set<string>) {
   // Existing cached metadata is the ownership index; never scan transcripts per browser poll.
   const summaries = await listUsageSessions();

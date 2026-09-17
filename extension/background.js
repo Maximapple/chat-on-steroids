@@ -2464,7 +2464,12 @@ async function maintainOnce() {
   let observedTabs = [];
   try { observedTabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS }); } catch { /* Status/recovery still runs; no unobserved tab is pruned. */ }
   const openConversations = [...new Set(observedTabs.map(conversationForTab).filter(Boolean))];
-  const reply = await call('/status', { method: 'POST', body: JSON.stringify({ openConversations }) });
+  const sweep = lastRecorderSweep.checked + lastRecorderSweep.skipped > 0 ? lastRecorderSweep : null;
+  lastRecorderSweep = { checked: 0, repaired: 0, failed: 0, skipped: 0 };
+  const reply = await call('/status', {
+    method: 'POST',
+    body: JSON.stringify({ openConversations, ...(sweep ? { recorderSweep: sweep } : {}) })
+  });
   if (!reply.ok || !reply.data) return;
   connectWakeSocket();
   void pumpBrowserControl().catch(() => undefined);
@@ -4533,11 +4538,22 @@ async function restoreChatgptTab(id) {
  * woken — Chrome will run the manifest injection itself when it comes back.
  */
 const RECORDER_CHECK_EVERY_MS = 60_000;
+/**
+ * What the last recorder sweep did, reported on the next `/status` so the app can log it.
+ *
+ * `restoreChatgptTab` is the only thing that can revive a page whose isolated world an
+ * extension reload invalidated, and whether it reached a given tab was invisible from the app:
+ * the worker has no channel of its own. On 2026-09-17 a chat sat orphaned for forty minutes
+ * while two tabs created after the same reload reported normally, and there was no way to tell
+ * whether the sweep had skipped it, tried and failed, or never run. Four counters answer that.
+ */
+let lastRecorderSweep = { checked: 0, repaired: 0, failed: 0, skipped: 0 };
 let lastRecorderCheckAt = 0;
 
 async function restoreSilentRecorders() {
   if (Date.now() - lastRecorderCheckAt < RECORDER_CHECK_EVERY_MS) return;
   lastRecorderCheckAt = Date.now();
+  lastRecorderSweep = { checked: 0, repaired: 0, failed: 0, skipped: 0 };
   let tabs = [];
   try {
     tabs = await webext.tabs.query({ url: CHATGPT_TAB_URLS });
@@ -4546,7 +4562,10 @@ async function restoreSilentRecorders() {
   }
   for (const tab of tabs) {
     const id = tab && typeof tab.id === 'number' ? tab.id : null;
-    if (id === null || tab.pendingUrl || tab.discarded === true) continue;
+    if (id === null || tab.pendingUrl || tab.discarded === true) {
+      if (id !== null) lastRecorderSweep.skipped += 1;
+      continue;
+    }
     // Deliberately unconditional, and this corrects a mistake in the first version: it pinged
     // first and skipped every tab whose content.js answered. `restoreChatgptTab` says in its own
     // words why that is wrong — "healthy content.js does not prove the independently running
@@ -4561,7 +4580,9 @@ async function restoreSilentRecorders() {
     // gate it raised on seeing that marker in the DOM never opens again. Measured on 2026-09-16:
     // such a chat recorded 1 event from the browser against 475 MCP calls, while a healthy chat
     // of the same age recorded 61, including 47 page tools.
-    await restoreChatgptTab(id);
+    lastRecorderSweep.checked += 1;
+    if (await restoreChatgptTab(id)) lastRecorderSweep.repaired += 1;
+    else lastRecorderSweep.failed += 1;
   }
 }
 
