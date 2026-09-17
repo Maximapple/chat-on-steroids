@@ -1444,7 +1444,7 @@ export async function recordProcessCall(sessionId: string, event: Omit<Extract<S
 
 /** Exit revises its launch; it is not a tool invocation, output receipt or turn boundary. */
 export async function completeProcessCall(sessionId: string, callId: string, completion: {
-  completedAt: number; durationMs: number; exitCode: number | null;
+  completedAt: number; durationMs: number; exitCode: number | null; benignExit?: boolean;
 }): Promise<void> {
   const entry = await ensureOpen(sessionId);
   await enqueueSessionOperation(entry, 'process completion', async () => {
@@ -1452,7 +1452,7 @@ export async function completeProcessCall(sessionId: string, callId: string, com
     const previous = entry.messages.get(key);
     if (previous?.kind !== 'tool_call' || !previous.call.process || previous.call.process.completedAt !== undefined) return;
     const { exitCode } = completion;
-    const failed = exitCode !== null && exitCode !== 0;
+    const failed = exitCode !== null && exitCode !== 0 && completion.benignExit !== true;
     const full: Extract<SessionEvent, { kind: 'tool_call' }> = {
       ...previous, seq: entry.nextSeq,
       call: { ...previous.call, process: { ...previous.call.process, ...completion }, summary: {
@@ -1570,69 +1570,6 @@ export async function readEvents(sessionId: string, options: ReadOptions = {}): 
   return chronological(out).slice(0, limit);
 }
 
-/**
- * Walks a session's journal backwards, newest line first, inside a byte budget.
- *
- * The one place that knows how to read part of an `events.jsonl` instead of all of it. Both
- * bounded readers below are the same walk with a different stopping rule — a row cap for the
- * presentation tail, a sequence checkpoint for the update cursors — so the buffer arithmetic
- * that makes a reverse line scan correct across 64 KiB block boundaries lives here once.
- *
- * `done()` is asked between lines and ends the walk early. The return says why the walk
- * stopped: `exhaustedBudget` means the budget ran out with the file neither finished nor
- * `done()`, which is the only outcome where the caller has been handed an incomplete answer
- * and has to decide what to do about it.
- */
-async function scanJournalBackwards(
-  sessionId: string,
-  accept: (line: Buffer) => void,
-  options: { done: () => boolean; maxBytes: number; onDamaged: () => void }
-): Promise<{ exhaustedBudget: boolean }> {
-  const file = path.join(sessionDir(sessionId), 'events.jsonl');
-  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
-  let cursor = 0;
-  let bytes = 0;
-  try {
-    handle = await fs.open(file, 'r');
-    cursor = (await handle.stat()).size;
-    let carry = Buffer.alloc(0);
-    while (cursor > 0 && !options.done() && bytes < options.maxBytes) {
-      const wanted = Math.min(64 * 1024, cursor, options.maxBytes - bytes);
-      if (wanted <= 0) break;
-      cursor -= wanted;
-      const buffer = Buffer.allocUnsafe(wanted);
-      const { bytesRead } = await handle.read(buffer, 0, wanted, cursor);
-      const joined = Buffer.concat([buffer.subarray(0, bytesRead), carry]);
-      bytes += bytesRead;
-      const firstNewline = joined.indexOf(0x0a);
-      if (firstNewline < 0) {
-        // A corrupt/no-newline tail used to repeatedly copy the complete 8 MiB budget:
-        // 64 KiB + 128 KiB + ... . Retain only one maximum event while seeking a boundary.
-        if (joined.length > MAX_LINE_BYTES + 1) options.onDamaged();
-        carry = joined.subarray(0, Math.min(joined.length, MAX_LINE_BYTES + 1));
-        continue;
-      }
-      carry = joined.subarray(0, firstNewline);
-      const complete = joined.subarray(firstNewline + 1);
-      let endAt = complete.length;
-      for (let at = complete.length - 1; at >= 0 && !options.done(); at--) {
-        if (complete[at] !== 0x0a) continue;
-        const line = complete.subarray(at + 1, endAt);
-        if (line.length > 0) accept(line);
-        endAt = at;
-      }
-      if (!options.done() && endAt > 0) accept(complete.subarray(0, endAt));
-    }
-    if (cursor === 0 && !options.done() && carry.length > 0) accept(carry);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    // A session with no journal file yet is complete at zero rows, not truncated.
-    return { exhaustedBudget: false };
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
-  return { exhaustedBudget: cursor > 0 && !options.done() };
-}
 
 /**
  * Reads only the newest matching presentation window without materialising the whole JSONL journal.
@@ -1646,7 +1583,7 @@ async function scanJournalBackwards(
 export async function readRecentEvents(
   sessionId: string,
   limit: number,
-  options: Pick<ReadOptions, 'kinds' | 'agent'> & { maxBytes?: number; before?: number } = {}
+  options: Pick<ReadOptions, 'kinds' | 'agent'> & { maxBytes?: number; before?: number; after?: number; orderByOrigin?: boolean } = {}
 ): Promise<SessionEvent[]> {
   assertSessionId(sessionId);
   await flushSession(sessionId);
@@ -1677,7 +1614,7 @@ export async function readCompletedFinal(sessionId: string, conversationId: stri
   ]);
   if (entry.nextSeq !== revision || entry.queue !== queue || entry.summary.conversationId !== conversationId) return null;
   const final = recent.findLast(event => event.kind === 'assistant_message' && event.final === true &&
-    !!event.message.text.trim() && !!event.messageId && (!turnId || event.turnId === turnId ||
+    (!!event.message.text.trim() || !!event.providerMessageId) && !!event.messageId && (!turnId || event.turnId === turnId ||
       (turnId.startsWith('reply:') && event.messageId === turnId.slice(6))));
   if (!final || final.kind !== 'assistant_message' || !final.messageId) return null;
   const seq = final.finalContentSeq ?? positionOf(final);
@@ -1740,7 +1677,7 @@ async function readRecentEventsFromDisk(
   sessionId: string,
   limit: number,
   options: Pick<ReadOptions, 'kinds' | 'agent'> & {
-    maxBytes?: number; before?: number; acceptEvent?: (event: SessionEvent) => boolean; orderByOrigin?: boolean
+    maxBytes?: number; before?: number; after?: number; acceptEvent?: (event: SessionEvent) => boolean; orderByOrigin?: boolean
   } = {}
 ): Promise<SessionEvent[]> {
   const cap = Math.max(1, Math.min(MAX_EVENT_TAIL, Math.floor(limit)));
@@ -1757,13 +1694,18 @@ async function readRecentEventsFromDisk(
   // the row cap or a long old answer can hide every earlier user turn from Goal/history tails.
   const legacyMessageKeys = new Set<string>();
   const rawTail: SessionEvent[] = [];
+  const sequence = options.orderByOrigin ? positionOf : workSequence;
+  const forward = options.after !== undefined;
+  let replaced = 0;
+  let reachedStart = false;
+  const scanning = () => !reachedStart && (forward || rawTail.length < cap);
   let damaged = 0;
   // Explicit history navigation may seek beyond the recent-tail budget. It streams backwards
   // in fixed chunks and retains only this page, never materializing the complete journal.
-  const readBudget = options.before === undefined ? Math.max(64 * 1024, Math.min(MAX_RECENT_READ_BYTES, options.maxBytes ?? MAX_RECENT_READ_BYTES)) : Number.POSITIVE_INFINITY;
+  const readBudget = options.before === undefined && !forward ? Math.max(64 * 1024, Math.min(MAX_RECENT_READ_BYTES, options.maxBytes ?? MAX_RECENT_READ_BYTES)) : Number.POSITIVE_INFINITY;
 
   const accept = (line: Buffer): void => {
-    if (rawTail.length >= cap || line.length === 0) return;
+    if (!scanning() || line.length === 0) return;
     if (line.length > MAX_LINE_BYTES) {
       damaged += 1;
       return;
@@ -1779,7 +1721,11 @@ async function readRecentEventsFromDisk(
       damaged += 1;
       return;
     }
-    if (options.before !== undefined && parsed.seq >= options.before) return;
+    // Journal sequence is append ordered. Canonical revisions are joined below;
+    // crossing the forward origin boundary retires this backwards scan.
+    if (forward && parsed.seq <= options.after!) { reachedStart = true; return; }
+    if (options.before !== undefined && sequence(parsed) >= options.before) return;
+    if (forward && sequence(parsed) <= options.after!) return;
     if (options.kinds && !options.kinds.includes(parsed.kind)) return;
     if (options.agent && parsed.agent !== options.agent) return;
     if (options.acceptEvent && !options.acceptEvent(parsed)) return;
@@ -1790,28 +1736,62 @@ async function readRecentEventsFromDisk(
         legacyMessageKeys.add(key);
       }
     }
-    rawTail.push(parsed);
+    if (rawTail.length < cap) rawTail.push(parsed);
+    else rawTail[replaced++ % cap] = parsed;
   };
 
-  await scanJournalBackwards(sessionId, accept, {
-    done: () => rawTail.length >= cap,
-    maxBytes: readBudget,
-    onDamaged: () => {
-      damaged += 1;
+  const file = path.join(sessionDir(sessionId), 'events.jsonl');
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    handle = await fs.open(file, 'r');
+    let cursor = (await handle.stat()).size;
+    let bytes = 0;
+    let carry = Buffer.alloc(0);
+    while (cursor > 0 && scanning() && bytes < readBudget) {
+      const wanted = Math.min(64 * 1024, cursor, readBudget - bytes);
+      if (wanted <= 0) break;
+      cursor -= wanted;
+      const buffer = Buffer.allocUnsafe(wanted);
+      const { bytesRead } = await handle.read(buffer, 0, wanted, cursor);
+      const joined = Buffer.concat([buffer.subarray(0, bytesRead), carry]);
+      bytes += bytesRead;
+      const firstNewline = joined.indexOf(0x0a);
+      if (firstNewline < 0) {
+        // A corrupt/no-newline tail used to repeatedly copy the complete 8 MiB budget:
+        // 64 KiB + 128 KiB + ... . Retain only one maximum event while seeking a boundary.
+        if (joined.length > MAX_LINE_BYTES + 1) damaged += 1;
+        carry = joined.subarray(0, Math.min(joined.length, MAX_LINE_BYTES + 1));
+        continue;
+      }
+      carry = joined.subarray(0, firstNewline);
+      const complete = joined.subarray(firstNewline + 1);
+      let endAt = complete.length;
+      for (let at = complete.length - 1; at >= 0 && scanning(); at--) {
+        if (complete[at] !== 0x0a) continue;
+        const line = complete.subarray(at + 1, endAt);
+        if (line.length > 0) accept(line);
+        endAt = at;
+      }
+      if (scanning() && endAt > 0) accept(complete.subarray(0, endAt));
     }
-  });
+    if (cursor === 0 && scanning() && carry.length > 0) accept(carry);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 
   const candidates: SessionEvent[] = [...rawTail];
   for (const message of messages.values()) {
-    if (options.before !== undefined && workSequence(message) >= options.before) continue;
+    if (options.before !== undefined && sequence(message) >= options.before) continue;
+    if (forward && sequence(message) <= options.after!) continue;
     if (options.kinds && !options.kinds.includes(message.kind)) continue;
     if (options.agent && message.agent !== options.agent) continue;
     if (options.acceptEvent && !options.acceptEvent(message)) continue;
     candidates.push(message);
   }
-  const sequence = options.orderByOrigin ? positionOf : workSequence;
   candidates.sort((left, right) => sequence(left) - sequence(right));
-  const selected = candidates.slice(Math.max(0, candidates.length - cap));
+  const selected = forward ? candidates.slice(0, cap) : candidates.slice(Math.max(0, candidates.length - cap));
   if (damaged > 0) logWarn(`session ${sessionId}: skipped ${damaged} unreadable recent event line(s)`);
   return chronological(selected);
 }
