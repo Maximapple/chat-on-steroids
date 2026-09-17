@@ -6621,6 +6621,18 @@ describe('unattributed activity recovery', () => {
       expect(getLog().some((entry) =>
         entry.message.includes('is a page that stopped reporting — asking the browser to reload'))).toBe(true);
       expect(getLog().some((entry) => entry.message.includes('is a stalled browser tab'))).toBe(false);
+
+      // And the reload is bounded. The first version had a cadence and no ceiling, so a page a
+      // reload cannot repair was reloaded every three minutes for as long as it kept calling
+      // tools — each one interrupting a live page. Three fresh documents that still report no
+      // turn are not a case a fourth fixes; the silence watch spends the same three.
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await vi.advanceTimersByTimeAsync(3 * 60_000);
+        await attributed(PRIME);
+      }
+      expect(getLog().some((entry) => entry.message.includes('did not report a turn after 3 reloads'))).toBe(true);
+      expect(getLog().filter((entry) =>
+        entry.message.includes('is a page that stopped reporting'))).toHaveLength(3);
     } finally {
       vi.useRealTimers();
     }
