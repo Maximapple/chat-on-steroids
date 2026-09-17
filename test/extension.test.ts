@@ -1228,6 +1228,51 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     expect(asked).toEqual(['status', 'status', 'status']);
   });
 
+  /**
+   * The tab a handoff is still finishing, and the moment protection used to end.
+   *
+   * A tab this worker opens for a command is held non-discardable while it still carries its
+   * `clf=` marker and has no conversation of its own. For a resume that is the wrong half of the
+   * window. ChatGPT names the conversation the instant it accepts the brief, and the handoff is
+   * not done there: the page still has to reconcile that marker out of its own transcript before
+   * the app can commit. Protection ended exactly then, Chrome discarded the background tab, and
+   * content.js went with it — while the turn ran on server-side and kept calling tools through
+   * the app, so the work looked alive with nobody watching. A page reporting no turns can never
+   * reconcile the marker, so the handoff could not commit, so the chat never became one the app
+   * protects: a closed loop, measured four times on 2026-09-16/17.
+   *
+   * Retirement ends it, the app taking the chat over ends it, and so does the deadline, so a
+   * command that neither lands nor retires cannot pin a tab for hours.
+   */
+  it('keeps the tab it opened for a handoff protected until that command is retired', async () => {
+    let retiredCommands: string[] = [];
+    const fetch = vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/status') return response(200, { ok: true, repairs: [], retiredCommands });
+      return response(404, {});
+    });
+    const session = new FakeStorageArea({
+      commandTabs: { '71': { id: 'cmd-handoff', at: Date.now() } },
+      discardProtectedTabs: { '71': true }
+    });
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session, fetch });
+    // ChatGPT has accepted the brief and named the chat, so the `clf=` marker is gone.
+    await worker.createTab({ id: 71, url: `https://chatgpt.com/c/${CHAT}`, autoDiscardable: false });
+    await worker.fireAlarm();
+
+    const handedBack = () =>
+      worker.tabsUpdate.mock.calls.filter(
+        (call) => call[1] && typeof call[1] === 'object' && (call[1] as { autoDiscardable?: boolean }).autoDiscardable === true
+      );
+    expect(handedBack()).toEqual([]);
+
+    // The app gives the command up: there is nothing left for this page to reconcile.
+    retiredCommands = ['cmd-handoff'];
+    await worker.fireAlarm();
+    expect(handedBack()).toEqual([[71, { autoDiscardable: true }]]);
+  });
+
   it('asks nobody while it is not paired', async () => {
     const { fetch, asked } = appWith(null);
     const worker = loadWorker({ local: new FakeStorageArea({}), session: new FakeStorageArea(), fetch });
