@@ -6565,6 +6565,28 @@ describe('unattributed activity recovery', () => {
    * the turn finally died. A tool call only happens inside a turn, so a call arriving while the
    * app holds no turn for that chat is a contradiction, not a quiet page.
    */
+  it('reloads the chat whose calls arrive with no turn its page ever reported', async () => {
+    // Reporting was half the job. `queueStalledTabRecovery` can repair exactly this page, and
+    // declined it: its `working` gate reads the page's account of the turn, which is the half
+    // that is broken — `no turn is running in it` is what a blind page always looks like. The
+    // app's own evidence settles it instead, because a tool call happens only inside a turn.
+    vi.useFakeTimers();
+    try {
+      await pair();
+      await attributed(PRIME);
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      await attributed(PRIME);
+      await vi.waitFor(() => expect(getLog().some((entry) =>
+        entry.message.includes('asking the browser to reload the exact chat once'))).toBe(true));
+      // And it is the reload path, not a notice: the same line the extension's stalled-shell
+      // report produces. Deduplication belongs to `queueBrowserRecovery` and is covered with it;
+      // this fixture's clock jumps hours per synthetic call, so counting here would test that.
+      expect(getLog().some((entry) => entry.message.includes('is a stalled browser tab'))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('tells the user about a chat whose calls arrive with no turn its page ever reported', async () => {
     vi.useFakeTimers();
     const seen: Array<{ title: string; body: string }> = [];
