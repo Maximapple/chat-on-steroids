@@ -3217,7 +3217,12 @@ const HANDLERS = {
     const query =
       `?conversationId=${encodeURIComponent(message.conversationId)}` +
       `&since=${Number(message.since) || 0}` +
-      `&goalClient=${encodeURIComponent(String(source.tab))}`;
+      `&goalClient=${encodeURIComponent(String(source.tab))}` +
+      // Forwarded verbatim, and only the three words the page may say. The join between these
+      // three files is where two checkpoint fields have already been lost with every unit test
+      // still green — see scripts/verify-compact-chain.mjs — so an unrecognised value is
+      // dropped here rather than passed on for the app to validate a second time.
+      (['absent', 'empty', 'ok'].includes(message.fiber) ? `&fiber=${message.fiber}` : '');
     const result = await call(`/activity${query}`);
     if (ownsDocument(source) && result.ok && result.data && await acceptBrowserRevival(result.data.revival)) {
       await recoverDeferredRevivals();
