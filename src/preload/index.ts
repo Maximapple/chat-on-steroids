@@ -7,6 +7,7 @@ import type { InputAttachment } from '../shared/input.js';
 import type { UsageOverview } from '../shared/usage.js';
 import type { InputArgs, InputEntry } from '../main/session/input.js';
 import type { LocalProject } from '../shared/projects.js';
+import type { SkillSummary } from '../shared/skills.js';
 import type { PluginSnapshot, PluginInstallRequest, PluginConfigPatch } from '../shared/plugins.js';
 /**
  * The entire renderer-facing API.
@@ -20,6 +21,9 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { AppState, Capabilities, Config, Diagnosis, LogEntry } from '../shared/types.js';
 import type {
   Handoff,
+  ImageStorageClearMode,
+  ImageStorageClearResult,
+  ImageStorageInfo,
   SessionEvent,
   SessionSummary,
   ClearAgentResult,
@@ -94,6 +98,8 @@ const api = {
     return () => ipcRenderer.removeListener('plugins:changed', wrapped);
   },
   chooseFiles: () => call<InputAttachment[]>('sessions:files'),
+  listSkills: () => call<SkillSummary[]>('skills:list'),
+  importSkill: () => call<SkillSummary | null>('skills:import'),
   dropFiles: async (files: File[]): Promise<Reply<InputAttachment[]>> => {
     if (!files.length || files.length > 20) return { ok: false, error: 'Attach up to 20 files per message' };
     try {
@@ -148,6 +154,8 @@ const api = {
   addProject: () => call<LocalProject | null>('projects:add'),
   removeProject: (id: string) => call<LocalProject>('projects:remove', { id }),
   getSessionImage: (id: string, assetId: string) => call<string | null>('sessions:image', { id, assetId }),
+  getImageStorage: () => call<ImageStorageInfo>('sessions:imageStorage'),
+  clearImageStorage: (mode: ImageStorageClearMode) => call<ImageStorageClearResult>('sessions:clearImageStorage', { mode }),
   getSession: (id: string, options?: { from?: number; before?: number; limit?: number }) =>
     call<SessionDetail>('sessions:events', { id, ...options }),
   stopSessionTurn: (id: string, expectedTurnId: string) => call<SessionControlsView>('sessions:stopTurn', { id, expectedTurnId }),
@@ -156,6 +164,11 @@ const api = {
   getChatModels: () => call<ChatModelCatalog>('chatModels:get'),
   browserPreferences: (patch: Partial<BrowserPreferences> = {}) => call<BrowserPreferences>('browser:preferences', patch),
   requestChatModels: () => call<ChatModelCatalog>('chatModels:request'),
+  onToolApprovalNotice: (listener: () => void): (() => void) => {
+    const wrapped = (): void => listener();
+    ipcRenderer.on('setup:toolApprovalNotice', wrapped);
+    return () => ipcRenderer.removeListener('setup:toolApprovalNotice', wrapped);
+  },
   onChatModelsChanged: (listener: (catalog: ChatModelCatalog) => void): (() => void) => {
     const wrapped = (_event: unknown, catalog: ChatModelCatalog): void => listener(catalog);
     ipcRenderer.on('chatModels:changed', wrapped);

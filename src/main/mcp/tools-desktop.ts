@@ -2,13 +2,14 @@
 import type { SurfaceRegistrar } from './kernel.js';
 import { registerMacOSDesktopTools } from './tools-desktop-macos.js';
 import { registerWindowsDesktopTools } from './tools-desktop-windows.js';
-import { registerBrowserTool } from './tools-browser.js';
-
-export { renderBrowserAction } from './tools-browser.js';
+import { registerBrowserTools } from './tools-browser.js';
+import { desktopAutomationSupported } from '../platform.js';
 
 export function registerDesktopTools(reg: SurfaceRegistrar): void {
-  if (process.platform === 'win32') registerWindowsDesktopTools(reg);
-  else registerMacOSDesktopTools(reg);
-  registerBrowserTool(reg);
+  registerBrowserTools(reg);
+  if (desktopAutomationSupported()) {
+    if (process.platform === 'win32') registerWindowsDesktopTools(reg);
+    else registerMacOSDesktopTools(reg);
+  }
 }
 

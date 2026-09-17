@@ -4,9 +4,9 @@ import path from 'node:path';
 import { beforeAll, afterAll, afterEach, expect, it, vi } from 'vitest';
 import { defaultConfig, getConfig, initConfigPath, saveConfig } from '../src/main/config.js';
 import { initDurableStore, flushDurable, resetDurableForTests } from '../src/main/durable.js';
-import { initSessionStore, createSession, readEvents, rebindSession, appendEvent, observeSessionModel, resetSessionStoreForTests } from '../src/main/session/store.js';
+import { initSessionStore, createSession, readSessionPlan, readEvents, rebindSession, appendEvent, observeSessionModel, resetSessionStoreForTests } from '../src/main/session/store.js';
 import { observeRequestCorrelation } from '../src/main/session/correlation.js';
-import { flushRecorder } from '../src/main/session/recorder.js';
+import { flushRecorder, recordChatObservations } from '../src/main/session/recorder.js';
 import { cancelInput, enqueueInput, listInputs, resetInputForTests } from '../src/main/session/input.js';
 import { setChatBlocked, resetBlockedChatsForTests } from '../src/main/session/blocked-chats.js';
 import { startMcpServer, type McpEndpoint } from '../src/main/mcp/server.js';
@@ -39,6 +39,33 @@ async function identity() {
 }
 const call = (requestId: string | undefined, code: string) => rpc('tools/call', { name: 'exec', arguments: { code } }, requestId);
 const text = (response: any) => response.result.content.filter((item: any) => item.type === 'text').map((item: any) => item.text).join('\n');
+
+it.each(['current', 'superseded'] as const)('resolves late session_finish identity before enforcing its %s owner', async state => {
+  const conversationId = randomUUID(), requestId = `wfr_${randomUUID().replaceAll('-', '')}`;
+  const session = await createSession({ conversationId, title: 'Late finish identity' });
+  await appendEvent(session.id, { kind: 'turn_start', source: 'extension', turnId: randomUUID(), time: Date.now() });
+  const input = await enqueueInput({ id: randomUUID(), sessionId: session.id, text: 'CONTINUE_AFTER_FINISH', mode: 'auto', dueAt: 0, model: null, reasoningEffort: null });
+  if (state === 'superseded') expect(await rebindSession(session.id, conversationId, randomUUID())).toBe(true);
+  const proof = setTimeout(() => {
+    observeRequestCorrelation({ requestId, conversationId, sessionId: session.id, messageId: randomUUID(), tool: 'session_finish', observedAt: Date.now() });
+  }, 40);
+  try {
+    const finish = await rpc('tools/call', { name: 'session_finish', arguments: { summary: 'checkpoint complete' } }, requestId);
+    if (state === 'current') {
+      expect(finish.result.isError, text(finish)).not.toBe(true);
+      expect(text(finish)).toContain('HELD:');
+      expect(text(finish)).toContain('CONTINUE_AFTER_FINISH');
+    } else {
+      expect(finish.result.isError).toBe(true);
+      expect(text(finish)).toMatch(/superseded/i);
+      expect(text(finish)).not.toContain('CONTINUE_AFTER_FINISH');
+      expect((await listInputs()).find(row => row.id === input.id)?.state).toBe('queued');
+    }
+  } finally {
+    clearTimeout(proof);
+    await cancelInput(input.id);
+  }
+});
 
 it('delivers one recovered-identity notice on the real structured MCP wire after a refused plan update', async () => {
   const requestId = `wfr_${randomUUID().replaceAll('-', '')}`;
@@ -163,6 +190,37 @@ afterAll(async () => {
   await endpoint.stop(); await unifiedExecManager.terminateAllProcesses(); await flushRecorder(); await flushDurable(); resetInputForTests(); resetSessionStoreForTests(); resetDurableForTests(); await removeTempDir(directory);
 });
 
+it('retires session lookup while recording messages, tools and the exact caller plan', async () => {
+  const who = await identity();
+  const names = (await rpc('tools/list', {})).result.tools.map((tool: any) => tool.name);
+  expect(names).not.toContain('session');
+  expect(names).toContain('update_plan');
+  const observed = await recordChatObservations(who.conversationId, [
+    { kind: 'user_message', time: Date.now(), messageId: randomUUID(), text: 'LOCAL_REQUEST' },
+    { kind: 'assistant_message', time: Date.now(), messageId: randomUUID(), text: 'LOCAL_ANSWER' }
+  ]);
+  expect(observed.sessionId).toBe(who.session.id);
+  expect(text(await call(who.requestId, 'text(ALL_TOOLS.map(tool => tool.name));'))).not.toContain('"session"');
+  const stale = await rpc('tools/call', { name: 'session', arguments: { action: 'search' } }, who.requestId);
+  expect(Boolean(stale.error || stale.result?.isError)).toBe(true);
+  const nested = await call(who.requestId, 'text(await tools.session({action:"search"}));');
+  expect(nested.result.isError).toBe(true);
+  expect(text(nested)).not.toContain('LOCAL_REQUEST');
+  const read = await rpc('tools/call', { name: 'read', arguments: { paths: ['/workspace/alpha.txt'] } }, who.requestId);
+  expect(read.result.isError, text(read)).not.toBe(true);
+  const plan = [{ step: 'Keep recording', status: 'completed' }];
+  const updated = await rpc('tools/call', { name: 'update_plan', arguments: { plan } }, who.requestId);
+  expect(updated.result.isError, text(updated)).not.toBe(true);
+  expect((await readSessionPlan(who.session.id))?.plan).toEqual(plan);
+  await flushRecorder();
+  const events = await readEvents(who.session.id);
+  expect(events.filter(event => event.kind === 'user_message').map(event => event.message.text)).toContain('LOCAL_REQUEST');
+  expect(events.filter(event => event.kind === 'assistant_message').map(event => event.message.text)).toContain('LOCAL_ANSWER');
+  const reads = events.filter(event => event.kind === 'tool_call' && event.call.tool === 'read');
+  expect(reads).toHaveLength(1);
+  expect(JSON.stringify(reads)).toContain('PRIVATE_ALPHA');
+});
+
 it('initializes, discovers and executes the actual model-facing MCP contract with parallel filtering and separate recorded children', async () => {
   const initialize = await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'code-mode-contract-test', version: '1' } });
   expect(initialize.result.instructions).toContain('Code mode:');
@@ -285,8 +343,6 @@ it('rejects missing proof, foreign tools, invalid child arguments and nested lif
   const who = await identity();
   expect(text(await call(who.requestId, 'text([typeof tools.computer,typeof tools.exec])'))).toBe('["undefined","undefined"]');
   expect(text(await call(who.requestId, 'text(await tools.read({paths:1}))'))).toContain('INVALID_ARGUMENTS');
-  const invalidCursor = await call(who.requestId, `text(await tools.session({action:'read', session_id:${JSON.stringify(who.session.id)}, cursor:'opaque', include:['user']}));`);
-  expect(text(invalidCursor)).toContain('do not combine it with include or tool_call');
   for (const code of ['text(await tools.session_finish({summary:"done"}))', 'text(await tools.agents({action:"finish",summary:"done"}))']) {
     expect(text(await call(who.requestId, code))).toContain('DIRECT_CALL_REQUIRED');
   }
@@ -387,7 +443,7 @@ it('uses existing process custody for nested exec and write_stdin across a conve
   const processId = Number(text(started).match(/Process running with session ID (\d+)/)?.[1]);
   expect(Number.isInteger(processId), text(started)).toBe(true);
   const denied = await call(stranger.requestId, `text(await tools.write_stdin({session_id:${processId},chars:"stolen\\r",yield_time_ms:50}));`);
-  expect(text(denied)).toContain('not proven to belong to this durable');
+  expect(text(denied)).toContain('EXEC_SESSION_OWNER_MISMATCH');
   const replacement = randomUUID(), requestId = `wfr_${randomUUID().replaceAll('-', '')}`;
   expect(await rebindSession(a.session.id, a.conversationId, replacement)).toBe(true);
   observeRequestCorrelation({ requestId, conversationId: replacement, sessionId: a.session.id, messageId: randomUUID(), tool: 'exec', observedAt: Date.now() });

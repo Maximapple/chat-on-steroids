@@ -91,6 +91,21 @@ export interface AssetRef {
   height?: number;
 }
 
+/** Recording-asset storage is global; cleanup never changes the configured 2 GiB ceiling. */
+export interface ImageStorageInfo {
+  /** All bytes charged to the global session-asset quota, including preserved non-image assets. */
+  usedBytes: number;
+  limitBytes: number;
+}
+
+export interface ImageStorageClearResult extends ImageStorageInfo {
+  /** Physical image bytes removed by this explicit user operation. */
+  freedBytes: number;
+  removedFiles: number;
+}
+
+export type ImageStorageClearMode = 'oldest-gib' | 'all';
+
 /** Compact human-readable presentation of one tool call. */
 export interface ActivitySummary {
   /** Short verb phrase: "Edited src/main/mcp/server.ts". */
@@ -202,6 +217,8 @@ export interface ToolCallRecord {
   /** Files this call demonstrably changed, with line counts where computable. */
   changes?: FileChange[];
   assets?: AssetRef[];
+  /** Image assets explicitly removed from local recording storage; same-call replay cannot restore them. */
+  retiredImageAssetIds?: string[];
   /**
    * This call was the caller's last word: a worker's successful finish report. Recorded so
    * the session itself, not only the in-memory swarm, knows the worker stopped working here.
@@ -272,8 +289,12 @@ export type SessionEvent =
       inputDelivery?: 'offered' | 'confirmed';
       /** Original app-authored text, excluding transport-only control instructions. */
       authoredText?: string;
+      /** Native badge on this exact user message. Missing means unobserved; null means absent. */
+      reaction?: string | null;
       attachments?: import('./input.js').InputAttachment[];
       assets?: AssetRef[];
+      /** Image assets explicitly removed from local recording storage; same-message replay cannot restore them. */
+      retiredImageAssetIds?: string[];
       /** First sequence assigned to this stable website message; revisions keep this anchor. */
       origin?: number;
     })
@@ -302,7 +323,32 @@ export type SessionEvent =
       goalEligible?: boolean;
       /** Store-owned sequence of the latest final text/state change; rendering/metadata cannot advance it. */
       finalContentSeq?: number;
+      /** Local acceptance time of final content; provider time can predate its last tools. */
+      finalObservedAt?: number;
       /** First sequence assigned to this logical message; later revisions keep this anchor. */
+      origin?: number;
+    })
+  | (BaseEvent & {
+      /** ChatGPT-native generated media, independent of assistant prose and local MCP calls. */
+      kind: 'native_image';
+      /** Exact provider message UUID that owns this output. */
+      messageId: string;
+      /** Stable non-secret id from the typed sediment image pointer. */
+      providerAssetId: string;
+      providerRole: 'tool' | 'assistant';
+      providerChannel?: 'final';
+      /** Exact typed provider lifecycle for this image payload; it is not a turn boundary. */
+      providerStatus?: 'in_progress' | 'finished_successfully';
+      /** Provider-declared source geometry, used only to reserve truthful layout space. */
+      width?: number;
+      height?: number;
+      /** Locally retained preview geometry and content-addressed bytes, when capture succeeded. */
+      previewWidth?: number;
+      previewHeight?: number;
+      previewStatus: 'pending' | 'available' | 'unavailable';
+      previewError?: 'not_loaded' | 'ambiguous' | 'tainted' | 'oversized' | 'invalid' | 'quota' | 'removed';
+      asset?: AssetRef;
+      /** First sequence assigned to this exact provider-message/asset tuple. */
       origin?: number;
     })
   /**
@@ -658,7 +704,9 @@ export interface AgentInfo {
   primeConversationId?: string;
   id: string;
   role: AgentRole;
+  /** Spawn label; reused assignments fall back to the stable worker id. */
   label: string;
+  /** Spawn brief, or a bounded inbox preview for the current reused assignment. */
   task: string;
   /**
    * Requested reasoning level for this worker's chat, or null to inherit the default.
@@ -686,7 +734,7 @@ export interface AgentInfo {
    */
   activatedAt: number | null;
   finishedAt: number | null;
-  /** Result text the worker reported when it finished. */
+  /** Current completion report; cleared when work resumes. Prior reports remain in history/inbox. */
   result: string | null;
   /** Messages waiting for this agent, including offered-but-unacknowledged ones. */
   pending: number;

@@ -48,7 +48,11 @@ describe('open upstream issue hardening bundle', () => {
     // buys no time. Pin that instead — the weaker rule must not come back.
     expect(continuation).toContain('Only growth of this exact marked response renews');
     expect(continuation).not.toContain('export function touchContinuation');
-    expect(continuation).toContain('now - entry.touchedAt >= CONTINUATION_TTL_MS');
+    // 2.1.13 moved the same rule into `expired()` and gave a Pro brief a longer writing budget.
+    // What is pinned is unchanged: the manual clock reads touchedAt, so only real progress on
+    // the marked response renews it.
+    expect(continuation).toContain('now - entry.touchedAt >= manualWaitingTtlMs(');
+    expect(continuation).toContain('CONTINUATION_TTL_MS');
   });
 
   it('projects returned background exec lifecycle separately from pending MCP handlers', () => {

@@ -11,10 +11,12 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
+import sharp from 'sharp';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { APP_VERSION, BRIDGE_PROTOCOL, BUILD_VERSION } from '../src/main/version.js';
 import { userPromptText } from '../src/shared/user-prompt.js';
 import { currentCoreInstructions } from '../src/main/mcp/instructions.js';
+import { browserControl } from '../src/main/browser-control.js';
 import { foldProgress, type SessionEvent } from '../src/shared/session.js';
 import type { ContinuationSnapshot } from '../src/main/session/continuation.js';
 import type { SwarmSnapshot } from '../src/main/agents.js';
@@ -81,7 +83,6 @@ const {
   unpair
 } = await import('../src/main/bridge.js');
 const { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } = await import('../src/main/durable.js');
-const { runBrowserCommand, resetBrowserControlForTests } = await import('../src/main/browser-control.js');
 const {
   GOAL_OBJECTIVES_STATE,
   GOAL_REPLIES_STATE,
@@ -97,9 +98,11 @@ const {
   resetGoalStateForTests,
   setGoalObjective
 } = await import('../src/main/goal.js');
-const { createSession, deleteSession, findSessionByConversation, getSession, initSessionStore, readEvents, resetSessionStoreForTests } = await import(
+const { completeProcessCall, createSession, deleteSession, findSessionByConversation, getSession,
+  initSessionStore, readEvents, recordProcessCall, resetSessionStoreForTests } = await import(
   '../src/main/session/store.js'
 );
+const sessionStoreModule = await import('../src/main/session/store.js');
 const { closeConversation, liveConversations, noteChatOrigin, recordChatObservations, recordProgress, recordToolCall, REQUEST_ID_GRACE_MS, resetRecorderForTests } = await import('../src/main/session/recorder.js');
 const { resetBlockedChatsForTests, setChatBlocked } = await import('../src/main/session/blocked-chats.js');
 const { emptyEvidence, runningToolCalls, trackInFlight } = await import('../src/main/mcp/call-context.js');
@@ -120,6 +123,7 @@ const {
   agentInfoForOwnedConversation,
   PRIME_ID,
   beginPrimeTransfer,
+  commitPrimeTransfer,
   bindConversation,
   cancelPrimeTransfer,
   finishAgent,
@@ -322,7 +326,7 @@ async function redeem(id?: string, client = 'tab-1'): Promise<any> {
     id = new URL(opened[index]!).searchParams.get('clf')!;
   }
   const reply = await request('POST', '/commands/redeem', { body: { id, client } });
-  expect(reply.status, `redeem ${id} failed`).toBe(200);
+  expect(reply.status, `redeem ${id} failed: ${JSON.stringify(reply.body)}`).toBe(200);
   return reply.body.command;
 }
 
@@ -388,6 +392,47 @@ beforeEach(async () => {
 });
 
 // ------------------------------------------------------------------ origin
+
+describe('direct browser control over the paired bridge', () => {
+  it('requires extension authentication and transfers each exact command once', async () => {
+    browserControl.reset();
+    const browserId = randomUUID();
+    const poll = { action:'poll',browserId,name:'Fixture',enabled:true };
+    expect((await request('POST','/browser-control',{auth:null,body:poll})).status).toBe(401);
+    await pair();
+    expect((await request('POST','/browser-control',{origin:'https://example.test',body:poll})).status).toBe(403);
+    const hello = await request('POST','/browser-control',{body:poll});expect(hello.status).toBe(200);
+    const result = browserControl.execute('browser_snapshot',{tabId:`${browserId}:12`},'session:browser-fixture',null,async()=>true);
+    try {
+      const list = await request('POST','/browser-control',{body:poll});
+      const claim = {action:'claim',browserId,id:list.body.requests[0],epoch:hello.body.epoch};
+      const claimed = await request('POST','/browser-control',{body:claim});
+      expect(claimed.body.command).toMatchObject({owner:'session:browser-fixture',args:{tabId:12}});
+      expect((await request('POST','/browser-control',{body:claim})).status).toBe(409);
+      const receipt = {...claim,action:'result',result:{value:{text:'fixture DOM'}}};
+      expect((await request('POST','/browser-control',{body:{...receipt,browserId:randomUUID()}})).status).toBe(409);
+      expect((await request('POST','/browser-control',{body:receipt})).status).toBe(200);
+      expect(await result).toEqual(receipt.result);
+      expect((await request('POST','/browser-control',{body:receipt})).status).toBe(409);
+    } finally {browserControl.reset();await result;}
+  });
+
+  it('projects read-only policy and rechecks permission after handout', async () => {
+    browserControl.reset();await pair();
+    await saveConfig({...suiteConfig,readOnly:false,capabilities:{...suiteConfig.capabilities,screen:true,control:true}});
+    const browserId=randomUUID(),poll={action:'poll',browserId,name:'Fixture',enabled:true};
+    const hello=await request('POST','/browser-control',{body:poll});
+    const result=browserControl.execute('browser_action',{tabId:`${browserId}:12`,pageId:'p',action:'click'},'session:browser-fixture',null,async()=>!getConfig().readOnly);
+    try {
+      const list=await request('POST','/browser-control',{body:poll});
+      const command={browserId,id:list.body.requests[0],epoch:hello.body.epoch};
+      expect((await request('POST','/browser-control',{body:{...command,action:'claim'}})).status).toBe(200);
+      await saveConfig({...getConfig(),readOnly:true});
+      expect((await request('POST','/browser-control',{body:poll})).body.policy).toEqual({read:true,write:false});
+      expect((await request('POST','/browser-control',{body:{...command,action:'check'}})).body.allowed).toBe(false);
+    } finally {browserControl.reset();await result;}
+  });
+});
 
 describe('who is allowed to talk to it', () => {
   it('pushes newly detected incompatible extension versions without granting browser presence', async () => {
@@ -774,6 +819,24 @@ describe('authorisation', () => {
 // ------------------------------------------------------------------ events
 
 describe('observations', () => {
+  it('persists bounded native reactions on the exact canonical user message and preserves sparse replays', async () => {
+    await pair();
+    const conversationId = 'f0f00003-1111-4111-8111-111111111119';
+    const user = { kind: 'user_message', time: Date.now(), text: 'Question', messageId: 'reaction-user' };
+    const send = (events: unknown[]) => request('POST', '/events', { body: { conversationId, events } });
+    const first = await send([user, { ...user, messageId: 'other-user' }]);
+    const before = (await readEvents(first.body.sessionId, { kinds: ['user_message'] }))[0]!;
+    await send([{ ...user, reaction: '😂' }]);
+    await send([user, { ...user, reaction: '<script>' }, { ...user, reaction: '😂'.repeat(100) }]);
+    let rows = await readEvents(first.body.sessionId, { kinds: ['user_message'] });
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ messageId: user.messageId, reaction: '😂', origin: before.seq, time: before.time });
+    expect(rows[1]).not.toHaveProperty('reaction');
+    await send([{ ...user, reaction: null }]);
+    rows = await readEvents(first.body.sessionId, { kinds: ['user_message'] });
+    expect(rows[0]).toMatchObject({ reaction: null, origin: before.seq });
+  });
+
   it('refuses anything that is not a conversation id', async () => {
     await pair();
     for (const conversationId of ['', 'not a uuid', '../../etc', 'x'.repeat(100)]) {
@@ -850,6 +913,104 @@ describe('observations', () => {
     expect(first.body.stored).toBe(1);
     expect(second.body.stored).toBe(0);
     expect(await readEvents(first.body.sessionId, { kinds: ['user_message'] })).toHaveLength(1);
+  });
+
+  it('anchors and independently enriches multiple exact native generated images without activity effects', async () => {
+    await pair();
+    const conversationId = '21111111-2222-4333-8444-555555555555';
+    const make = async (color: string, width: number, height: number) => {
+      const bytes = await sharp({ create: { width, height, channels: 3, background: color } }).webp().toBuffer();
+      return `data:image/webp;base64,${bytes.toString('base64')}`;
+    };
+    const messageId = '3150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const images = [
+      { providerAssetId: 'file_000000005f2c823085a542762d1de785', previewWidth: 12, previewHeight: 8, previewDataUrl: await make('#0055ff', 12, 8) },
+      { providerAssetId: 'file_00000000dc58821198efef946a9ade33', previewWidth: 9, previewHeight: 11, previewDataUrl: await make('#ff6600', 9, 11) }
+    ];
+    const reply = await request('POST', '/events', { body: { conversationId, events: images.flatMap((image, index) => [
+      { kind: 'native_image', time: 1789552000000 + index, messageId, providerAssetId: image.providerAssetId,
+        providerRole: 'tool', providerChannel: 'final', providerStatus: 'finished_successfully', width: 1254, height: 1254, previewStatus: 'pending' },
+      { kind: 'native_image', time: 1789552000100 + index, messageId, providerAssetId: image.providerAssetId,
+        providerRole: 'tool', providerChannel: 'final', providerStatus: 'finished_successfully', width: 1254, height: 1254, previewStatus: 'available',
+        previewWidth: image.previewWidth, previewHeight: image.previewHeight, previewDataUrl: image.previewDataUrl,
+        src: 'https://chatgpt.com/backend-api/estuary/content?id=must-not-persist&sig=private' }
+    ]) } });
+
+    expect(reply.status).toBe(200);
+    const stored = await readEvents(reply.body.sessionId, { kinds: ['native_image'] });
+    expect(stored).toHaveLength(2);
+    expect(stored.map(event => event.kind === 'native_image' && event.providerAssetId)).toEqual(images.map(image => image.providerAssetId));
+    expect(stored.every(event => event.kind === 'native_image' && event.previewStatus === 'available' && event.asset?.mimeType === 'image/webp')).toBe(true);
+    expect(JSON.stringify(stored)).not.toContain('estuary');
+    expect(JSON.stringify(stored)).not.toContain('private');
+    const feed = await request('GET', `/activity?conversationId=${conversationId}&since=0`);
+    expect(feed.body.entries).toEqual([]);
+    expect(feed.body.stream.filter((entry: any) => entry.kind === 'native_image')).toEqual([]);
+
+    const oversized = await request('POST', '/events', { body: { conversationId, events: [{
+      kind: 'native_image', time: 1789552000200, messageId,
+      providerAssetId: 'file_00000000000000000000000000000099', providerRole: 'tool', providerChannel: 'final',
+      providerStatus: 'finished_successfully', width: 30_000, height: 30_000, previewStatus: 'available',
+      previewWidth: 12, previewHeight: 8, previewDataUrl: await make('#ffffff', 12, 8)
+    }] } });
+    expect(oversized.status).toBe(200);
+    const oversizedRow = (await readEvents(reply.body.sessionId, { kinds: ['native_image'] }))
+      .find(event => event.kind === 'native_image' && event.providerAssetId.endsWith('99'));
+    expect(oversizedRow).toMatchObject({ width: 30_000, height: 30_000, previewStatus: 'unavailable', previewError: 'oversized' });
+    expect(oversizedRow && oversizedRow.kind === 'native_image' ? oversizedRow.asset : undefined).toBeUndefined();
+
+    const quotaWrite = vi.spyOn(sessionStoreModule, 'writeAsset').mockRejectedValueOnce(new Error('Global session asset quota exceeded'));
+    try {
+      const quota = await request('POST', '/events', { body: { conversationId, events: [{
+        kind: 'native_image', time: 1789552000300, messageId,
+        providerAssetId: 'file_00000000000000000000000000000098', providerRole: 'tool', providerChannel: 'final',
+        providerStatus: 'finished_successfully', width: 1254, height: 1254, previewStatus: 'available',
+        previewWidth: 12, previewHeight: 8, previewDataUrl: await make('#aaaaaa', 12, 8)
+      }] } });
+      expect(quota.status).toBe(200);
+    } finally {
+      quotaWrite.mockRestore();
+    }
+    const quotaRow = (await readEvents(reply.body.sessionId, { kinds: ['native_image'] }))
+      .find(event => event.kind === 'native_image' && event.providerAssetId.endsWith('98'));
+    expect(quotaRow).toMatchObject({ previewStatus: 'unavailable', previewError: 'quota' });
+    expect(quotaRow && quotaRow.kind === 'native_image' ? quotaRow.asset : undefined).toBeUndefined();
+  });
+
+  it('retains native-image metadata but refuses preview bytes before final provider status', async () => {
+    await pair();
+    const conversationId = '21111111-2222-4333-8444-666666666666';
+    const messageId = '4150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const bytes = await sharp({ create: { width: 12, height: 8, channels: 3, background: '#4477aa' } }).webp().toBuffer();
+    const previewDataUrl = `data:image/webp;base64,${bytes.toString('base64')}`;
+    const events = [
+      { providerAssetId: 'file_00000000000000000000000000000081', providerStatus: 'in_progress' },
+      { providerAssetId: 'file_00000000000000000000000000000082' }
+    ].map((image, index) => ({
+      kind: 'native_image', time: 1789552000400 + index, messageId,
+      providerAssetId: image.providerAssetId, providerRole: 'tool', providerChannel: 'final',
+      ...(image.providerStatus ? { providerStatus: image.providerStatus } : {}),
+      width: 1254, height: 1254, previewStatus: 'available', previewWidth: 12, previewHeight: 8, previewDataUrl
+    }));
+
+    const reply = await request('POST', '/events', { body: { conversationId, events } });
+    expect(reply.status).toBe(200);
+    const rows = (await readEvents(reply.body.sessionId, { kinds: ['native_image'] }))
+      .filter(event => event.kind === 'native_image');
+    expect(rows).toHaveLength(2);
+    expect(rows.map(row => ({ id: row.providerAssetId, status: row.providerStatus, preview: row.previewStatus, asset: row.asset }))).toEqual([
+      { id: events[0]!.providerAssetId, status: 'in_progress', preview: 'pending', asset: undefined },
+      { id: events[1]!.providerAssetId, status: undefined, preview: 'pending', asset: undefined }
+    ]);
+
+    const final = await request('POST', '/events', { body: { conversationId, events: [{
+      ...events[0], time: 1789552000500, providerStatus: 'finished_successfully'
+    }] } });
+    expect(final.status).toBe(200);
+    const enriched = (await readEvents(reply.body.sessionId, { kinds: ['native_image'] }))
+      .find(event => event.kind === 'native_image' && event.providerAssetId === events[0]!.providerAssetId);
+    expect(enriched).toMatchObject({ providerStatus: 'finished_successfully', previewStatus: 'available',
+      asset: { mimeType: 'image/webp', bytes: bytes.length } });
   });
 
   it('refuses an over-sized body with an answer, not a reset connection', async () => {
@@ -959,6 +1120,48 @@ describe('activity feed', () => {
       attributionMethod: 'request_id'
     });
   });
+  it('keeps bind, first correlation and ACK on the reserved opening session', async () => {
+    await pair();
+    const input = await import('../src/main/session/input.js');
+    input.resetInputForTests();
+    await writeDurableNow('session-input', []);
+    const id = randomUUID();
+    const owner = '31:fresh-opening-document:0';
+    const conversationId = '24242424-4646-4848-8a8a-626262626262';
+    const requestId = 'wfr_reserved_opening_first_call';
+    try {
+      const row = await input.enqueueInput({ id, sessionId: null, text: 'Open the exact reserved task', mode: 'auto',
+        dueAt: Date.now(), model: null, reasoningEffort: null });
+      expect(row).toMatchObject({ id, sessionId: id, opening: true, conversationId: null });
+      expect((await request('POST', '/input/claim', { body: {
+        id, owner, conversationId: null, requiresAuthorization: true
+      } })).body.input).toMatchObject({ id, owner, opening: true });
+      expect((await request('POST', '/input/claim', { body: {
+        id, owner, conversationId: null, authorize: true
+      } })).body).toEqual({ ok: true });
+
+      expect((await request('POST', '/input/bind', { body: { id, owner, conversationId } })).body).toEqual({ ok: true });
+      const mapped = await request('POST', '/correlations', { body: { conversationId, calls: [{
+        messageId: 'reserved-opening-call', tool: 'read', order: 0, answered: false,
+        requestId, createTime: Date.now() / 1000
+      }] } });
+      expect(mapped.body).toMatchObject({ ok: true, sessionId: id, confirmed: [requestId], complete: true });
+      expect((await request('POST', '/input/ack', { body: {
+        id, owner, conversationId, messageId: 'reserved-opening-user'
+      } })).body).toEqual({ ok: true });
+
+      expect(await findSessionByConversation(conversationId, { requireUnique: true })).toMatchObject({
+        id, conversationId, title: 'Open the exact reserved task'
+      });
+      expect(await getSession(id)).toMatchObject({ conversationId, chatIds: [conversationId] });
+      expect((await input.listInputs()).find(entry => entry.id === id)).toMatchObject({
+        state: 'sent', deliveredSessionId: id, conversationId, messageId: 'reserved-opening-user'
+      });
+    } finally {
+      await writeDurableNow('session-input', []);
+      input.resetInputForTests();
+    }
+  });
   it('registers a request id the page could not yet name a tool for', async () => {
     await pair();
     const conversationId = '16161616-3838-6060-8282-949494949494';
@@ -1063,6 +1266,34 @@ describe('activity feed', () => {
     expect(secondCalls).toEqual([]);
   });
 
+  it('preserves complete logical message identities and projects their exact provider aliases', async () => {
+    await pair();
+    const conversationId = '99999999-8888-7777-6666-555555555551';
+    const prefix = 'assistant:' + 'a'.repeat(179);
+    const ids = [prefix + 'x', prefix + 'y'];
+    expect(ids[0]).toHaveLength(190);
+    const providers = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
+    const result = await request('POST', '/events', { body: { conversationId, events: [
+      ...ids.map((messageId, index) => ({ kind: 'assistant_message', messageId, providerMessageId: providers[index],
+        time: Date.now(), text: `Message ${index}`, state: 'streaming' })),
+      { kind: 'assistant_message', messageId: ids[0] + 'overflow', time: Date.now(), text: 'Must not alias' }
+    ] } });
+    const first = await readEvents(result.body.sessionId, { kinds: ['assistant_message'] });
+    expect(first.map(event => event.kind === 'assistant_message' && event.messageId)).toEqual(ids);
+    const origin = first[0]!.seq;
+    await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'assistant_message', messageId: 'renamed-logical-message', providerMessageId: providers[0],
+        time: Date.now(), text: 'Updated through exact provider identity', state: 'streaming' }
+    ] } });
+    const reply = await request('GET', `/activity?conversationId=${conversationId}&since=0`);
+    const messages = reply.body.stream.filter((row: any) => row.kind === 'assistant_message');
+    expect(messages).toHaveLength(2);
+    expect(messages.find((row: any) => row.providerMessageId === providers[0])).toMatchObject({
+      messageId: ids[0], origin, text: 'Updated through exact provider identity'
+    });
+    expect(messages.find((row: any) => row.providerMessageId === providers[1])).toMatchObject({ messageId: ids[1] });
+  });
+
   it('hands back an app-owned render stream plus legacy tool summaries, with no raw tool I/O', async () => {
     await pair();
     const conversationId = '99999999-8888-7777-6666-555555555555';
@@ -1126,7 +1357,190 @@ describe('activity feed', () => {
     });
     expect(reply.body.stream[2]).not.toHaveProperty('args');
     expect(reply.body.stream[2]).not.toHaveProperty('result');
+    expect(reply.body.stream[2].detailRevision).toBeGreaterThan(0);
+    expect(reply.body.stream[2].displayOutcome).toEqual({ code: 'completed', label: 'completed' });
     expect(reply.body.generating).toBe(true);
+
+    const detail = await request('POST', '/activity/detail', { body: {
+      conversationId, callId: reply.body.stream[2].callId, detailRevision: reply.body.stream[2].detailRevision
+    } });
+    expect(detail.status).toBe(200);
+    expect(detail.body).toMatchObject({ ok: true, conversationId, callId: reply.body.stream[2].callId,
+      detailRevision: reply.body.stream[2].detailRevision, tool: 'apply_patch',
+      outcome: { code: 'completed', label: 'completed' },
+      args: { truncated: false }, result: { text: 'edited', truncated: false } });
+    expect(detail.body.args.text).toContain('*** Begin Patch');
+    expect(detail.body).not.toHaveProperty('requestId');
+    expect(JSON.stringify(detail.body)).not.toMatch(/assetId|assets/);
+  });
+
+  it('returns only one bounded redacted readable call preview and refuses cross-conversation disclosure', async () => {
+    await pair();
+    const conversationId = '78787878-6767-5656-4545-343434343434';
+    const otherConversation = '89898989-7878-6767-5656-454545454545';
+    await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: Date.now(), turnId: 'detail-turn' }
+    ] } });
+    await recordToolCall({
+      tool: 'plugin_fixture',
+      args: { query: 'visible', secret: 'DETAIL_SECRET_SENTINEL', payload: 'q'.repeat(9_000) },
+      content: [{ type: 'text', text: `Readable plugin text data:image/png;base64,${'C'.repeat(300)}` }],
+      protocolResult: { content: [
+        { type: 'text', text: 'Readable plugin text' },
+        { type: 'resource', resource: { text: 'Readable resource text' } },
+        { type: 'image', data: 'A'.repeat(2_000), mimeType: 'image/png' }
+      ] },
+      outcome: 'ok', durationMs: 4, startedAt: Date.now(), requestId: 'wfr_detail_projection', conversationId
+    });
+    await recordToolCall({
+      tool: 'plugin_fixture',
+      // This field is longer than the bounded stored prefix, so the preview ends inside the
+      // quoted binary body without a closing quote.
+      args: { dataBase64: 'B'.repeat(9_000) },
+      content: [{ type: 'text', text: 'binary args fixture' }],
+      outcome: 'ok', durationMs: 2, startedAt: Date.now(), requestId: 'wfr_detail_truncated_binary', conversationId
+    });
+    const feed = await request('GET', `/activity?conversationId=${conversationId}&since=0`);
+    const rows = feed.body.stream.filter((entry: any) => entry.kind === 'tool_call');
+    const row = rows[0];
+    expect(row).toBeTruthy();
+    expect(row).not.toHaveProperty('args');
+    expect(row).not.toHaveProperty('result');
+
+    const detail = await request('POST', '/activity/detail', { body: {
+      conversationId, callId: row.callId, detailRevision: row.detailRevision
+    } });
+    expect(detail.body.ok).toBe(true);
+    expect(detail.body.args.text.length).toBeLessThanOrEqual(8_000);
+    expect(detail.body.args).toMatchObject({ truncated: true, chars: expect.any(Number) });
+    expect(detail.body.result.text).toContain('Readable plugin text');
+    expect(detail.body.result.text).toContain('Readable resource text');
+    expect(detail.body.result.text).toContain('binary payload omitted');
+    expect(detail.body.args.text).toContain('q'.repeat(256));
+    const serialized = JSON.stringify(detail.body);
+    expect(serialized).not.toContain('DETAIL_SECRET_SENTINEL');
+    expect(serialized).not.toContain('A'.repeat(128));
+    expect(serialized).not.toMatch(/assetId|assets|more characters stored in full as/);
+
+    const binaryArgs = await request('POST', '/activity/detail', { body: {
+      conversationId, callId: rows[1].callId, detailRevision: rows[1].detailRevision
+    } });
+    expect(binaryArgs.body.args.text).toContain('binary payload omitted');
+    expect(binaryArgs.body.args.text).not.toContain('B'.repeat(128));
+    expect(JSON.stringify(binaryArgs.body)).not.toMatch(/assetId|more characters stored in full as/);
+
+    await request('POST', '/events', { body: { conversationId: otherConversation, events: [
+      { kind: 'turn_start', time: Date.now(), turnId: 'other-detail-turn' }
+    ] } });
+    await request('GET', `/activity?conversationId=${otherConversation}&since=0`);
+    const foreign = await request('POST', '/activity/detail', { body: {
+      conversationId: otherConversation, callId: row.callId, detailRevision: row.detailRevision
+    } });
+    expect(foreign.body).toEqual({ ok: false, error: 'call_not_available' });
+    expect((await request('POST', '/activity/detail', { body: {
+      conversationId, callId: [row.callId], detailRevision: row.detailRevision
+    } })).status).toBe(400);
+  });
+
+  it('keeps existing details and records new history after a legacy writer proposes recording off', async () => {
+    await pair();
+    const conversationId = '67676767-5656-4545-3434-232323232323';
+    await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: Date.now(), turnId: 'recorded-before-off' }
+    ] } });
+    await recordToolCall({
+      tool: 'read_file', args: { path: '/project/already-recorded.ts' },
+      content: [{ type: 'text', text: 'recorded result' }], outcome: 'ok', durationMs: 2,
+      startedAt: Date.now(), requestId: 'wfr_recorded_before_off', conversationId
+    });
+    const feed = await request('GET', `/activity?conversationId=${conversationId}&since=0`);
+    const row = feed.body.stream.find((entry: any) => entry.kind === 'tool_call');
+    const before = await readEvents(feed.body.sessionId);
+    const previous = getConfig();
+    try {
+      await saveConfig({ ...previous, sessions: { ...previous.sessions, record: false } });
+      expect(getConfig().sessions).toMatchObject({ record: true, retainDays: 0 });
+      const detail = await request('POST', '/activity/detail', { body: {
+        conversationId, callId: row.callId, detailRevision: row.detailRevision
+      } });
+      expect(detail.body).toMatchObject({ ok: true, callId: row.callId,
+        args: { text: expect.stringContaining('already-recorded.ts') },
+        result: { text: 'recorded result' } });
+      await request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'turn_start', time: Date.now() + 1, turnId: 'recorded-after-legacy-off' }
+      ] } });
+      const after = await readEvents(feed.body.sessionId);
+      expect(after).toHaveLength(before.length + 1);
+      expect(after.at(-1)).toMatchObject({ kind: 'turn_start', turnId: 'recorded-after-legacy-off' });
+    } finally {
+      await saveConfig(previous);
+    }
+  });
+
+  it('projects pending and completed process outcomes from canonical completion evidence', async () => {
+    await pair();
+    const conversationId = '69696969-5858-4747-3636-252525252525';
+    const opened = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: Date.now(), turnId: 'outcome-turn' }
+    ] } });
+    const baseCall = (callId: string, process: { sessionId: string; completedAt?: number; exitCode?: number | null; durationMs?: number }) => ({
+      kind: 'tool_call' as const, source: 'mcp' as const, time: 100, turnId: 'outcome-turn', call: {
+        callId, conversationId, requestId: `request-${callId}`, attribution: 'request_id' as const,
+        attributionMethod: 'request_id' as const, tool: 'exec_command',
+        args: { text: '{}', chars: 2, truncated: false }, result: { text: 'initial', chars: 7, truncated: false },
+        durationMs: 5, outcome: 'ok' as const, process,
+        summary: { kind: 'run' as const, tone: 'neutral' as const, title: 'Started fixture', metric: 'running' }
+      }
+    });
+    await recordProcessCall(opened.body.sessionId, baseCall('pending', { sessionId: '1' }));
+    await recordProcessCall(opened.body.sessionId, baseCall('zero', { sessionId: '2' }));
+    await recordProcessCall(opened.body.sessionId, baseCall('nonzero', { sessionId: '3' }));
+    await recordProcessCall(opened.body.sessionId, baseCall('unknown', { sessionId: '4' }));
+    await recordProcessCall(opened.body.sessionId, baseCall('legacy-missing', {
+      sessionId: '5', completedAt: 200, durationMs: 30
+    }));
+    await completeProcessCall(opened.body.sessionId, 'zero', { completedAt: 200, durationMs: 20, exitCode: 0 });
+    await completeProcessCall(opened.body.sessionId, 'nonzero', { completedAt: 200, durationMs: 21, exitCode: 7 });
+    await completeProcessCall(opened.body.sessionId, 'unknown', { completedAt: 200, durationMs: 22, exitCode: null });
+
+    const feed = await request('GET', `/activity?conversationId=${conversationId}&since=0`);
+    const rows = new Map(feed.body.stream.filter((entry: any) => entry.kind === 'tool_call')
+      .map((entry: any) => [entry.callId, entry]));
+    expect(rows.get('pending')).toMatchObject({ displayOutcome: { code: 'started', label: 'started' }, durationMs: 5 });
+    expect(rows.get('zero')).toMatchObject({ displayOutcome: { code: 'completed', label: 'completed', exitCode: 0 }, durationMs: 20 });
+    expect(rows.get('nonzero')).toMatchObject({ displayOutcome: { code: 'failed', label: 'failed · exit 7', exitCode: 7 }, durationMs: 21 });
+    expect(rows.get('unknown')).toMatchObject({ displayOutcome: { code: 'finished', label: 'finished · exit unknown', exitCode: null }, durationMs: 22 });
+    expect(rows.get('legacy-missing')).toMatchObject({ displayOutcome: { code: 'finished', label: 'finished · exit unknown', exitCode: null }, durationMs: 30 });
+  });
+
+  it('projects every current non-process outcome without making the content script reinterpret it', async () => {
+    await pair();
+    const conversationId = '56565656-4545-3434-2323-121212121212';
+    await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: Date.now(), turnId: 'outcome-enums' }
+    ] } });
+    const cases = [
+      ['ok', 'completed', 'completed'],
+      ['process_exit_nonzero', 'failed', 'failed · exit 4'],
+      ['tool_rejected', 'refused', 'refused'],
+      ['tool_execution_error', 'failed', 'failed'],
+      ['tool_internal_error', 'internal_error', 'internal error']
+    ] as const;
+    for (const [outcome] of cases) {
+      await recordToolCall({
+        tool: 'exec_command', args: { command: `fixture-${outcome}` },
+        content: [{ type: 'text', text: `result-${outcome}` }], outcome, durationMs: 3,
+        startedAt: Date.now(), requestId: `wfr_enum_${outcome}`, conversationId,
+        evidence: { changes: [], assets: [], count: null, detail: null,
+          exitCode: outcome === 'process_exit_nonzero' ? 4 : null, timedOut: false,
+          durationMs: null, running: null, processSessionId: null }
+      });
+    }
+    const feed = await request('GET', `/activity?conversationId=${conversationId}&since=0`);
+    const rows = new Map(feed.body.stream.filter((entry: any) => entry.kind === 'tool_call')
+      .map((entry: any) => [entry.outcome, entry.displayOutcome]));
+    for (const [outcome, code, label] of cases) expect(rows.get(outcome)).toEqual({ code, label,
+      ...(outcome === 'process_exit_nonzero' ? { exitCode: 4 } : {}) });
   });
 
   /**
@@ -1879,7 +2293,7 @@ ${SAMPLE_BRIEF}` }
    * reloads, and a ticket that still has not been sent after them is abandoned: nothing was
    * fenced, and the next working turn opens a fresh one. Every pickup asks for the tab in front.
    */
-  it('reloads an unsent automatic ticket in front every 2 minutes, then gives it up after five', async () => {
+  it.each([false, true])('reloads an unsent automatic ticket every 2 minutes with bounded attempts (restored: %s)', async restored => {
     vi.useFakeTimers();
     try {
       await pair();
@@ -1894,6 +2308,15 @@ ${SAMPLE_BRIEF}` }
         body: { conversationId, ticket: true, automatic: true }
       });
       const token = filed.body.token as string;
+
+      if (restored) {
+        const { snapshotContinuations } = await import('../src/main/session/continuation.js');
+        const snapshot = snapshotContinuations();
+        resetBridgeForTests();
+        await pair();
+        await restoreContinuations({ ...snapshot, entries: snapshot.entries.map(entry => entry.token === token
+          ? { ...entry, openedAt: Date.now() - 60_000 } : entry) });
+      }
 
       const takeRepair = async (): Promise<{ conversationId: string; token: string; reason: string; focus: boolean } | null> => {
         await sweepStaleSwarm(Date.now());
@@ -3436,8 +3859,9 @@ describe('delivering a bootstrap', () => {
     expect(retry.status).toBe(200);
     expect(retry.body).toMatchObject({ committed: true, outcome: 'committed', conversationId });
     const storedAfterRetry = await readDurable<any>('bridge-commands');
-    expect(storedAfterRetry?.receipts?.some((entry: any) => entry?.id === id)).toBe(false);
-    expect(storedAfterRetry?.commands?.some((entry: any) => entry?.id === id && entry?.phase === 'leased')).toBe(true);
+    // Liveness already committed before this retry, so the receipt now closes the command.
+    expect(storedAfterRetry?.receipts?.some((entry: any) => entry?.id === id)).toBe(true);
+    expect(storedAfterRetry?.commands?.some((entry: any) => entry?.id === id)).toBe(false);
   });
 
   it('puts the worker back to sleep, with its slot and its message intact, when the browser cannot wake it', async () => {
@@ -3905,6 +4329,73 @@ describe('delivering a bootstrap', () => {
     expect(worker.revivable).toBe(true);
     expect(worker.result).toContain('Final audit: request IDs are the authority');
   });
+
+  for (const order of ['ack-first', 'start-first', 'final-first', 'prime-compacted', 'restart-before-ack', 'stale-turn'] as const) {
+    it(`reconciles a tool-free revival independent of send ACK ordering: ${order}`, async () => {
+      await pair();
+      spawn({ workers: [{ task: 'answer without tools' }], caller: { conversationId: PRIME_CHAT } });
+      const bootstrap = await redeem();
+      const conversationId = randomUUID();
+      await request('POST', '/commands/ack', {
+        body: { id: bootstrap.id, status: 'sent', conversationId, agent: 'worker-1' }
+      });
+      const initial = await request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'turn_start', time: Date.now() - 100, turnId: 'previous-turn' },
+        { kind: 'assistant_message', time: Date.now() - 90, turnId: 'previous-turn',
+          messageId: 'previous-final', text: 'Previous work done.', final: true }
+      ] } });
+      let primeConversationId = PRIME_CHAT;
+      const worker = () => swarmStateForCaller({ conversationId: primeConversationId }).agents.find(a => a.id === 'worker-1')!;
+      expect(worker().state).toBe('sleeping');
+      wake([{ to: 'worker-1', text: 'Answer this follow-up without tools.' }]);
+      const { id } = await waitForRevival();
+      await request('POST', '/commands/redeem', { body: { id, client: 'ordered-page', conversationId } });
+      const at = order === 'stale-turn' ? Date.now() - 1000 : Date.now() + 1;
+      const start = { kind: 'turn_start', time: at, turnId: 'follow-up-turn' };
+      const final = { kind: 'assistant_message', time: at + 2, turnId: 'follow-up-turn',
+        messageId: 'follow-up-final', text: 'Follow-up complete without tools.', final: true };
+      const postEvents = (events: unknown[]) => request('POST', '/events', { body: { conversationId, events } });
+      const ack = () => request('POST', '/commands/ack', {
+        body: { id, status: 'sent', conversationId, client: 'ordered-page' }
+      });
+      if (order !== 'ack-first') {
+        expect((await postEvents(order === 'start-first' ? [start] : [start, final])).status).toBe(200);
+        expect(worker().state).toBe('waking');
+      }
+      if (order === 'prime-compacted') {
+        primeConversationId = randomUUID();
+        expect(beginPrimeTransfer(PRIME_CHAT)).toBe(true);
+        expect(commitPrimeTransfer(PRIME_CHAT, primeConversationId)).toBe(true);
+      }
+      if (order === 'restart-before-ack') {
+        await persistCriticalSwarmNow();
+        await flushDurable();
+        const saved = await readDurable<any>('swarm');
+        resetSwarm();
+        resetBridgeForTests();
+        restoreSwarm(saved);
+        await restoreCommands();
+      }
+      expect((await ack()).body.committed).toBe(true);
+      if (order === 'stale-turn') {
+        expect(worker().state).toBe('waking');
+        expect(worker().pending).toBe(1);
+        return;
+      }
+      if (order === 'ack-first' || order === 'start-first') {
+        if (order === 'start-first') expect(worker().state).toBe('active');
+        expect((await postEvents(order === 'ack-first' ? [start, final] : [final])).status).toBe(200);
+      }
+      expect(worker()).toMatchObject({ state: 'sleeping', pending: 0, result: final.text });
+      expect(pendingWorkerRevivals()).toEqual([]);
+      expect(pendingCommands().some(command => command.id === id)).toBe(false);
+      if (order !== 'ack-first') expect((await ack()).body.committed).toBe(true);
+      const reports = (await readEvents(initial.body.sessionId)).filter(event => event.kind === 'agent_message' &&
+        event.message.text.includes(final.text));
+      expect(reports).toHaveLength(1);
+      expect(opened).toHaveLength(1);
+    });
+  }
 
   it('keeps page observations attributed to the exact dormant worker while another prime is active', async () => {
     await pair();
@@ -6632,52 +7123,97 @@ describe('unattributed activity recovery', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  /**
-   * The reload this app decided against, and which bound decided it.
-   *
-   * Every refusal in `queueBrowserRecovery` is deliberate — budgets that exist because an
-   * unbounded watchdog reloads a chat all night. From outside, a refusal and a watchdog that
-   * never noticed are the same silence, so a chat sitting broken cannot be told apart from one
-   * this app is deliberately leaving alone.
-   *
-   * Measured on 2026-09-15: a turn failed, the page then reported that ChatGPT could not deliver
-   * a message four minutes later, and nothing happened until the ordinary silence window came
-   * round ten minutes after that — while a manual tab reload fixed it in seconds. Which of three
-   * bounds refused the second reload could not be read from the log, so the fix could not be
-   * aimed at it.
-   */
-  it('says which bound refused an error reload, once a minute', async () => {
+  it.each(['goal', 'loop'] as const)('preserves the existing %s silence deadline after a provider access limit', async mode => {
     vi.useFakeTimers();
     try {
       await pair();
-      const said = (): string[] =>
-        getLog().map(entry => entry.message).filter(message => message.includes('did not reload'));
-      const wedge = (text: string) => events(PRIME, [{ kind: 'chat_error', time: Date.now(), text, recoverable: true }]);
-
-      await events(PRIME, [openTurn('turn-one-reload')]);
-      await wedge('Connection interrupted. Waiting for the complete answer');
+      const { setGoalSwitchNow } = await import('../src/main/goal.js');
+      await setGoalSwitchNow(PRIME, mode, true, true);
+      await events(PRIME, [{ kind: 'model_selection', time: Date.now(), model: 'GPT-5.6 Sol', reasoningEffort: 'high' }, openTurn('limited-goal')]);
+      const deadline = Date.now() + CHAT_SILENCE_MS;
+      const notice = () => events(PRIME, [{ kind: 'chat_error', time: Date.now(), turnId: 'limited-goal',
+        recoverable: false, blocking: true, text: 'provider access limit' }]);
+      await notice();
+      expect(await maintenance()).toBeNull();
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS - 1);
+      await notice(); // Re-rendering cannot renew the original deadline.
+      expect(await maintenance()).toBeNull();
+      await vi.advanceTimersByTimeAsync(2);
+      expect(Date.now()).toBe(deadline + 1);
+      await sweepStaleSwarm(Date.now());
       const repair = await maintenance();
-      expect(repair?.reason).toBe('assistant-error');
-      await maintenance(repair!.token);
+      expect(repair).toMatchObject({ conversationId: PRIME, reason: 'silence' });
+      await vi.advanceTimersByTimeAsync(31_000);
+      await notice(); // A diagnostic cannot revoke custody of the handed repair.
+      expect(await maintenance(repair!.token)).toBeNull();
+      await vi.advanceTimersByTimeAsync(31_000);
+      await notice();
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
 
-      // The same turn, a different failure: refused on purpose, and now it says so.
-      const before = said().length;
-      await wedge('Message delivery timed out. Please try again.');
-      const first = said();
-      expect(first.length).toBe(before + 1);
-      expect(first.at(-1)).toMatch(/already spent its error reload/);
-
-      // Not once per failure: a wedged page reports every few seconds.
-      await wedge('Message delivery timed out. Please try again. Retry');
-      expect(said().length).toBe(first.length);
-
-      // A minute on, the state is still worth knowing.
+  it('renews Goal silence for genuine work beside a provider access limit', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const { setGoalSwitchNow } = await import('../src/main/goal.js');
+      await setGoalSwitchNow(PRIME, 'loop', true, true);
+      await events(PRIME, [{ kind: 'model_selection', time: Date.now(), model: 'GPT-5.6 Sol', reasoningEffort: 'high' }, openTurn('limited-work')]);
       await vi.advanceTimersByTimeAsync(60_000);
-      await wedge('Message delivery timed out. Please try again.');
-      expect(said().length).toBe(first.length + 1);
-    } finally {
-      vi.useRealTimers();
-    }
+      await events(PRIME, [
+        { kind: 'chat_error', time: Date.now(), turnId: 'limited-work', recoverable: false, blocking: true, text: 'provider access limit' },
+        { kind: 'assistant_message', time: Date.now(), turnId: 'limited-work', messageId: 'new-work', text: 'Continuing the checks.', state: 'streaming', activeNow: true }
+      ]);
+      await vi.advanceTimersByTimeAsync(60_001);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toBeNull();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toMatchObject({ conversationId: PRIME, reason: 'silence' });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([false, true])('retires a %s handed silence repair when completion accompanies a provider access limit', async handed => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const { setGoalSwitchNow } = await import('../src/main/goal.js');
+      await setGoalSwitchNow(PRIME, 'loop', true, true);
+      await events(PRIME, [{ kind: 'model_selection', time: Date.now(), model: 'GPT-5.6 Sol', reasoningEffort: 'high' }, openTurn('limited-completed')]);
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 1);
+      await sweepStaleSwarm(Date.now());
+      const repair = handed ? await maintenance() : null;
+      if (handed) expect(repair).toMatchObject({ conversationId: PRIME, reason: 'silence' });
+      await events(PRIME, [
+        { kind: 'chat_error', time: Date.now(), turnId: 'limited-completed', recoverable: false, blocking: true, text: 'provider access limit' },
+        endTurn('limited-completed', 'completed'),
+        { kind: 'assistant_message', time: Date.now(), turnId: 'limited-completed', messageId: 'completed-answer', text: 'The checks are complete.', state: 'final', final: true }
+      ]);
+      expect(await maintenance()).toBeNull();
+      if (repair) expect(await maintenance(repair.token)).toBeNull();
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 1);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['off', 'wrong-turn', 'no-grant'] as const)('does not create Goal recovery authority from a provider access limit (%s)', async scenario => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const { setGoalSwitchNow } = await import('../src/main/goal.js');
+      await setGoalSwitchNow(PRIME, 'loop', true, true);
+      if (scenario !== 'no-grant') {
+        await events(PRIME, [{ kind: 'model_selection', time: Date.now(), model: 'GPT-5.6 Sol', reasoningEffort: 'high' }, openTurn('limited-negative')]);
+      }
+      if (scenario === 'off') await setGoalSwitchNow(PRIME, 'loop', false);
+      await events(PRIME, [{ kind: 'chat_error', time: Date.now(), turnId: scenario === 'wrong-turn' ? 'different-turn' : 'limited-negative',
+        recoverable: false, blocking: true, text: 'provider access limit' }]);
+      expect(await maintenance()).toBeNull();
+      await vi.advanceTimersByTimeAsync(PRO_SILENCE_MS + 1);
+      expect(await maintenance()).toBeNull();
+    } finally { vi.useRealTimers(); }
   });
 
   it.each([false, undefined])('does not spend recovery on an informational alert (recoverable: %s)', async recoverable => {
@@ -7177,6 +7713,60 @@ describe('unattributed activity recovery', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('does not refund error recovery when reload remints a generation for the same authored question', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const question = { kind: 'user_message', time: Date.now(), messageId: 'repair-question', text: 'Build the feature' };
+      await events(PRIME, [question, openTurn('original-answer')]);
+      await events(PRIME, [{ kind: 'chat_error', time: Date.now(), turnId: 'original-answer',
+        text: 'Connection interrupted. Waiting for the complete answer', recoverable: true }, endTurn('original-answer', 'failed')]);
+      const first = await maintenance();
+      expect(first?.reason).toBe('assistant-error');
+      await maintenance(first!.token);
+      await events(PRIME, [question, openTurn('replacement-document')]);
+      await vi.advanceTimersByTimeAsync(BROWSER_RECOVERY_COOLDOWN_MS);
+      await events(PRIME, [{ kind: 'chat_error', time: Date.now(), turnId: 'replacement-document',
+        text: 'Connection interrupted. Waiting for the complete answer', recoverable: true }, endTurn('replacement-document', 'failed')]);
+      expect(await maintenance()).toBeNull();
+      await events(PRIME, [{ kind: 'user_message', time: Date.now(), messageId: 'next-repair-question', text: 'Continue the feature' }, openTurn('next-answer')]);
+      // A late revision of the old question cannot take ownership away from the newer one.
+      await events(PRIME, [{ ...question, time: Date.now(), text: 'Build the feature (hydrated)' }]);
+      await events(PRIME, [{ kind: 'chat_error', time: Date.now(), turnId: 'next-answer',
+        text: 'Connection interrupted. Waiting for the complete answer', recoverable: true }]);
+      expect((await maintenance())?.reason).toBe('assistant-error');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['final', 'question'])('revokes an error reload handed before a newer %s reaches the browser action claim', async boundary => {
+    await pair();
+    await events(PRIME, [{ kind: 'user_message', time: Date.now(), messageId: 'claim-question', text: 'Implement it' }, openTurn('claim-answer')]);
+    await events(PRIME, [{ kind: 'chat_error', time: Date.now(), turnId: 'claim-answer',
+      text: 'Connection interrupted. Waiting for the complete answer', recoverable: true }]);
+    const repair = await maintenance();
+    expect(repair?.reason).toBe('assistant-error');
+    if (boundary === 'final') await events(PRIME, [
+      { kind: 'assistant_message', time: Date.now(), messageId: 'claim-final', turnId: 'claim-answer', text: 'Implemented and checked.', final: true, state: 'final' },
+      endTurn('claim-answer', 'completed')
+    ]);
+    else await events(PRIME, [{ kind: 'user_message', time: Date.now(), messageId: 'claim-next-question', text: 'Now extend it' }, openTurn('claim-next-answer')]);
+    const claimed = await request('POST', '/repairs/claim', { body: { token: repair!.token } });
+    expect(claimed.body.allowed).toBe(false);
+    expect(await maintenance()).toBeNull();
+  });
+
+  it('claims an interrupted-response reload only once without reissuing its handed token', async () => {
+    await pair();
+    await events(PRIME, [openTurn('claim-once')]);
+    await events(PRIME, [{ kind: 'chat_error', time: Date.now(), turnId: 'claim-once', text: 'Connection interrupted', recoverable: true }]);
+    const repair = await maintenance();
+    expect((await maintenance())?.token).toBe(repair!.token);
+    expect((await request('POST', '/repairs/claim', { body: { token: repair!.token } })).body.allowed).toBe(true);
+    expect(await maintenance()).toBeNull();
+    expect((await request('POST', '/repairs/claim', { body: { token: repair!.token } })).body.allowed).toBe(false);
+    expect(await maintenance(repair!.token)).toBeNull();
   });
 
   it('offers one stale-composer recovery for a completed ordinary chat after 69 idle seconds', async () => {
@@ -8012,7 +8602,12 @@ describe('unattributed activity recovery', () => {
       await events(OTHER, [openTurn('turn-wedged-across-restart')]);
       await vi.advanceTimersByTimeAsync(PRO_SILENCE_MS);
       await sweepStaleSwarm(Date.now());
-      expect(await maintenance()).toMatchObject({ conversationId: OTHER, reason: 'silence' });
+      // 2.1.13 reaches the same chat by the better route: a restored ticket is watched again
+      // rather than skipped by the floor, so the compaction pickup gets there first and the
+      // reload it asks for is the one this test exists to see happen at all. What must not
+      // happen — the chat going unrecovered for the ticket's whole six-hour life — is what
+      // either reason rules out.
+      expect(await maintenance()).toMatchObject({ conversationId: OTHER, reason: 'compaction' });
       // Still open: this is the recovery half only, exactly as in the spent-pickups case.
       expect(continuationByToken(token)).toMatchObject({ state: 'awaiting-summary' });
     } finally {
@@ -8252,7 +8847,11 @@ describe('unattributed activity recovery', () => {
     } finally { await setSecret('openRouterApiKey', ''); vi.useRealTimers(); }
   });
 
-  it.each([6_000, 180_000])('reuses the exact silence receipt when its replacement reveals Thinking failed after %i ms', async delay => {
+  it.each([
+    { pro: false, delay: 6_000 }, { pro: false, delay: 180_000 },
+    { pro: true, delay: 6_000 }, { pro: true, delay: 180_000 }
+  ])('reuses the exact silence receipt when its replacement reveals Thinking failed (Pro: $pro, delay: $delay)', async ({ pro, delay }) => {
+    const goal = await import('../src/main/goal.js');
     const previous = getConfig();
     await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop' } });
     await setSecret('openRouterApiKey', 'sk-or-delayed-failure');
@@ -8260,9 +8859,10 @@ describe('unattributed activity recovery', () => {
     vi.useFakeTimers();
     try {
       await pair();
-      await events(OTHER, [{ kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: 'high', time: Date.now() }, openTurn(`reload-source-${delay}`)]);
+      if (pro) await goal.setGoalSwitchNow(OTHER, 'loop', true, true);
+      await events(OTHER, [{ kind: 'model_selection', model: pro ? 'gpt-6-pro' : 'GPT-5.6 Sol', reasoningEffort: pro ? 'pro' : 'high', time: Date.now() }, openTurn(`reload-source-${delay}`)]);
       await attributed(OTHER, false, Date.now());
-      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS);
+      await vi.advanceTimersByTimeAsync(pro ? PRO_SILENCE_MS : CHAT_SILENCE_MS);
       await sweepStaleSwarm(Date.now());
       const repair = await maintenance();
       expect(repair?.reason).toBe('silence');
@@ -8291,6 +8891,7 @@ describe('unattributed activity recovery', () => {
       // the next legitimate quiet recovery.
       if (delay === 180_000) await events(OTHER, [openTurn(`next-reload-source-${delay}`)]);
       await attributed(OTHER, false, Date.now());
+      expect(goalPendingReplyFor(OTHER)).toBeNull();
       // The replacement page has not supplied model evidence for this new episode.
       await vi.advanceTimersByTimeAsync(PRO_SILENCE_MS);
       await sweepStaleSwarm(Date.now());
@@ -9937,130 +10538,6 @@ describe('the goal loop over the bridge', () => {
     expect(repairWarnings()).toBe(warningsBefore + 1);
   });
 
-  /**
-   * Browser control, from the app parking an action to the answer arriving back.
-   *
-   * The driver that performs the action lives in an extension service worker and cannot be
-   * reached from a test, but everything between the caller and that worker can be, and it is
-   * the part with the interesting failure modes: an action handed out twice, a result from
-   * another conversation resolving somebody's call, a late answer to something that already
-   * gave up.
-   */
-  describe('carrying a browser action', () => {
-    const CHAT = 'cafe0005-0000-4000-8000-000000000005';
-
-    async function liveChat() {
-      await pair();
-      await request('POST', '/events', {
-        body: {
-          conversationId: CHAT,
-          events: [{ kind: 'user_message', time: Date.now(), text: 'drive the browser', messageId: 'm-browser-1' }]
-        }
-      });
-    }
-
-    it('hands the action to the page that polls, once, and answers the caller', async () => {
-      await liveChat();
-      resetBrowserControlForTests();
-
-      const pending = runBrowserCommand(CHAT, { type: 'click', x: 10, y: 20 });
-
-      const first = await request('GET', `/activity?conversationId=${CHAT}`);
-      expect(first.status).toBe(200);
-      const carried = first.body.browserCommand;
-      expect(carried).toMatchObject({ action: { type: 'click', x: 10, y: 20 } });
-      expect(typeof carried.id).toBe('string');
-
-      // Handed out once: a second tab showing the same chat must not perform the same click.
-      const second = await request('GET', `/activity?conversationId=${CHAT}`);
-      expect(second.body.browserCommand).toBeNull();
-
-      const settled = await request('POST', '/browser/result', {
-        body: { conversationId: CHAT, id: carried.id, ok: true, data: { clicked: { x: 10, y: 20 } } }
-      });
-      expect(settled.status).toBe(200);
-      expect(settled.body).toMatchObject({ settled: true });
-
-      await expect(pending).resolves.toMatchObject({ ok: true, data: { clicked: { x: 10, y: 20 } } });
-    });
-
-    it('refuses a second action while one is still outstanding', async () => {
-      await liveChat();
-      resetBrowserControlForTests();
-
-      const first = runBrowserCommand(CHAT, { type: 'click', x: 1, y: 1 });
-      // Ordered actions: running two at once means running them in an order nobody chose.
-      await expect(runBrowserCommand(CHAT, { type: 'click', x: 2, y: 2 })).resolves.toMatchObject({
-        ok: false,
-        error: 'BROWSER_BUSY'
-      });
-
-      const feed = await request('GET', `/activity?conversationId=${CHAT}`);
-      await request('POST', '/browser/result', {
-        body: { conversationId: CHAT, id: feed.body.browserCommand.id, ok: true, data: {} }
-      });
-      await expect(first).resolves.toMatchObject({ ok: true });
-    });
-
-    it('refuses a result that names the wrong command or the wrong chat', async () => {
-      await liveChat();
-      resetBrowserControlForTests();
-
-      const pending = runBrowserCommand(CHAT, { type: 'click', x: 3, y: 3 });
-      const feed = await request('GET', `/activity?conversationId=${CHAT}`);
-      const id = feed.body.browserCommand.id;
-
-      // A late answer to something that already gave up, or an id from another run.
-      const wrongId = await request('POST', '/browser/result', {
-        body: { conversationId: CHAT, id: 'bc-not-this-one', ok: true, data: {} }
-      });
-      expect(wrongId.body).toMatchObject({ settled: false });
-
-      // Another chat's page must not be able to resolve this conversation's call.
-      const other = 'cafe0006-0000-4000-8000-000000000006';
-      const wrongChat = await request('POST', '/browser/result', {
-        body: { conversationId: other, id, ok: true, data: {} }
-      });
-      expect(wrongChat.body).toMatchObject({ settled: false });
-
-      await request('POST', '/browser/result', {
-        body: { conversationId: CHAT, id, ok: false, error: 'BROWSER_BAD_REF', detail: 'e3 is no longer on this page' }
-      });
-      // A failure is an answer: the caller learns why rather than waiting for a timeout.
-      await expect(pending).resolves.toMatchObject({
-        ok: false,
-        error: 'BROWSER_BAD_REF',
-        detail: 'e3 is no longer on this page'
-      });
-    });
-
-    it('carries nothing when nothing is waiting', async () => {
-      await liveChat();
-      resetBrowserControlForTests();
-      const feed = await request('GET', `/activity?conversationId=${CHAT}`);
-      expect(feed.body.browserCommand).toBeNull();
-    });
-  });
-
-  /** The page needs to know three things, and it gets them on the feed it already polls. */
-  it('reports the settings on the activity feed', async () => {
-    await pair();
-    await request('POST', '/events', {
-      body: {
-        conversationId: 'cafe0001-0000-4000-8000-000000000001',
-        events: [{ kind: 'user_message', time: Date.now(), text: 'do the work', messageId: 'm-goal-1' }]
-      }
-    });
-
-    const reply = await request('GET', '/activity?conversationId=cafe0001-0000-4000-8000-000000000001');
-    expect(reply.status).toBe(200);
-    expect(reply.body.goal).toMatchObject({
-      enabled: true,
-      hasKey: true,
-      model: 'deepseek/deepseek-v4-flash',
-      draft: null
-    });
-  });
 
   it('makes an accepted Goal turn durable before the provider can fail or the page can reload', async () => {
     await pair();
@@ -10896,10 +11373,8 @@ describe('the goal loop over the bridge', () => {
    * was — the reply landed at 21:56:46 and the app first heard a Goal was owed at 22:00:33,
    * when a human reloaded the page by hand.
    *
-   * So the schedule is the silence rule's two minutes, and then two, five, ten, fifteen. Five
-   * reloads, a little over half an hour, and then it stops for good: every one of them is this
-   * app typing into somebody's browser about an answer already on screen, and a page that has
-   * not come back inside half an hour is not coming back.
+   * The schedule starts at two minutes, then two, five, ten and fifteen. Further
+   * confirmed attempts retain fifteen minutes until the durable obligation expires.
    */
   it('hands one queued Goal recovery to the shared browser startup owner and revokes it on Off', async () => {
     vi.useFakeTimers();
@@ -10969,7 +11444,7 @@ describe('the goal loop over the bridge', () => {
         if (index === 1) expect(await cancelInput(second)).toBe(true);
         if (index === 2) await request('POST', '/settings', { body: { conversationId: chat, goal: false } });
       }
-      await vi.advanceTimersByTimeAsync(6 * 60 * 60_000);
+      await vi.advanceTimersByTimeAsync(12 * 60 * 60_000);
       await sweepStaleSwarm(Date.now());
       expect((await request('GET', '/status')).body.repairs).toEqual([]);
       expect(await cancelInput(id)).toBe(true);
@@ -10980,7 +11455,32 @@ describe('the goal loop over the bridge', () => {
     }
   });
 
-  it('reloads a chat whose finished reply nothing ever came to collect, then stops', async () => {
+  it('does not recover restored Goal debt over a newer question', async () => {
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const chat = 'cafe0073-0000-4000-8000-000000000173';
+      await request('POST', '/events', { body: { conversationId: chat, events: [
+        { kind: 'user_message', time: Date.now(), text: 'first question', messageId: 'old-question' },
+        { kind: 'turn_start', time: Date.now(), turnId: 'old-source' },
+        { kind: 'turn_end', time: Date.now(), turnId: 'old-source', outcome: 'completed' },
+        { kind: 'assistant_message', time: Date.now(), turnId: 'old-source', messageId: 'old-answer',
+          text: 'First pass', final: true, state: 'final', goalEligible: true, activeNow: true }
+      ] } });
+      const goal = await import('../src/main/goal.js');
+      const saved = goal.snapshotGoalReplies();
+      expect(goal.goalPendingReplyFor(chat)).not.toBeNull();
+      await request('POST', '/events', { body: { conversationId: chat, events: [
+        { kind: 'user_message', time: Date.now(), text: 'new question', messageId: 'new-question' }
+      ] } });
+      goal.restoreGoalReplies({ ...saved, replies: saved.replies.map(row => ({ ...row, acceptedAt: Date.now() - 60_000 })) });
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
+      await sweepStaleSwarm(Date.now());
+      expect((await request('GET', '/status')).body.repairs).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([false, true])('recovers pending Goal work past five attempts until expiry, including restored debt (%s)', async restored => {
     vi.useFakeTimers();
     try {
       await pair();
@@ -11016,6 +11516,16 @@ describe('the goal loop over the bridge', () => {
       });
       expect((await request('GET', `/activity?conversationId=${chat}`)).body.goal.pending).not.toBeNull();
 
+      if (restored) {
+        const goal = await import('../src/main/goal.js');
+        const saved = goal.snapshotGoalReplies();
+        // The durable obligation predates bridge startup, as it would after an app restart.
+        resetBridgeForTests();
+        await pair();
+        goal.restoreGoalReplies({ ...saved, replies: saved.replies.map(row => row.conversationId === chat
+          ? { ...row, acceptedAt: Date.now() - 60_000 } : row) });
+      }
+
       const takeRepair = async (): Promise<{ conversationId: string; token: string; reason: string } | null> => {
         await sweepStaleSwarm(Date.now());
         return (await request('GET', '/status')).body.repairs?.[0] ?? null;
@@ -11029,7 +11539,7 @@ describe('the goal loop over the bridge', () => {
       // Two minutes, then 2 / 5 / 10 / 15 between the retries. Each reload is confirmed the way
       // the extension confirms it, so what is measured here is the schedule and not a handout
       // being retried because nobody said it worked.
-      const gaps = [1_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000];
+      const gaps = [1_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000, 15 * 60_000, 15 * 60_000];
       for (const [index, gap] of gaps.entries()) {
         await vi.advanceTimersByTimeAsync(gap);
         const handout = await takeRepair();
@@ -11045,11 +11555,10 @@ describe('the goal loop over the bridge', () => {
         expect(await takeRepair()).toBeNull();
       }
 
-      // Five is all it gets. The obligation is still on file — it stays there for the page to
-      // redeem if it ever comes back — but this app has stopped asking.
-      await vi.advanceTimersByTimeAsync(6 * 60 * 60_000);
+      // The existing durable expiry still bounds unattended browser recovery.
+      await vi.advanceTimersByTimeAsync(12 * 60 * 60_000);
       expect(await takeRepair()).toBeNull();
-      expect((await request('GET', `/activity?conversationId=${chat}`)).body.goal.pending).not.toBeNull();
+      expect((await request('GET', `/activity?conversationId=${chat}`)).body.goal.pending).toBeNull();
     } finally {
       vi.useRealTimers();
     }
