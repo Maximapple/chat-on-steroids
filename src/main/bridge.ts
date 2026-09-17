@@ -2660,13 +2660,25 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         )) {
           retire(command, 'the page lost the brief before Send; nothing was sent');
         }
-        if (entry) {
-          queueResumeCommand(entry.sessionId, checkpointToken);
-          void deliver();
+        for (const token of [...destinationRetriesSpent.keys()]) {
+          if (!continuationByToken(token)) destinationRetriesSpent.delete(token);
         }
-        logInfo(
-          `bridge: the brief for ${entry?.sessionId ?? checkpointToken.slice(0, 8)} was lost before Send — offering it to a fresh chat`
-        );
+        const spent = (destinationRetriesSpent.get(checkpointToken) ?? 0) + 1;
+        destinationRetriesSpent.set(checkpointToken, spent);
+        if (entry && spent > DESTINATION_RETRY_CEILING) {
+          logWarn(
+            `bridge: the brief for ${entry.sessionId} was lost before Send ${spent} times — not opening another chat. ` +
+              'The work is still in the source chat and nothing was sent twice.'
+          );
+        } else {
+          if (entry) {
+            queueResumeCommand(entry.sessionId, checkpointToken);
+            void deliver();
+          }
+          logInfo(
+            `bridge: the brief for ${entry?.sessionId ?? checkpointToken.slice(0, 8)} was lost before Send — offering it to a fresh chat`
+          );
+        }
       }
       return json(
         res,
@@ -6774,6 +6786,21 @@ async function inspectOwedGoals(now: number): Promise<boolean> {
  * page until explicit cancel or the marked bootstrap's durable commit in chat B.
  * Auto Off additionally cancels threshold-created tickets, never manual requests.
  */
+/**
+ * Fresh chats one brief may be re-offered to after a destination proved it never landed.
+ *
+ * The release itself is sound — a chat that still has no conversation id cannot have accepted a
+ * message — so re-offering is free of duplicate risk. What it is not free of is tabs. Since
+ * 2026-09-17 the destination also reports loss when ChatGPT answers the send with its own
+ * transport failure, and that failure is usually a statement about ChatGPT rather than about
+ * this brief: on a bad afternoon every fresh chat would time out the same way, and an unbounded
+ * re-offer would answer that by opening a chat every minute or two for the six hours of the
+ * handover TTL. Past this count the brief stops being re-offered and the person is told, which
+ * is the honest report — the app cannot make ChatGPT accept a message.
+ */
+const DESTINATION_RETRY_CEILING = 3;
+const destinationRetriesSpent = new Map<string, number>();
+
 async function inspectOwedCompactions(now: number): Promise<boolean> {
   if (compactionWatchFloor === null) return false;
   const owed = new Map(pendingContinuations().map((entry) => [entry.from, entry]));

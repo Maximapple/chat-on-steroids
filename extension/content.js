@@ -10216,6 +10216,16 @@
     // whole point of the report: for a worker it is what binds the slot to this chat and
     // starts it, and for a resume it is what the session is moved onto. Bounded by the same
     // clock the app is running, so this page never outlives the command it is working on.
+    //
+    // ChatGPT can also answer this send with a visible transport failure of its own — in the
+    // field, "Message delivery timed out. Please try again." on the brief's first message. That
+    // banner is not the ambiguity an armed click is protected from. It is ChatGPT stating that
+    // the message did not get through, and while this page still has no conversation id there is
+    // no chat the brief could be sitting in. So it is reported as lost, which hands the same
+    // brief to a fresh chat immediately. Without this the handoff died in the quietest possible
+    // way: the page waited out the loop below, acked a send it could not name, and the journal
+    // gate stayed shut until the lease expired a quarter of an hour later with the brief gone.
+    let failedFor = 0;
     for (let tries = 0; tries < 80; tries++) {
       await sleep(500);
       const found = boot.type === 'resume' ? bootstrapConversation() : CLF_DOM.conversationId();
@@ -10226,6 +10236,16 @@
         await clearAcknowledgedBootstrap(acknowledged);
         return;
       }
+      if (boot.type !== 'resume' || !stillOnTarget() || CLF_DOM.conversationId()) { failedFor = 0; continue; }
+      // `recoverable` is what the DOM layer's narrow transport vocabulary marks; a rate-limit
+      // dialog and "Thinking failed" are not it, and neither may release an armed ticket.
+      if (!CLF_DOM.errors().some(error => error.recoverable === true)) { failedFor = 0; continue; }
+      // Two consecutive sightings a half-second apart. A card that renders for a single poll
+      // and is gone on the next was never ChatGPT's verdict on this send.
+      if (++failedFor < 2) continue;
+      continuationJournalPending = false;
+      await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationLost: true });
+      return;
     }
     // Sent, but this tab never saw an id, so nothing can be bound to it. Reported honestly:
     // the app ends the slot or the continuation rather than waiting on a chat it cannot name.

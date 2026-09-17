@@ -15007,6 +15007,136 @@ describe('the goal loop', () => {
     expect(emitted(live.sent, 'user_message').map((entry) => entry.event.text)).toContain('my own question instead');
   });
 
+  it('hands the brief back when ChatGPT answers the resume send with its own delivery failure', async () => {
+    // 2026-09-17, handoff nWyfk2Qm: the brief was typed into the replacement chat and ChatGPT
+    // answered the send with "Message delivery timed out. Please try again." No conversation id
+    // was ever assigned, so the page had nothing to report and the app held the journal gate shut
+    // until the lease expired fifteen minutes later — with the brief gone and the old chat over
+    // its own compaction threshold. The banner is ChatGPT saying the message did not get through,
+    // and a chat with no id cannot be holding it, so the brief is offered to a fresh chat at once.
+    const commandId = 'cmd-resume-delivery-timeout';
+    const token = '0123456789abcdef0123456789abcdef';
+    live = await harness(
+      `https://chatgpt.com/?clf=${commandId}`,
+      {
+        redeem: () => ({
+          ok: true,
+          command: { id: commandId, type: 'resume', text: `[[CLF-RESUME:${token}]]\n\nthe carried handoff`, agent: null }
+        }),
+        compact: (message) => {
+          if (message.destinationAttempt) return { ok: true, data: { allowed: true } };
+          if (message.destinationDispatch) return { ok: true, data: { armed: true } };
+          if (message.destinationLost) return { ok: true, data: { released: true } };
+          return { ok: false, error: 'unexpected_compact_shape' };
+        },
+        ack: () => ({ ok: true }),
+        activity: () => ({
+          ok: true,
+          data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null, bootstrap: 'resume' }
+        })
+      },
+      (document) => {
+        document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+          // ChatGPT accepts the click — composer cleared, message rendered, so send() sees
+          // acceptance — and then fails it. The URL keeps the command marker: no conversation
+          // was ever created, which is the whole reason the page had nothing to report.
+          document.querySelector('#prompt-textarea')!.textContent = '';
+          userTurn(document, 'resume-user', `[[CLF-RESUME:${token}]]\n\nthe carried handoff`);
+          alertBanner(document, 'Message delivery timed out. Please try again.');
+        });
+      }
+    );
+
+    await settle(2000);
+
+    expect(live.sent.filter((message) => message.type === 'compact' && message.destinationLost === true)).toEqual([
+      expect.objectContaining({ token })
+    ]);
+    // Never an ack naming no chat: that is the report that used to end the continuation silently.
+    expect(live.sent.some((message) => message.type === 'ack')).toBe(false);
+  });
+
+  it('keeps the resume conversation when it gets an id despite a visible failure', async () => {
+    // The id is the proof that outranks the banner: ChatGPT created the chat and the brief is in
+    // it, whatever else it rendered. Releasing here would offer the same brief to a second chat.
+    const commandId = 'cmd-resume-failure-with-id';
+    const token = '0123456789abcdef0123456789abcdef';
+    live = await harness(
+      `https://chatgpt.com/?clf=${commandId}`,
+      {
+        redeem: () => ({
+          ok: true,
+          command: { id: commandId, type: 'resume', text: `[[CLF-RESUME:${token}]]\n\nthe carried handoff`, agent: null }
+        }),
+        compact: (message) => {
+          if (message.destinationAttempt) return { ok: true, data: { allowed: true } };
+          if (message.destinationDispatch) return { ok: true, data: { armed: true } };
+          if (message.destinationMessageId) return { ok: true, data: { committed: true, conversationId: CHAT, commandId } };
+          if (message.destinationLost) return { ok: true, data: { released: true } };
+          return { ok: false, error: 'unexpected_compact_shape' };
+        },
+        ack: () => ({ ok: true }),
+        activity: () => ({
+          ok: true,
+          data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null, bootstrap: 'resume' }
+        })
+      },
+      (document, dom) => {
+        document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+          document.querySelector('#prompt-textarea')!.textContent = '';
+          dom.reconfigure({ url: `https://chatgpt.com/c/${CHAT}` });
+          userTurn(document, 'resume-user', `[[CLF-RESUME:${token}]]\n\nthe carried handoff`);
+          alertBanner(document, 'Message delivery timed out. Please try again.');
+        });
+      }
+    );
+
+    await settle(2000);
+
+    expect(live.sent.filter((message) => message.type === 'compact' && message.destinationLost === true)).toEqual([]);
+    // The chat is named to the app rather than handed back.
+    expect(live.sent.some((message) => message.conversationId === CHAT)).toBe(true);
+  });
+
+  it('keeps waiting when the resume chat shows a notice that is not a transport failure', async () => {
+    // ChatGPT announces ordinary UI state through the same live regions. Only the narrow
+    // transport vocabulary is ChatGPT saying the message did not get through; everything else
+    // leaves the armed dispatch exactly where it is.
+    const commandId = 'cmd-resume-unrelated-notice';
+    const token = '0123456789abcdef0123456789abcdef';
+    live = await harness(
+      `https://chatgpt.com/?clf=${commandId}`,
+      {
+        redeem: () => ({
+          ok: true,
+          command: { id: commandId, type: 'resume', text: `[[CLF-RESUME:${token}]]\n\nthe carried handoff`, agent: null }
+        }),
+        compact: (message) => {
+          if (message.destinationAttempt) return { ok: true, data: { allowed: true } };
+          if (message.destinationDispatch) return { ok: true, data: { armed: true } };
+          if (message.destinationLost) return { ok: true, data: { released: true } };
+          return { ok: false, error: 'unexpected_compact_shape' };
+        },
+        ack: () => ({ ok: true }),
+        activity: () => ({
+          ok: true,
+          data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null, bootstrap: 'resume' }
+        })
+      },
+      (document) => {
+        document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+          document.querySelector('#prompt-textarea')!.textContent = '';
+          userTurn(document, 'resume-user', `[[CLF-RESUME:${token}]]\n\nthe carried handoff`);
+          alertBanner(document, 'Dictation is active and in use');
+        });
+      }
+    );
+
+    await settle(2000);
+
+    expect(live.sent.filter((message) => message.type === 'compact' && message.destinationLost === true)).toEqual([]);
+  });
+
   it('recovers the exact observed resumed generation when it finishes before Goal config arrives', async () => {
     const commandId = 'cmd-resume-goal-config-race';
     const objective = 'finish the overnight release';
