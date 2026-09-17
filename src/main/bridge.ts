@@ -7264,6 +7264,8 @@ function retireSpentRepairs(): void {
 const BLIND_WORK_MS = 3 * 60_000;
 const BLIND_WORK_NOTICE_EVERY_MS = 15 * 60_000;
 const blindWorkSince = new Map<string, number>();
+/** Last reload asked for per chat. `queueStalledTabRecovery` does not bound this by itself. */
+const blindWorkRepairAt = new Map<string, number>();
 let lastBlindWorkNoticeAt = 0;
 
 function noticeBlindWork(conversationId: string, sessionId: string, filed: SessionSummary | null): void {
@@ -7273,6 +7275,7 @@ function noticeBlindWork(conversationId: string, sessionId: string, filed: Sessi
   const now = Date.now();
   if (filed.activeTurnId) {
     blindWorkSince.delete(conversationId);
+    blindWorkRepairAt.delete(conversationId);
     return;
   }
   const since = blindWorkSince.get(conversationId);
@@ -7284,9 +7287,19 @@ function noticeBlindWork(conversationId: string, sessionId: string, filed: Sessi
   if (now - since < BLIND_WORK_MS) return;
   // Repair first, and on the condition rather than on the notice: the notice is throttled to one
   // a quarter hour across every chat, and a reload that waits for a free notice slot is a reload
-  // that does not happen. `queueStalledTabRecovery` declines by itself when a browser action for
-  // this chat is already pending, which is the bound that matters here.
-  void queueStalledTabRecovery(conversationId, now);
+  // that does not happen.
+  //
+  // Bounded here, per chat, and this corrects the first version: it relied on
+  // `queueStalledTabRecovery` declining while a browser action was already pending. That bound
+  // does not hold — measured on 2026-09-17, twelve requests in one minute, one per attributed
+  // call, because a page in this state calls every few seconds and nothing about the previous
+  // request survived to the next. One attempt per chat per stretch is the honest cadence: a
+  // reload either restores reporting, which ends the stretch, or it does not, and repeating it
+  // four times a minute makes that no more true.
+  if (now - (blindWorkRepairAt.get(conversationId) ?? 0) >= BLIND_WORK_MS) {
+    blindWorkRepairAt.set(conversationId, now);
+    void queueStalledTabRecovery(conversationId, now);
+  }
   if (now - lastBlindWorkNoticeAt < BLIND_WORK_NOTICE_EVERY_MS) return;
   lastBlindWorkNoticeAt = now;
   logWarn(
@@ -7620,6 +7633,18 @@ async function takePendingRepairs(
           ...(repair.attribution || repair.reason === 'assistant-error' ? { requiresClaim: true } : {}) });
       }
   }
+  // The app/extension boundary, said out loud. `queueBrowserRecovery` logs that a repair was
+  // asked for and nothing said whether it was ever handed over or carried out, so twice on
+  // 2026-09-17 a chat sat unrepaired with the request in the log and the answer unknowable:
+  // queued and never handed out, handed out and refused by the browser, or carried out and
+  // ineffective are three different bugs that looked identical from here. Only when something
+  // is actually handed over, which is almost never.
+  if (ready.length > 0) {
+    logInfo(
+      `bridge: handing the browser ${ready.length} repair(s) — ` +
+        ready.map((row) => `${row.conversationId.slice(0, 8)}:${row.reason}`).join(', ')
+    );
+  }
   return ready;
 }
 
@@ -7662,6 +7687,7 @@ function attributionRepairCurrent(repair: Repair, session: SessionSummary | null
 async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | null): Promise<void> {
   for (const [conversationId, repair] of repairsInFlight) {
     if (repair.state === 'handed' && repair.token === token) {
+      logInfo(`bridge: the browser ${action ?? 'carried out'} the ${repair.reason} repair for ${conversationId}`);
       repair.state = 'done';
       if (repair.attribution && repair.attribution.incident.firstAttemptAt === null)
         repair.attribution.incident.firstAttemptAt = Date.now();
@@ -7715,6 +7741,7 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | nu
 async function failRepairAttempt(token: string, action: 'reloaded' | 'reopened' | null): Promise<void> {
   for (const [conversationId, repair] of repairsInFlight) {
     if (repair.state !== 'handed' || repair.token !== token) continue;
+    logWarn(`bridge: the browser could not ${action ?? 'carry out'} the ${repair.reason} repair for ${conversationId}`);
     await updateRepairProgress(
       conversationId,
       repair,
