@@ -6131,7 +6131,7 @@ interface Repair {
   state: 'queued' | 'handed' | 'done';
   /** Stable identity of the failure/inactivity episode. A new activity stamp mints a new one. */
   episode: string;
-  reason: 'unattributed' | 'assistant-error' | 'no-tab' | 'silence' | 'goal' | 'compaction' | 'stalled';
+  reason: 'unattributed' | 'assistant-error' | 'no-tab' | 'silence' | 'goal' | 'compaction' | 'stalled' | 'blind';
   /** Cooldown boundary. The browser is never asked before this instant. */
   notBefore: number;
   /**
@@ -7152,7 +7152,22 @@ async function queueMissingTab(conversationId: string, working: boolean, now = D
  * activity from the revived page retires it, and the shared per-conversation cooldown bounds a
  * tab Chrome keeps re-suspending.
  */
-async function queueStalledTabRecovery(conversationId: string, now = Date.now()): Promise<void> {
+/**
+ * Why the reason is a parameter rather than always `stalled`.
+ *
+ * The worker turns `stalled` into `suspended: true`, and `performBrowserRepairs` then reloads
+ * only a tab that is genuinely discarded or frozen — "suspension grants a reload of a
+ * still-suspended shell, never a new tab". That contract is right for the shells the extension
+ * itself reports. It is wrong for a page that is alive and merely blind: measured on
+ * 2026-09-17, the repair was handed over twice and carried out neither time, while `silence`
+ * and `compaction` repairs for the same chat were carried out in 34 and 107 milliseconds. The
+ * request was correct, the route was not.
+ */
+async function queueStalledTabRecovery(
+  conversationId: string,
+  now = Date.now(),
+  reason: 'stalled' | 'blind' = 'stalled'
+): Promise<void> {
   const agent = agentInfoForOwnedConversation(conversationId);
   const session = await findSessionByConversation(conversationId, { requireUnique: true });
   const name = agent?.id ?? conversationId;
@@ -7182,8 +7197,11 @@ async function queueStalledTabRecovery(conversationId: string, now = Date.now())
   if (!working && !compacting && agent?.role !== 'worker' && !(goalActiveFor(conversationId) && goalPendingReplyFor(conversationId))) {
     return declined('no turn is running in it');
   }
-  if (queueBrowserRecovery(conversationId, session.id, `stalled:${now}`, 'stalled', 0, now)) {
-    logInfo(`bridge: ${name} is a stalled browser tab — asking the browser to reload the exact chat once`);
+  if (queueBrowserRecovery(conversationId, session.id, `${reason}:${now}`, reason, 0, now)) {
+    logInfo(
+      `bridge: ${name} is ${reason === 'blind' ? 'a page that stopped reporting' : 'a stalled browser tab'} — ` +
+        'asking the browser to reload the exact chat once'
+    );
   } else {
     declined('a browser action for it is already pending');
   }
@@ -7298,7 +7316,7 @@ function noticeBlindWork(conversationId: string, sessionId: string, filed: Sessi
   // four times a minute makes that no more true.
   if (now - (blindWorkRepairAt.get(conversationId) ?? 0) >= BLIND_WORK_MS) {
     blindWorkRepairAt.set(conversationId, now);
-    void queueStalledTabRecovery(conversationId, now);
+    void queueStalledTabRecovery(conversationId, now, 'blind');
   }
   if (now - lastBlindWorkNoticeAt < BLIND_WORK_NOTICE_EVERY_MS) return;
   lastBlindWorkNoticeAt = now;
@@ -7765,6 +7783,7 @@ function repairReason(repair: Repair): string {
     'assistant-error': 'an interrupted response',
     'no-tab': 'a missing browser tab',
     stalled: 'a suspended browser tab',
+    blind: 'a page that stopped reporting',
     silence: 'an unresponsive open turn',
     goal: 'an undelivered follow-up',
     compaction: 'an uncollected compaction ticket'
