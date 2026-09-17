@@ -6613,7 +6613,14 @@ describe('unattributed activity recovery', () => {
       // And it is the reload path, not a notice: the same line the extension's stalled-shell
       // report produces. Deduplication belongs to `queueBrowserRecovery` and is covered with it;
       // this fixture's clock jumps hours per synthetic call, so counting here would test that.
-      expect(getLog().some((entry) => entry.message.includes('is a stalled browser tab'))).toBe(true);
+      // Its own route, not the suspended-shell one. The worker turns `stalled` into
+      // `suspended: true`, and the browser then reloads only a genuinely discarded or frozen
+      // tab — measured 2026-09-17, that request was handed over twice for a live blind page and
+      // carried out neither time, while `silence` and `compaction` for the same chat landed in
+      // 34 and 107 milliseconds.
+      expect(getLog().some((entry) =>
+        entry.message.includes('is a page that stopped reporting — asking the browser to reload'))).toBe(true);
+      expect(getLog().some((entry) => entry.message.includes('is a stalled browser tab'))).toBe(false);
     } finally {
       vi.useRealTimers();
     }

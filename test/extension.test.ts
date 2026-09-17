@@ -888,6 +888,36 @@ function journalOf(session: FakeStorageArea): any[] {
   return Array.isArray(value) ? value : [];
 }
 
+/**
+ * The live page that stopped reporting is not a suspended shell.
+ *
+ * `suspended` is derived from `reason === 'stalled'`, and that contract reloads only a tab that
+ * is genuinely discarded or frozen — correct for the shells the worker itself reports. A page
+ * that is alive and merely blind needs the ordinary reload, and routing it through the shell
+ * contract meant the repair was handed over and never carried out: measured 2026-09-17, twice
+ * for one chat, while `silence` and `compaction` repairs for that same chat landed in 34 and
+ * 107 milliseconds.
+ */
+it.each([['blind', 1], ['stalled', 0]])('reloads a live page for reason %s: %i time(s)', async (reason, expected) => {
+  const conversationId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const tab = { id: 72, url: `https://chatgpt.com/c/${conversationId}`, discarded: false, frozen: false };
+  const reload = vi.fn();
+  const create = vi.fn();
+  const source = backgroundSource.slice(backgroundSource.indexOf('async function performBrowserRepairs('),
+    backgroundSource.indexOf('\nfunction conversationStillOpen('));
+  const repair = vm.runInNewContext(`${source}\nperformBrowserRepairs`, {
+    tabConversations: { '72': conversationId }, tabDocuments: { '72': 'live-document' },
+    conversationForTab: (value: { url?: string }) => value.url?.split('/c/')[1] ?? null,
+    createChatTab: create, call: vi.fn(async () => ({ ok: true })),
+    chrome: { tabs: { query: async () => [tab], reload, get: async () => tab, update: vi.fn() } },
+    CHATGPT_TAB_URLS: ['https://chatgpt.com/*']
+  });
+  // Exactly what the worker projects for each reason: `suspended: entry?.reason === 'stalled'`.
+  await repair([{ conversationId, token: `t-${reason}`, suspended: reason === 'stalled' }], {});
+  expect(reload).toHaveBeenCalledTimes(expected);
+  expect(create).not.toHaveBeenCalled();
+});
+
 it.each(['discarded', 'frozen', 'woke', 'navigated', 'loading', 'closed', 'missing'])(
   'rechecks suspended-tab recovery at the browser action (%s)', async state => {
     const conversationId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
