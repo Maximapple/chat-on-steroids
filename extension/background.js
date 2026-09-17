@@ -241,6 +241,22 @@ let revivalPreferences = {};
 let recoveryMonitoring = false;
 /** Tabs whose normal auto-discard policy this extension changed for a live agent conversation. */
 let discardProtectedTabs = {};
+/**
+ * Tabs this worker opened for a command, by tab id -> { id, at }.
+ *
+ * `opening` below protects such a tab only while it still carries its `clf=` marker and has no
+ * conversation of its own. For a resume that is the wrong half of the window: ChatGPT names the
+ * conversation the moment it accepts the brief, and the handoff is not finished there — the page
+ * still has to reconcile its marker out of its own transcript before the app can commit. Dropping
+ * protection at exactly that point let Chrome discard the tab, which took content.js with it. The
+ * turn kept running server-side and kept calling tools through the app, so the work looked alive
+ * while no observation reached anyone — and a page that reports no turns can never reconcile the
+ * marker, so the handoff could not commit, so the chat never became one the app protects. A
+ * closed loop, measured four times on 2026-09-16/17.
+ */
+let commandTabs = {};
+/** Longer than the destination lease, short enough that no tab is ever pinned for hours. */
+const COMMAND_TAB_PROTECTION_MS = 30 * 60_000;
 
 function load() {
   if (loaded) return Promise.resolve();
@@ -296,6 +312,7 @@ async function loadOnce() {
     'commandAckOutbox',
     'recoveryMonitoring',
     'discardProtectedTabs',
+    'commandTabs',
     'delivery'
   ]);
   settled = Array.isArray(live.settled) ? live.settled : [];
@@ -327,6 +344,12 @@ async function loadOnce() {
   discardProtectedTabs = Object.fromEntries(
     Object.entries(savedDiscardProtection).filter(([id, owned]) => /^\d+$/.test(id) && owned === true)
   );
+  const savedCommandTabs =
+    live.commandTabs && typeof live.commandTabs === 'object' && !Array.isArray(live.commandTabs) ? live.commandTabs : {};
+  commandTabs = Object.fromEntries(
+    Object.entries(savedCommandTabs).filter(([id, entry]) =>
+      /^\d+$/.test(id) && entry && typeof entry.id === 'string' && Number.isFinite(entry.at))
+  );
   if (live.delivery && typeof live.delivery === 'object' && !Array.isArray(live.delivery)) {
     delivery = { ...delivery, ...live.delivery };
   }
@@ -353,6 +376,7 @@ function persistLive() {
         commandAckOutbox: commandAckOutbox.slice(-200),
         recoveryMonitoring,
         discardProtectedTabs,
+        commandTabs,
         delivery
       }),
       // Only small command-control metadata crosses browser restarts. No transcript and no
@@ -2489,7 +2513,8 @@ async function maintainOnce() {
       .map(cleanConversationId)
       .filter(Boolean)
   );
-  const protectionWork = nonDiscardable.size > 0 || Object.keys(discardProtectedTabs).length > 0;
+  const protectionWork = nonDiscardable.size > 0 || Object.keys(discardProtectedTabs).length > 0 ||
+    Object.keys(commandTabs).length > 0;
   // Chats the app has finished with: compacted source chats and stopped worker chats beyond
   // the ones the prime is likely to come back to. Their tabs are memory and nothing else.
   const closable = new Set(
@@ -2498,7 +2523,10 @@ async function maintainOnce() {
       .filter((conversationId) => conversationId && !nonDiscardable.has(conversationId))
   );
   const managedWork = Array.isArray(reply.data.managedConversations) && reply.data.managedConversations.length > 0;
-  const retiredCommandWork = Array.isArray(reply.data.retiredCommands) && reply.data.retiredCommands.length > 0;
+  const retiredCommands = new Set(
+    (Array.isArray(reply.data.retiredCommands) ? reply.data.retiredCommands : []).filter((id) => typeof id === 'string')
+  );
+  const retiredCommandWork = retiredCommands.size > 0;
   if (!protectionWork && !managedWork && !retiredCommandWork && closable.size === 0 && repairs.length === 0) return clearRetryIfIdle();
   let tabs = [];
   try {
@@ -2516,7 +2544,15 @@ async function maintainOnce() {
       const ours = discardProtectedTabs[key] === true;
       const conversation = conversationForTab(tab);
       const opening = ours && !conversation && /[?&#]clf=/.test(tab.pendingUrl || tab.url || '');
-      const protect = opening || nonDiscardable.has(conversation);
+      // A tab opened for a command the app has not retired yet, whether or not ChatGPT has
+      // named its conversation. Retirement and the app's own protection both end it; so does
+      // the deadline, so a command that neither lands nor retires cannot pin a tab for hours.
+      const carried = commandTabs[key];
+      const carrying = Boolean(carried) && !retiredCommands.has(carried.id) &&
+        Date.now() - carried.at < COMMAND_TAB_PROTECTION_MS;
+      if (carried && !carrying) { delete commandTabs[key]; changed = true; }
+      if (carried && nonDiscardable.has(conversation)) { delete commandTabs[key]; changed = true; }
+      const protect = opening || carrying || nonDiscardable.has(conversation);
       if (protect && tab.autoDiscardable !== false) {
         try {
           await chrome.tabs.update(tab.id, { autoDiscardable: false });
@@ -4050,6 +4086,10 @@ webext.tabs.onRemoved.addListener((id) => {
   heldTabs.delete(id);
   revivalReuseAttempted.delete(id);
   clearDeferredRevivalOffersForTab(id);
+  if (commandTabs[String(id)]) {
+    delete commandTabs[String(id)];
+    void persistLive().catch(() => undefined);
+  }
   void serializeTab(id, async () => {
     const documentId = await markTerminal(id);
     return releaseTab(id, null, documentId);
@@ -4309,9 +4349,14 @@ async function placeSuccessorChat(raw, tabId) {
   if (typeof home.index === 'number') create.index = home.index + 1;
   try {
     const created = await chrome.tabs.create(create);
-    if (raw.active === false && Number.isInteger(created?.id)) {
-      await chrome.tabs.update(created.id, { autoDiscardable: false });
-      discardProtectedTabs[String(created.id)] = true;
+    if (Number.isInteger(created?.id)) {
+      // Named whether or not the tab opened in the background: a foreground tab can be sent to
+      // the background by the person a second later, and the reconciliation window is the same.
+      commandTabs[String(created.id)] = { id, at: Date.now() };
+      if (raw.active === false) {
+        await chrome.tabs.update(created.id, { autoDiscardable: false });
+        discardProtectedTabs[String(created.id)] = true;
+      }
       await persistLive();
     }
   } catch {
