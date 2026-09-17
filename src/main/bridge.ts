@@ -6837,11 +6837,13 @@ async function noteRecoveryObservations(
       logInfo(`bridge: assistant transport failure — asking the browser to recover ${conversationId}`);
     }
     // The reload above is worth trying and often is not enough: ChatGPT gives the page a fixed
-    // four minutes to produce the answer after it says `Connection interrupted`, and a large
-    // chat takes longer than that to come back. Measured across 154 such interruptions, the
-    // ones that were rescued sat at a median of ~247k context tokens and the ones that ended in
-    // `Message delivery timed out` at ~431k. Past that size the reload cannot win the race, and
-    // the only remedy that changes anything is a smaller chat.
+    // window to produce the answer after it says `Connection interrupted` — measured here at a
+    // median of 243 seconds, with 23 of 31 pairable cases between 235 and 245 — and a turn that
+    // has been running a long time does not come back inside it. Of 44 interrupted turns, the 23
+    // that went on to time out had been running a median of 49 minutes when the interruption
+    // arrived; the 21 that did not had been running a median of 2.6. So the reload loses the race
+    // exactly where the work is most expensive, and the only remedy that changes anything is a
+    // chat small enough that the next turn is not another 49-minute one.
     if (sessionId) void considerAutomaticCompaction(conversationId, sessionId, true);
     break;
   }
