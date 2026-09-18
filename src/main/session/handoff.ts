@@ -56,12 +56,23 @@ export function resumeBootstrapText(summary: string, token = ''): string {
  * those known space artifacts plus line endings; deliberately do not trim/collapse
  * ordinary whitespace or normalize arbitrary Unicode, because this comparison is provenance.
  */
+/*
+ * Markdown escaping joined that list on 2026-09-16. The composer round-trips inserted text
+ * through ChatGPT's own serializer before sending it, and it began escaping ASCII punctuation:
+ * the brief goes in as `[[CLF-RESUME:<token>]]` and comes back as `[[CLF-RESUME\\:<token>]]`.
+ * Same class as the NBSP artifact — the site rewrote the presentation of text this app wrote —
+ * and it is admitted the same way: only as a second chance, after the exact comparison has
+ * already failed, so a recording that needs no repair is judged exactly as before.
+ */
 export function resumeBootstrapMatches(recorded: string, summary: string): boolean {
   const canonical = (value: string): string =>
     value.replace(/\u00c2\u00a0/g, ' ').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n');
+  const unescapeMarkdown = (value: string): string => value.replace(/\\([!-/:-@[-`{-~])/g, '$1');
+  const strip = (value: string): string =>
+    (userPromptText(value) ?? value).replace(/^\[\[CLF-RESUME:[A-Za-z0-9_-]{16,64}\]\]\n\n/, '');
+  const expected = canonical(resumeBootstrapText(summary));
   const normalized = canonical(recorded);
-  const withoutMarker = (userPromptText(normalized) ?? normalized).replace(/^\[\[CLF-RESUME:[A-Za-z0-9_-]{16,64}\]\]\n\n/, '');
-  return withoutMarker === canonical(resumeBootstrapText(summary));
+  return strip(normalized) === expected || strip(unescapeMarkdown(normalized)) === expected;
 }
 
 /**
