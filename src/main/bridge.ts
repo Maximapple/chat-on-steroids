@@ -6616,6 +6616,26 @@ async function assistantRepairCurrent(conversationId: string, repair: Repair): P
 const RECOVERY_DECLINE_NOTICE_EVERY_MS = 60_000;
 const recoveryDeclineNoticedAt = new Map<string, number>();
 
+/**
+ * The same throttle for a refusal that is not keyed on a repair reason.
+ *
+ * `queueStalledTabRecovery` and the missing-tab decision both explain themselves on every pass,
+ * and a pass runs every thirty seconds. For a tab Chrome has discarded and a chat that is idle —
+ * which is every chat overnight — that is a correct refusal written a thousand times before
+ * morning, and the line that matters next is somewhere inside it. Measured 2026-09-18: the same
+ * sentence about the same chat twice in one minute, with nothing to act on either time.
+ */
+function noticeDecline(key: string, message: string): void {
+  const now = Date.now();
+  const last = recoveryDeclineNoticedAt.get(key) ?? 0;
+  if (last && now >= last && now - last < RECOVERY_DECLINE_NOTICE_EVERY_MS) return;
+  recoveryDeclineNoticedAt.set(key, now);
+  if (recoveryDeclineNoticedAt.size > 500) {
+    for (const [old] of [...recoveryDeclineNoticedAt].slice(0, 100)) recoveryDeclineNoticedAt.delete(old);
+  }
+  logInfo(message);
+}
+
 function declineRecovery(conversationId: string, reason: Repair['reason'], why: string): false {
   const key = `${conversationId}:${reason}:${why}`;
   const now = Date.now();
@@ -7958,7 +7978,7 @@ async function queueMissingTab(conversationId: string, working: boolean, now = D
   const session = await findSessionByConversation(conversationId);
   const name = agent?.id ?? conversationId;
   const declined = (why: string): void => {
-    logInfo(`bridge: ${name} closed its last tab — not reopened: ${why}`);
+    noticeDecline(`no-tab:${conversationId}:${why}`, `bridge: ${name} closed its last tab — not reopened: ${why}`);
   };
   // A chat with no session is not this app's chat; its tab closing is nobody's business here.
   if (!session) return;
@@ -8008,7 +8028,7 @@ async function queueStalledTabRecovery(
   const session = await findSessionByConversation(conversationId, { requireUnique: true });
   const name = agent?.id ?? conversationId;
   const declined = (why: string): void => {
-    logInfo(`bridge: ${name} is a stalled browser tab — not reloaded: ${why}`);
+    noticeDecline(`stalled:${conversationId}:${why}`, `bridge: ${name} is a stalled browser tab — not reloaded: ${why}`);
   };
   // A chat with no session is not this app's chat; its tab sleeping is nobody's business here.
   if (!session) return;

@@ -6565,6 +6565,44 @@ describe('unattributed activity recovery', () => {
    * the turn finally died. A tool call only happens inside a turn, so a call arriving while the
    * app holds no turn for that chat is a contradiction, not a quiet page.
    */
+  it('explains a refused stalled-tab reload once a minute, not once a pass', async () => {
+    // The refusal itself is right — an idle chat should not be revived overnight — but it was
+    // written on every `/status` pass, and a pass runs every thirty seconds. Measured 2026-09-18
+    // at 03:05: the same sentence about the same chat twice inside one minute, with nothing to
+    // act on either time, which is how the line that does matter gets buried.
+    vi.useFakeTimers();
+    try {
+      await pair();
+      // A chat this app actually knows: with no session the recovery returns before it can
+      // refuse anything, and there is nothing to throttle.
+      await attributed(PRIME);
+      // And idle: the refusal this is about is "no turn is running in it", which is every chat
+      // overnight. A chat still inside its activity grant is recovered rather than refused.
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      const stalled = () => request('POST', '/status', { body: { openConversations: [PRIME], stalledConversations: [PRIME] } });
+      const lines = () => getLog().filter((entry) => entry.message.includes('is a stalled browser tab — not reloaded'));
+
+      await stalled();
+      const first = lines().length;
+      expect(first).toBeGreaterThan(0);
+
+      // Four more passes inside the same minute say nothing further. Ten seconds apart, so the
+      // whole burst stays under the throttle rather than straddling it.
+      for (let pass = 0; pass < 4; pass += 1) {
+        await vi.advanceTimersByTimeAsync(10_000);
+        await stalled();
+      }
+      expect(lines()).toHaveLength(first);
+
+      // Past the minute it is worth saying again, because the state is still true.
+      await vi.advanceTimersByTimeAsync(61_000);
+      await stalled();
+      expect(lines().length).toBeGreaterThan(first);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports the page-model helper as absent or empty, once per state change', async () => {
     // Everything Fiber-derived arrives through that helper, including the `[[CLF-RESUME]]`
     // marker a handoff commits from. Measured 2026-09-14 to 09-17: `page_tool` fell from 5.3
@@ -6620,7 +6658,12 @@ describe('unattributed activity recovery', () => {
       // 34 and 107 milliseconds.
       expect(getLog().some((entry) =>
         entry.message.includes('is a page that stopped reporting — asking the browser to reload'))).toBe(true);
-      expect(getLog().some((entry) => entry.message.includes('is a stalled browser tab'))).toBe(false);
+      // Narrow on purpose: the refusal line for an idle chat also begins "is a stalled browser
+      // tab", and asserting on that prefix alone made this test depend on which other tests had
+      // run before it. What is being claimed here is that the blind page did not take the
+      // suspended-shell *route*, which is the wording of the request, not of a refusal.
+      expect(getLog().some((entry) =>
+        entry.message.includes('is a stalled browser tab — asking the browser to reload'))).toBe(false);
 
       // And the reload is bounded. The first version had a cadence and no ceiling, so a page a
       // reload cannot repair was reloaded every three minutes for as long as it kept calling
