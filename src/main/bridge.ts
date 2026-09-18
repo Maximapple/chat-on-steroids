@@ -7342,7 +7342,12 @@ function noticeBlindWork(conversationId: string, sessionId: string, filed: Sessi
     }
     void queueStalledTabRecovery(conversationId, now, 'blind');
   }
-  if (now - lastBlindWorkNoticeAt < BLIND_WORK_NOTICE_EVERY_MS) return;
+  // A stamp in the future silences this for as long as it takes real time to catch up, which a
+  // sleep/wake or an NTP correction can make hours — and the page it describes calls every few
+  // seconds throughout. Same guard the stretch above uses: a clock that moved backwards restarts
+  // the window rather than satisfying it.
+  if (lastBlindWorkNoticeAt && now >= lastBlindWorkNoticeAt &&
+      now - lastBlindWorkNoticeAt < BLIND_WORK_NOTICE_EVERY_MS) return;
   lastBlindWorkNoticeAt = now;
   logWarn(
     `bridge: ${conversationId} of session ${sessionId} has been calling tools for ` +
