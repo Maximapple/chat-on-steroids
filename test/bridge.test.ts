@@ -126,6 +126,7 @@ const {
   bindConversation,
   cancelPrimeTransfer,
   finishAgent,
+  failAgent,
   currentRunId,
   DETACHED_SILENCE_MS,
   noteAgentAlive,
@@ -764,6 +765,29 @@ describe('active agent tab discard projection', () => {
     expect((await request('GET', `/activity?conversationId=${workerConversation}`)).body.progress.workers).toBeNull();
     finishAgent({ conversationId: workerConversation }, 'done');
     expect((await request('GET', `/activity?conversationId=${primeConversation}`)).body.progress.workers).toMatchObject({ active: 0, finished: 1 });
+
+    // A failure belongs on the wait caption while it is part of what the turn is waiting for,
+    // and stops belonging there once it is only history. Reported from the page on 2026-09-18:
+    // `2 workers failed: … · 7 finished · 0 running · 2 failed`, unchanged for hours and across
+    // three handoffs, naming workers that had failed the previous day with nothing running.
+    spawn({ workers: [{ task: 'the one that breaks', label: 'Portable design' }], caller: { conversationId: primeConversation } });
+    const failing = 'ccddeeff-1111-4222-8333-444444444444';
+    await createSession({ conversationId: failing, title: 'Failing worker' });
+    expect(bindConversation('worker-2', failing)).toBe(true);
+    expect(failAgent('worker-2', 'it broke')).toBeTruthy();
+
+    const fresh = (await request('GET', `/activity?conversationId=${primeConversation}`)).body.progress.workers;
+    expect(fresh).toMatchObject({ failed: 1 });
+
+    // A quarter of an hour later the same failure is history, and the caption drops it.
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 16 * 60_000);
+    try {
+      const later = (await request('GET', `/activity?conversationId=${primeConversation}`)).body.progress.workers;
+      expect(later).toMatchObject({ failed: 0 });
+      // The finished tally is untouched: only the caption's window moved, not the record.
+      expect(later.finished).toBe(fresh.finished);
+    } finally { clock.mockRestore(); }
   });
   it('does not mistake a broker active label for a running provider turn', async () => {
     await pair();
