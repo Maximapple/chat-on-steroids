@@ -5983,36 +5983,70 @@ describe('unattributed activity recovery', () => {
     }
   });
 
-  it('reports the page-model helper as absent or empty, once per state change', async () => {
+  it('reports a page-model helper that stays degraded, never one that heals itself', async () => {
     // Everything Fiber-derived arrives through that helper, including the `[[CLF-RESUME]]`
-    // marker a handoff commits from. Measured 2026-09-14 to 09-17: `page_tool` fell from 5.3
-    // per turn to 0.08 while turn boundaries arrived throughout, and five handoffs ended
-    // `dispatched-unresolved` with the brief in a chat that was on its 272nd tool call. Nothing
-    // in the log said why, because nothing reported on this half.
+    // marker a handoff commits from. When it stops delivering, a replacement chat works
+    // normally and its handoff can never commit, and from here that is indistinguishable
+    // from a page that is merely quiet.
+    //
+    // The grace period is what production taught this reporter. Every reload tears the helper
+    // out of the page and the worker puts it back, so a reload is followed by `absent`, often
+    // by `empty` while the transcript is still mounting, and then by `ok`. Measured 2026-09-18
+    // across five reloads: every degraded state healed itself in 0.6-9.4 seconds, and one
+    // `empty` lasted 44 milliseconds — warning that a chat "contributes no resume marker"
+    // about a page that was reading again before the sentence finished. What is worth a line
+    // is a helper that is not coming back.
     await pair();
     const ask = (fiber: string | null) =>
       request('GET', `/activity?conversationId=${PRIME}&since=0${fiber === null ? '' : `&fiber=${fiber}`}`);
     const lines = () => getLog().filter((entry) => entry.message.includes('page-model helper as'));
+    const recovered = () => getLog().filter((entry) => entry.message.includes('page model again'));
 
-    expect((await ask('absent')).status).toBe(200);
-    expect(lines().at(-1)?.message).toContain('cannot reconcile its marker');
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      // The blip: absent, then reading again a moment later. Neither is news.
+      expect((await ask('absent')).status).toBe(200);
+      clock.mockReturnValue(now + 2_000);
+      await ask('ok');
+      expect(lines()).toHaveLength(0);
+      expect(recovered()).toHaveLength(0);
 
-    // Once per state, however many pulls that page makes.
-    await ask('absent');
-    await ask('absent');
-    expect(lines()).toHaveLength(1);
+      // A helper that does not come back is.
+      clock.mockReturnValue(now + 10_000);
+      await ask('absent');
+      expect(lines()).toHaveLength(0);
+      clock.mockReturnValue(now + 26_000);
+      await ask('absent');
+      expect(lines()).toHaveLength(1);
+      expect(lines().at(-1)?.message).toContain('cannot reconcile its marker');
 
-    // The other fault is named differently, because only one of the two can be acted on here.
-    expect((await ask('empty')).status).toBe(200);
-    expect(lines().at(-1)?.message).toContain('answers and finds no turns');
-    expect(lines()).toHaveLength(2);
+      // Once per state, however many pulls that page makes.
+      clock.mockReturnValue(now + 40_000);
+      await ask('absent');
+      await ask('absent');
+      expect(lines()).toHaveLength(1);
 
-    // Recovery is worth one line too, and a pull that says nothing changes nothing.
-    await ask('ok');
-    expect(getLog().some((entry) => entry.message.includes('reading ChatGPT’s own page model again')) ||
-      getLog().some((entry) => entry.message.includes("reading ChatGPT's own page model again"))).toBe(true);
-    await ask(null);
-    expect(lines()).toHaveLength(2);
+      // The other fault is named differently, because only one of the two can be acted on
+      // here — and it earns its line the same way, by lasting.
+      clock.mockReturnValue(now + 50_000);
+      await ask('empty');
+      expect(lines()).toHaveLength(1);
+      clock.mockReturnValue(now + 70_000);
+      await ask('empty');
+      expect(lines()).toHaveLength(2);
+      expect(lines().at(-1)?.message).toContain('answers and finds no turns');
+
+      // Recovery is worth one line, because something was reported to recover from.
+      clock.mockReturnValue(now + 80_000);
+      await ask('ok');
+      expect(recovered()).toHaveLength(1);
+      await ask(null);
+      expect(lines()).toHaveLength(2);
+      expect(recovered()).toHaveLength(1);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('waits 15 seconds before handing a lone suspect to the browser once attribution has failed', async () => {

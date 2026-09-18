@@ -6605,18 +6605,46 @@ function nonDiscardableAgentConversations(): string[] {
  * chat per state change, recovery included, so a page that stays broken does not repeat itself.
  */
 const fiberHealthTold = new Map<string, string>();
+/** When each chat's current degraded state was first seen, so a self-healing one says nothing. */
+const fiberHealthSince = new Map<string, { state: string; at: number }>();
+/**
+ * How long a degraded helper may stay degraded before it is worth a line.
+ *
+ * Every reload tears the MAIN-world helper out of the page and the worker puts it back, so a
+ * reload is followed by `absent`, often by `empty` while the transcript is still mounting, and
+ * then by `ok`. Reporting the first sighting therefore warns about healthy pages: measured on
+ * 2026-09-18 across five reloads on one machine, every degraded state recovered on its own in
+ * 0.6-9.4 seconds, and one `empty` lasted 44 milliseconds — announced as "this chat contributes
+ * no resume marker" about a page that was reading again before the sentence was written.
+ *
+ * Fifteen seconds is past the slowest recovery measured, by some margin. What survives it is
+ * the state this reports on: a helper that is not coming back by itself.
+ */
+const FIBER_HEALTH_GRACE_MS = 15_000;
 
-function noteFiberHealth(conversationId: string, raw: string | null): void {
+function noteFiberHealth(conversationId: string, raw: string | null, now = Date.now()): void {
   if (raw !== 'absent' && raw !== 'empty' && raw !== 'ok') return;
-  if (fiberHealthTold.get(conversationId) === raw) return;
-  fiberHealthTold.set(conversationId, raw);
   if (fiberHealthTold.size > 200) {
-    for (const old of [...fiberHealthTold.keys()].slice(0, 50)) fiberHealthTold.delete(old);
+    for (const old of [...fiberHealthTold.keys()].slice(0, 50)) { fiberHealthTold.delete(old); fiberHealthSince.delete(old); }
   }
   if (raw === 'ok') {
+    fiberHealthSince.delete(conversationId);
+    // Only after a degraded state was actually reported. A blip nobody was told about does not
+    // get a recovery notice of its own; that pair was the whole of the noise.
+    if (fiberHealthTold.get(conversationId) === 'ok' || !fiberHealthTold.has(conversationId)) return;
+    fiberHealthTold.set(conversationId, 'ok');
     logInfo(`bridge: ${conversationId} is reading ChatGPT's own page model again`);
     return;
   }
+  const seen = fiberHealthSince.get(conversationId);
+  // A clock that moved backwards restarts the stretch rather than satisfying it instantly.
+  if (!seen || seen.state !== raw || now < seen.at) {
+    fiberHealthSince.set(conversationId, { state: raw, at: now });
+    return;
+  }
+  if (now - seen.at < FIBER_HEALTH_GRACE_MS) return;
+  if (fiberHealthTold.get(conversationId) === raw) return;
+  fiberHealthTold.set(conversationId, raw);
   logWarn(
     `bridge: ${conversationId} reports its page-model helper as ${raw} — ` +
       (raw === 'absent'
