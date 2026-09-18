@@ -6587,11 +6587,17 @@ function nonDiscardableAgentConversations(): string[] {
  * from here that is indistinguishable from a page that is merely quiet.
  *
  * Measured across four days of one install's session journals, `page_tool` observations per
- * `turn_start`: 5.3, then 1.2, then 2.4, then 0.08 — one event across 1,253 tool calls on the
- * last day — while `turn_start` and `turn_end` arrived throughout, so the isolated world was
- * alive the whole time. Five handoffs that day ended `dispatched-unresolved` with the brief
- * demonstrably in a chat that was on its 272nd tool call, and the reasoning block was rendering
- * in the page while none of it reached the app. Nothing in the log said why.
+ * `turn_start`: 5.26, then 1.18, then 2.39, then 1.31, while `turn_start` and `turn_end` arrived
+ * throughout — so the isolated world was alive the whole time and the helper's yield fell about
+ * fourfold from the first day and stayed down. (An earlier draft of this comment said the last
+ * day was 0.08. That was a partial day counted mid-afternoon; the full day is 1.31, and the
+ * claim it supported — a collapse to nothing — is withdrawn. What the numbers show is a step
+ * down that persists, not a helper that stopped answering.)
+ *
+ * The fault is visible per page rather than per day: five handoffs in that window ended
+ * `dispatched-unresolved` with the brief demonstrably in a chat that was on its 272nd tool call,
+ * and the reasoning block was rendering in the page while none of it reached the app. Nothing in
+ * the log said why, which is what this reports.
  *
  * `absent` and `empty` are the two faults, and telling them apart is the point: absent is an
  * injection that is not landing, which this app can act on; empty is a helper that answers and
