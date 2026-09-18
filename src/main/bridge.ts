@@ -46,7 +46,7 @@ import http from 'node:http';
 import type { BridgeStatus, CompanionDiagnostics, CompanionPageDiagnostics, CompanionTabDiagnostics, CompanionTraceEntry } from '../shared/types.js';
 import { positionOf } from '../shared/chronology.js';
 import { recoveryBusyMs } from '../shared/recovery.js';
-import { CHAT_ACTIVE_MS, CHAT_SILENCE_MS, continuationMarkerOf, isReasoningEffort, normalizedToolOutcome, toolCallSummary,
+import { CHAT_ACTIVE_MS, CHAT_SILENCE_MS, continuationMarkerOf, isReasoningEffort, normalizedToolOutcome, toolCallSummary, unescapeMarkdown,
   type ReasoningEffort, type SessionEvent, type SessionOrigin, type StoredText, type ToolCallRecord } from '../shared/session.js';
 import { isChatBlocked, chatBlockedAt } from './session/blocked-chats.js';
 export { CHAT_ACTIVE_MS, CHAT_SILENCE_MS } from '../shared/session.js';
@@ -2535,9 +2535,18 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     } else if (summary?.conversationId === id && summary.origin?.kind === 'worker' && summary.origin.agentId && openingUserMessage?.messageId) {
       const original = openingUserMessage.message.text.trimStart();
       const authored = userPromptText(original) ?? original;
+      // Undone before the prompt is parsed, not after: the escaping lands on the prompt's own
+      // framing too, so extracting first and unescaping the result compares the wrong slice.
+      const asTyped = unescapeMarkdown(original);
+      const authoredAsTyped = userPromptText(asTyped) ?? asTyped;
       const expected = bootstrapText({ type: 'worker', agent: summary.origin.agentId, task: summary.origin.task,
         model: null, reasoningEffort: null, runId: '' }, '');
-      if (!openingUserMessage.message.truncated && authored === expected) bootstrapMessageId = openingUserMessage.messageId;
+      // The worker bootstrap is typed into the fresh chat by this app, so ChatGPT's composer
+      // escapes it exactly as it escapes a resume brief — and this comparison is the proof that
+      // the opening row *is* that bootstrap. Exact text first; an escaped rendering of the same
+      // text is the same proof. A truncated row still proves nothing either way.
+      if (!openingUserMessage.message.truncated &&
+          (authored === expected || authoredAsTyped === expected)) bootstrapMessageId = openingUserMessage.messageId;
     }
     // Where this conversation begins inside a session that has been compacted and resumed.
     //

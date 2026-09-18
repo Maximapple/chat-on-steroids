@@ -10,6 +10,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { Handoff } from '../../shared/session.js';
+import { unescapeMarkdown } from '../../shared/session.js';
 import { logInfo } from '../logger.js';
 import { getSession, readSessionPlan, saveHandoff } from './store.js';
 import { destinationContinuationMarker } from './handoff-prompt.js';
@@ -67,7 +68,6 @@ export function resumeBootstrapText(summary: string, token = ''): string {
 export function resumeBootstrapMatches(recorded: string, summary: string): boolean {
   const canonical = (value: string): string =>
     value.replace(/\u00c2\u00a0/g, ' ').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n');
-  const unescapeMarkdown = (value: string): string => value.replace(/\\([!-/:-@[-`{-~])/g, '$1');
   const strip = (value: string): string =>
     (userPromptText(value) ?? value).replace(/^\[\[CLF-RESUME:[A-Za-z0-9_-]{16,64}\]\]\n\n/, '');
   const expected = canonical(resumeBootstrapText(summary));

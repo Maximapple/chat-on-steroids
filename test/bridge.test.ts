@@ -2507,6 +2507,19 @@ describe('delivering a bootstrap', () => {
     ] } });
     expect((await request('GET', `/activity?conversationId=${worker}&since=999999`)).body.bootstrapMessageId).toBe('worker-opening');
 
+    // The worker bootstrap is typed into the fresh chat by this app, so ChatGPT's composer
+    // escapes it exactly as it escapes a resume brief — measured from 2026-09-16. The opening
+    // row is still the bootstrap; refusing it here loses the boundary that keeps chat A's
+    // repair notices out of chat B's feed.
+    const escapedWorker = '66666666-3333-2222-1111-000000000083';
+    await noteChatOrigin(escapedWorker, { kind: 'worker', fromSessionId: null, agentId: 'worker-1', task: 'Read the bounded fixture' });
+    await request('POST', '/events', { body: { conversationId: escapedWorker, events: [
+      { kind: 'user_message', time: Date.now(), messageId: 'escaped-opening',
+        text: boot.text.replace(/([_:#*[\]`])/g, '\\$1') }
+    ] } });
+    expect((await request('GET', `/activity?conversationId=${escapedWorker}&since=999999`)).body.bootstrapMessageId)
+      .toBe('escaped-opening');
+
     const missing = '66666666-3333-2222-1111-000000000082';
     await noteChatOrigin(missing, { kind: 'worker', fromSessionId: null, agentId: 'worker-1', task: 'Read the bounded fixture' });
     await request('POST', '/events', { body: { conversationId: missing, events: [

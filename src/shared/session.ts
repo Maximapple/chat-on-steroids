@@ -456,6 +456,17 @@ export const CONTINUATION_MARKER = /^\s*\[\[CLF-(HANDOFF|RESUME):([A-Za-z0-9_-]{
  */
 const CONTINUATION_MARKER_ESCAPED = /^\s*\[\[CLF-(HANDOFF|RESUME)\\?:((?:\\?[A-Za-z0-9_-]){16,64})\]\](?:\s|$)/;
 
+/**
+ * The same text with ChatGPT's Markdown escaping undone.
+ *
+ * Only a backslash that escapes ASCII punctuation, and only ever applied to text read back out
+ * of the page — never to text this app is about to send, and never as a first attempt: every
+ * caller compares exact text first, so a page that does not escape is judged exactly as before.
+ */
+export function unescapeMarkdown(value: string): string {
+  return value.replace(/\\([!-/:-@[-`{-~])/g, '$1');
+}
+
 /** The continuation marker at the head of `text`, as typed or as the composer escaped it. */
 export function continuationMarkerOf(text: string | null | undefined):
   { kind: 'HANDOFF' | 'RESUME'; token: string; marker: string } | null {
