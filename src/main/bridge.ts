@@ -46,7 +46,7 @@ import http from 'node:http';
 import type { BridgeStatus, CompanionDiagnostics, CompanionPageDiagnostics, CompanionTabDiagnostics, CompanionTraceEntry } from '../shared/types.js';
 import { positionOf } from '../shared/chronology.js';
 import { recoveryBusyMs } from '../shared/recovery.js';
-import { CHAT_ACTIVE_MS, CHAT_SILENCE_MS, CONTINUATION_MARKER, isReasoningEffort, normalizedToolOutcome, toolCallSummary,
+import { CHAT_ACTIVE_MS, CHAT_SILENCE_MS, continuationMarkerOf, isReasoningEffort, normalizedToolOutcome, toolCallSummary,
   type ReasoningEffort, type SessionEvent, type SessionOrigin, type StoredText, type ToolCallRecord } from '../shared/session.js';
 import { isChatBlocked, chatBlockedAt } from './session/blocked-chats.js';
 export { CHAT_ACTIVE_MS, CHAT_SILENCE_MS } from '../shared/session.js';
@@ -2525,7 +2525,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     // opening corroborated by existing durable origin/receipt, never its position alone.
     let bootstrapMessageId: string | null = null;
     if (summary?.conversationId === id && summary.lastCommittedResumeHandoffId && resumeUserMessage?.messageId) {
-      const token = CONTINUATION_MARKER.exec(resumeUserMessage.message.text)?.[2];
+      const token = continuationMarkerOf(resumeUserMessage.message.text)?.token;
       const receipt = token ? continuationByToken(token) : null;
       if (receipt?.state === 'committed' && receipt.sessionId === live.sessionId && receipt.to === id &&
           receipt.handoffId === summary.lastCommittedResumeHandoffId && receipt.destinationSend.state === 'sent' &&
