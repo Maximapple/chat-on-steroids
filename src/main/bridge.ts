@@ -7327,8 +7327,20 @@ function noticeBlindWork(conversationId: string, sessionId: string, filed: Sessi
   // request survived to the next. One attempt per chat per stretch is the honest cadence: a
   // reload either restores reporting, which ends the stretch, or it does not, and repeating it
   // four times a minute makes that no more true.
+  // Not when the app already knows ChatGPT ended the turn on its own side. A reload gives the
+  // page a fresh document; it cannot give it a turn that no longer exists server-side, and the
+  // line this prints when the attempts run out says exactly that. Measured on 2026-09-18: seven
+  // blind reloads across two stretches, every one of them on a chat whose last turn had failed
+  // with none since, and not one of them restored turn reporting. They did no harm either — work
+  // continued within a minute after all seven — so this is about not interrupting a working page
+  // three times for an outcome that cannot follow.
+  //
+  // The repair stays for what it was built for: a page whose *reporting* broke while ChatGPT is
+  // fine, where a fresh document does restore it. That page has no failed turn behind it.
+  const turnDiedOnTheirSide = filed.lastTurnOutcome === 'failed';
   const spent = blindWorkRepairsSpent.get(conversationId) ?? 0;
-  if (spent < BLIND_WORK_RELOAD_ATTEMPTS && now - (blindWorkRepairAt.get(conversationId) ?? 0) >= BLIND_WORK_MS) {
+  if (!turnDiedOnTheirSide &&
+      spent < BLIND_WORK_RELOAD_ATTEMPTS && now - (blindWorkRepairAt.get(conversationId) ?? 0) >= BLIND_WORK_MS) {
     blindWorkRepairAt.set(conversationId, now);
     blindWorkRepairsSpent.set(conversationId, spent + 1);
     if (spent + 1 === BLIND_WORK_RELOAD_ATTEMPTS) {
@@ -7351,7 +7363,10 @@ function noticeBlindWork(conversationId: string, sessionId: string, filed: Sessi
   lastBlindWorkNoticeAt = now;
   logWarn(
     `bridge: ${conversationId} of session ${sessionId} has been calling tools for ` +
-      `${Math.round((now - since) / 60_000)} minutes with no turn reported by its page — asking the browser to reload it`
+      `${Math.round((now - since) / 60_000)} minutes with no turn reported by its page — ` +
+      (turnDiedOnTheirSide
+        ? 'not reloading it, because ChatGPT ended the turn on its own side and a fresh page cannot find one that is gone'
+        : 'asking the browser to reload it')
   );
 }
 
