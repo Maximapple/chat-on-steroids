@@ -11261,3 +11261,59 @@ it('retires an already armed ordinary Goal repair when its conversation is now A
     expect(((await request('GET', '/status')).body.repairs ?? []).filter((r: any) => r.conversationId === chat)).toEqual([]);
   } finally { resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); vi.useRealTimers(); }
 });
+
+
+/**
+ * Deliberately the last test in this file.
+ *
+ * The blind-work notice is throttled once a quarter hour across every chat — one global stamp,
+ * on purpose, because a page in that state calls every few seconds. Driving a blind stretch
+ * therefore consumes that slot for whatever runs next, and an earlier placement silenced the
+ * notice the `unattributed activity recovery` test asserts on. Running last, this claims the
+ * slot only after every other test has had it.
+ */
+it('files the ticket for an oversized chat working with no turn on its page', async () => {
+  // Watched live on 2026-09-18. ChatGPT ended a turn at 12:32 and its page never opened another,
+  // while the connector went on answering tool calls for the same conversation: 500 of them over
+  // half an hour, editing files throughout, with the context climbing from 311k to 356k at about
+  // 1,850 tokens a minute. Neither trigger could fire — no live turn for the page-evidence one,
+  // no failing turn for the other — so the chat was heading past the threshold with nothing
+  // filed, and the only thing that would have rescued it was the person noticing and typing into
+  // the chat by hand. The app already knew: it had been logging "calling tools with no turn
+  // reported by its page" for nineteen minutes. That knowledge never reached this decision.
+  await pair();
+  const conversationId = randomUUID();
+  const base = getConfig();
+  await saveConfig({ ...base, compaction: { ...base.compaction, auto: true, autoTokens: 10_000 } });
+  vi.useFakeTimers();
+  try {
+    // Oversized, and no turn of any kind: not a running one, not a failing one.
+    await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'user_message', time: Date.now(), text: 'x'.repeat(44_000), messageId: 'over-the-line' }
+    ] } });
+
+    const call = async (index: number): Promise<void> => {
+      const requestId = `wfr_blind_compaction_${index}`;
+      await request('POST', '/events', { body: { conversationId, events: [{
+        kind: 'tool_evidence', time: Date.now(),
+        calls: [{ messageId: `m-blind-${index}`, tool: 'read', order: 0, answered: false, requestId }]
+      }] } });
+      await recordToolCall({ tool: 'read', args: { paths: ['/project/mine.ts'] },
+        content: [{ type: 'text', text: 'ok' }], outcome: 'ok', durationMs: 1,
+        startedAt: Date.now(), requestId });
+    };
+
+    // Under the blind-work stretch nothing is claimed yet: one call proves nothing.
+    await call(1);
+    expect(getLog().some((entry) => entry.message.includes('no turn on its page'))).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(3 * 60_000);
+    await call(2);
+    await vi.waitFor(() => expect(getLog().some((entry) =>
+      entry.message.includes('is working with no turn on its page') &&
+      entry.message.includes('filed auto-compaction ticket'))).toBe(true));
+  } finally {
+    vi.useRealTimers();
+    await saveConfig(base);
+  }
+});

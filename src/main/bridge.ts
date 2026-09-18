@@ -5802,10 +5802,29 @@ async function failedCompactionTurnCurrent(conversationId: string, sessionId: st
   return !!after && after.conversationId === conversationId && !after.activeTurnId && after.events === before.events;
 }
 
-async function considerAutomaticCompaction(conversationId: string, sessionId: string, failedTurn?: string): Promise<void> {
+/**
+ * `blindWork` is the third way a chat proves it is working.
+ *
+ * `chatIsWorking()` asks the page, and a page that has lost its turn answers no — while the
+ * connector keeps answering tool calls for the same conversation, which is the stronger proof
+ * of the two. Measured live on 2026-09-18: ChatGPT ended a turn at 12:32, its page never opened
+ * another, and the chat went on for 30 minutes and 500 attributed tool calls, editing files the
+ * whole time. Its context climbed from 311k to 356k at about 1,850 tokens a minute, straight
+ * towards the threshold, and neither trigger could fire: no live turn for the first, no failing
+ * turn for the second. The chat would simply have grown past the cap with nothing filed.
+ *
+ * The app already knows this state — `noticeBlindWork` has been logging it for three minutes by
+ * the time this is reached. It just never reached the decision that needs it.
+ *
+ * Attribution is what makes it safe to believe: a blind stretch is counted from calls the
+ * request-id join has already tied to this exact conversation, not from traffic that merely
+ * arrived while it was open.
+ */
+async function considerAutomaticCompaction(conversationId: string, sessionId: string, failedTurn?: string,
+                                           blindWork = false): Promise<void> {
   if (!getConfig().compaction.auto || compactionFilings.has(conversationId)) return;
   if (goalFencedChat(conversationId) || continuationForSession(sessionId) || stopRequestedFor(conversationId)) return;
-  if (!failedTurn && !chatIsWorking(conversationId)) return;
+  if (!failedTurn && !blindWork && !chatIsWorking(conversationId)) return;
   compactionFilings.add(conversationId);
   try {
     const summary = await getSession(sessionId).catch(() => null);
@@ -5816,13 +5835,14 @@ async function considerAutomaticCompaction(conversationId: string, sessionId: st
     const current = await getSession(sessionId);
     if (!current || current.conversationId !== conversationId || !autoCompactionReady(current)) return;
     if (failedTurn && !await failedCompactionTurnCurrent(conversationId, sessionId, failedTurn)) return;
-    if ((!failedTurn && !chatIsWorking(conversationId)) || continuationForSession(sessionId) || goalFencedChat(conversationId) ||
+    if ((!failedTurn && !blindWork && !chatIsWorking(conversationId)) || continuationForSession(sessionId) || goalFencedChat(conversationId) ||
         stopRequestedFor(conversationId) || !getConfig().compaction.auto || !automaticCompactionAllowed(current)) return;
     const opened = await openContinuationNow(sessionId, conversationId, true);
     rememberToken(sessionId, opened.token);
     changed();
     logInfo(
-      `bridge: ${conversationId} ${failedTurn ? 'lost its current turn' : 'is working'} at ${current.contextTokens} context tokens — filed auto-compaction ticket ${opened.token.slice(0, 8)}`
+      `bridge: ${conversationId} ${failedTurn ? 'lost its current turn' : blindWork ? 'is working with no turn on its page' : 'is working'} ` +
+        `at ${current.contextTokens} context tokens — filed auto-compaction ticket ${opened.token.slice(0, 8)}`
     );
   } catch (err) {
     logWarn(`bridge: could not file the auto-compaction ticket for ${conversationId} — ${err instanceof Error ? err.message : String(err)}`);
@@ -7316,6 +7336,13 @@ function noticeBlindWork(conversationId: string, sessionId: string, filed: Sessi
     return;
   }
   if (now - since < BLIND_WORK_MS) return;
+  // The compaction decision needs this before anything else here does. A chat whose page has no
+  // turn is not "working" to `chatIsWorking()`, so neither auto-compaction trigger can fire for
+  // it — and this stretch is the app's own proof that it is working anyway. Filed on the same
+  // condition as the repair rather than on the throttled notice, and `considerAutomaticCompaction`
+  // does the rest of the deciding: the threshold, the open-continuation fence and the one-filing
+  // guard are all its own.
+  void considerAutomaticCompaction(conversationId, sessionId, undefined, true);
   // Repair first, and on the condition rather than on the notice: the notice is throttled to one
   // a quarter hour across every chat, and a reload that waits for a free notice slot is a reload
   // that does not happen.
