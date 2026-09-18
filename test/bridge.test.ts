@@ -11261,3 +11261,60 @@ it('retires an already armed ordinary Goal repair when its conversation is now A
     expect(((await request('GET', '/status')).body.repairs ?? []).filter((r: any) => r.conversationId === chat)).toEqual([]);
   } finally { resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); vi.useRealTimers(); }
 });
+
+
+/**
+ * Deliberately the last test in this file: the blind-work notice is throttled once a quarter
+ * hour across every chat, so driving a blind stretch consumes that slot for whatever runs next.
+ * Placed earlier it silenced the notice `says which chat is calling tools…` asserts on.
+ */
+it('does not reload the blind chat whose turn ChatGPT ended itself', async () => {
+  // Measured on 2026-09-18 across two stretches on one machine: seven blind reloads, every one
+  // of them on a chat whose last turn had failed with none since, and not one restored turn
+  // reporting. They did no harm — work continued within a minute after all seven — but a fresh
+  // document cannot be given a turn that no longer exists on ChatGPT's side, which is exactly
+  // what the give-up line says once the attempts are gone. Saying it three reloads earlier
+  // costs the page nothing and the reader one less wrong lead.
+  let blindCall = 0;
+  const attributed = async (id: string): Promise<void> => {
+    const requestId = `wfr_blind_dead_turn_${++blindCall}`;
+    await request('POST', '/events', { body: { conversationId: id, events: [{
+      kind: 'tool_evidence', time: Date.now(),
+      calls: [{ messageId: `m-dead-${blindCall}`, tool: 'read', order: 0, answered: false, requestId }]
+    }] } });
+    await recordToolCall({ tool: 'read', args: { paths: ['/project/mine.ts'] },
+      content: [{ type: 'text', text: 'ok' }], outcome: 'ok', durationMs: 1,
+      startedAt: Date.now(), requestId });
+  };
+  vi.useFakeTimers();
+  try {
+    await pair();
+    const conversationId = randomUUID();
+    // A turn that ChatGPT ended, and nothing since.
+    await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: Date.now(), turnId: 'their-turn' },
+      { kind: 'turn_end', time: Date.now(), turnId: 'their-turn', outcome: 'failed' }
+    ] } });
+    await attributed(conversationId);
+    await vi.advanceTimersByTimeAsync(3 * 60_000);
+    await attributed(conversationId);
+
+    await vi.waitFor(() => expect(getLog().some((entry) =>
+      entry.message.includes('with no turn reported by its page'))).toBe(true));
+    const line = [...getLog()].reverse().find((entry) =>
+      entry.message.includes('with no turn reported by its page'))!.message;
+    expect(line).toContain('not reloading it, because ChatGPT ended the turn on its own side');
+    // And no reload is ever asked for, however long it goes on: the request line the blind
+    // route emits is the claim here, because a queued repair can be handed out and receipted
+    // between two polls and `/status` would then show nothing either way.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      await attributed(conversationId);
+    }
+    expect(getLog().filter((entry) =>
+      entry.message.includes(conversationId) &&
+      entry.message.includes('asking the browser to reload the exact chat once'))).toEqual([]);
+    expect(getLog().some((entry) => entry.message.includes('did not report a turn after'))).toBe(false);
+  } finally { vi.useRealTimers(); }
+});
+
