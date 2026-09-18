@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { flushDurable, initDurableStore, readDurable, resetDurableForTests, writeDurableNow } from '../src/main/durable.js';
 import {
-  fileSilenceInput, deferSilenceInput, revokeSilenceInputs, revokeInputsForLeftConversation, pendingQueuedPickups, inputBeforeGoal, inputArgs, acknowledgeBrowserInput, cancelInput, claimBrowserInput, completeBrowserDecision, enqueueInput,
+  fileSilenceInput, deferSilenceInput, revokeSilenceInputs, revokeInputsForLeftConversation, retireInputsForLeftConversations, pendingQueuedPickups, inputBeforeGoal, inputArgs, acknowledgeBrowserInput, cancelInput, claimBrowserInput, completeBrowserDecision, enqueueInput,
   failBrowserInput, listInputs, offerToolInput as offerToolInputBatch, acknowledgeToolInput, pendingBrowserInputs, requestBrowserDecision, resetInputForTests, configureInputDelivery,
   authorizeBrowserHelperRetry, pausedBrowserHelpers, hasEligibleToolInput, editQueuedInput, reorderQueuedInputs, setInputAutomation, authorizeBrowserInput, sessionInputPolicy
 } from '../src/main/session/input.js';
@@ -27,6 +27,8 @@ vi.mock('../src/main/session/store.js', () => ({
   sessionDirectoryMissing: vi.fn(async () => false),
   deleteSession: vi.fn(async (id: string) => { openings.delete(id); }),
   readCompletedFinal: vi.fn(async () => null),
+  // Only `fileRecoveryInput` reads this; the ticket needs a question to hang its recovery on.
+  readLatestUserMessage: vi.fn(async () => ({ messageId: 'question-1' })),
   conversationWasSuperseded: vi.fn(async () => false),
   readRecentEvents: vi.fn(async () => binding.end ? [binding.end] : []),
   turnHasMcpCall: vi.fn(async () => true),
@@ -1659,6 +1661,33 @@ describe('one silence delivery for a correction and its next checkpoint', () => 
     for (const id of [head.id, correction.id]) expect(rows.find(row => row.id === id)).toMatchObject({ state: 'sent', messageId: 'native-id', historyRecorded: true });
     expect(rows.find(row => row.id === later.id)).toMatchObject({ state: 'queued' });
     expect(await enqueueInput(input({ ...correction }))).toMatchObject({ text: 'Use real 3D shapes' });
+  });
+
+  it('sweeps rows left behind at startup, for sessions that never resume again', async () => {
+    // The resume path retires what it moves past. A session that never resumes keeps its row
+    // forever, and with it the refusal that stops every further auto-continue for that session.
+    // Measured 2026-09-18: one such row had been sitting for twenty-seven hours.
+    const { correction } = await bundle();
+    await claimBrowserInput(correction.id, 'page', binding.conversationId, true);
+    expect(await authorizeBrowserInput(correction.id, 'page', binding.conversationId)).toBe(true);
+
+    // While the session is still on that chat, the sweep must leave it strictly alone.
+    expect(await retireInputsForLeftConversations()).toBe(0);
+
+    const left = binding.conversationId;
+    binding.conversationId = 'conversation-after-handoff';
+    try {
+      const open = (await listInputs()).filter(row =>
+        row.sessionId === 'session-one' && !['sent', 'cancelled', 'failed'].includes(row.state));
+      expect(open.length).toBeGreaterThan(0);
+      expect(await retireInputsForLeftConversations()).toBe(open.length);
+      const rows = await listInputs();
+      for (const row of open) expect(rows.find(other => other.id === row.id)).toMatchObject({ state: 'cancelled' });
+      // Idempotent, and nothing else was touched.
+      expect(await retireInputsForLeftConversations()).toBe(0);
+    } finally {
+      binding.conversationId = left;
+    }
   });
 
   it('retires an authorized browser row once the session has moved to another chat', async () => {

@@ -1144,6 +1144,42 @@ export function revokeInputsForLeftConversation(sessionId: string, currentConver
   });
 }
 
+/**
+ * Retires every open row whose chat its own session has already left.
+ *
+ * `revokeInputsForLeftConversation` runs when a resume moves a session, which covers the rows
+ * created before that move. It cannot cover a session that never resumes again — and that is
+ * not hypothetical: measured on 2026-09-18, one row had been blocking its session's
+ * auto-continue for twenty-seven hours, and nothing was ever going to clear it.
+ *
+ * So the same question is asked once at startup, for every session at once. The app restarts
+ * often enough for this to be the backstop that pass is missing, and a row whose session has
+ * moved on is undeliverable whichever way it got there.
+ */
+export function retireInputsForLeftConversations(): Promise<number> {
+  return serial(async () => {
+    const current = await load();
+    const sessions = new Map<string, string | null>();
+    for (const row of current) {
+      if (!row.sessionId || terminal(row) || sessions.has(row.sessionId)) continue;
+      sessions.set(row.sessionId, (await getSession(row.sessionId).catch(() => null))?.conversationId ?? null);
+    }
+    let retired = 0;
+    const next = current.map(row => {
+      if (!row.sessionId || terminal(row)) return row;
+      const now = sessions.get(row.sessionId);
+      // A session whose conversation cannot be read is left alone: absence of an answer is not
+      // evidence that this row is stale, and retiring on it would drop a deliverable message.
+      if (now === null || now === undefined || now === row.conversationId) return row;
+      retired += 1;
+      return { ...row, state: 'cancelled' as const,
+        error: 'the session had moved to another chat before this could be delivered' };
+    });
+    if (retired > 0) await commit(next);
+    return retired;
+  });
+}
+
 export function revokeSilenceInputs(sessionId: string): Promise<void> {
   return serial(async () => {
     const current = await load();
