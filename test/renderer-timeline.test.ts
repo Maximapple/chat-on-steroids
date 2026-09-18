@@ -87,8 +87,17 @@ function toolCall(seq: number, callId: string): SessionEvent {
   };
 }
 
-/** The rows the recorder writes for one Compact & Resume, in the order it observes them. */
-function compaction(seq: number): SessionEvent[] {
+/**
+ * The rows the recorder writes for one Compact & Resume, in the order it observes them.
+ *
+ * `escaped` is how ChatGPT's composer records the same two prompts since 2026-09-16: it
+ * round-trips inserted text through its own Markdown serializer, which escapes ASCII
+ * punctuation, so the marker arrives as `[[CLF-RESUME\:<token>]]`. These are the exact shapes
+ * read back out of a live install's session store.
+ */
+function compaction(seq: number, escaped = false): SessionEvent[] {
+  const mark = (kind: 'HANDOFF' | 'RESUME') =>
+    escaped ? `[[CLF-${kind}\\:${TOKEN.replace(/^./, (first) => `\\${first}`)}]]` : `[[CLF-${kind}:${TOKEN}]]`;
   return [
     {
       seq,
@@ -97,7 +106,7 @@ function compaction(seq: number): SessionEvent[] {
       kind: 'user_message',
       messageId: 'm-brief-request',
       turnId: 'turn-brief',
-      message: text(`[[CLF-HANDOFF:${TOKEN}]] Write the handoff brief for this session.`)
+      message: text(`${mark('HANDOFF')} Write the handoff brief for this session.`)
     },
     { seq: seq + 1, time: T0 + (seq + 1) * 1000, source: 'extension', kind: 'turn_start', turnId: 'turn-brief' },
     {
@@ -126,7 +135,7 @@ function compaction(seq: number): SessionEvent[] {
       source: 'extension',
       kind: 'user_message',
       messageId: 'm-bootstrap',
-      message: text(`[[CLF-RESUME:${TOKEN}]] Continue from this brief: keep the loop running.`)
+      message: text(`${mark('RESUME')} Continue from this brief: keep the loop running.`)
     }
   ];
 }
@@ -1293,6 +1302,32 @@ it('folds a whole Compact & Resume into one row that says the new chat opened', 
   expect(card.textContent).toContain('keep the loop running');
   expect(card.textContent).toContain('Handoff saved');
   expect(card.textContent).toContain('Bootstrap sent into the new chat');
+});
+
+it('folds a Compact & Resume whose marker ChatGPT escaped as Markdown', async () => {
+  // Same fold, same assertions, but the two prompts are recorded the way the composer has
+  // written them since 2026-09-16. Every reader of the shared marker regex reads text that
+  // came back out of the page, so they all stopped matching at once: this card was not built
+  // at all, and the raw marker was left on screen in the rows it should have replaced.
+  const { w } = await boot([
+    { seq: 1, time: T0, source: 'app', kind: 'session_start', conversationId: 'chat-a', title: 'Loop under test' },
+    toolCall(2, 'call-1'),
+    ...compaction(3, true),
+    toolCall(9, 'call-2')
+  ]);
+  const timeline = w.document.getElementById('timeline')!;
+
+  const cards = timeline.querySelectorAll('details.compaction');
+  expect(cards).toHaveLength(1);
+  expect(cards[0]!.querySelector('summary')!.textContent).toMatch(/^Compact & Resume:New chat opened at .* \(44 characters\)$/);
+  // Stripped in the form it was recorded in, so no half-removed marker survives either.
+  expect(timeline.textContent).not.toContain('[[CLF-');
+  expect(timeline.textContent).not.toContain('CLF-RESUME');
+  expect([...timeline.children].map((row) => row.className)).toEqual(['ev ev-tool_call', 'ev ev-compaction', 'ev ev-tool_call']);
+
+  cards[0]!.toggleAttribute('open', true);
+  expect(cards[0]!.textContent).toContain('Brief request');
+  expect(cards[0]!.textContent).toContain('keep the loop running');
 });
 
 it('retires a pending Skills picker when sending replaces its draft', async () => {

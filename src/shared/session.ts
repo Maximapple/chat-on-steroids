@@ -438,6 +438,34 @@ export type SessionEventKind = SessionEvent['kind'];
 export const CONTINUATION_MARKER = /^\s*\[\[CLF-(HANDOFF|RESUME):([A-Za-z0-9_-]{16,64})\]\](?:\s|$)/;
 
 /**
+ * The same marker after ChatGPT's composer has escaped it as Markdown.
+ *
+ * The composer round-trips inserted text through ChatGPT's own Markdown serializer before
+ * sending it, and since 2026-09-16 that serializer escapes ASCII punctuation: the prompt this
+ * app types as `[[CLF-RESUME:<token>]]` is recorded as `[[CLF-RESUME\:<token>]]`, and as
+ * `[[CLF-RESUME:\_<token>]]` when the token begins with an underscore. One prompt carried both.
+ *
+ * Every reader of this regex reads text that came back out of the page, so every one of them
+ * stopped matching at once: the bridge could no longer find a resumed chat's bootstrap
+ * boundary, and the renderer stopped folding a compaction's three rows into one and left the
+ * raw marker on screen.
+ *
+ * A token is 16-64 characters of `[A-Za-z0-9_-]`, so a form with a backslash before any of
+ * them cannot be anything but this marker escaped; the length requirement is what makes that
+ * safe. Exact text is still tried first, so nothing changes for a page that does not escape.
+ */
+const CONTINUATION_MARKER_ESCAPED = /^\s*\[\[CLF-(HANDOFF|RESUME)\\?:((?:\\?[A-Za-z0-9_-]){16,64})\]\](?:\s|$)/;
+
+/** The continuation marker at the head of `text`, as typed or as the composer escaped it. */
+export function continuationMarkerOf(text: string | null | undefined):
+  { kind: 'HANDOFF' | 'RESUME'; token: string; marker: string } | null {
+  const value = typeof text === 'string' ? text : '';
+  const match = CONTINUATION_MARKER.exec(value) ?? CONTINUATION_MARKER_ESCAPED.exec(value);
+  if (!match) return null;
+  return { kind: match[1] as 'HANDOFF' | 'RESUME', token: match[2]!.replace(/\\/g, ''), marker: match[0] };
+}
+
+/**
  * An event before the store assigns its sequence number.
  *
  * Written as a distributive conditional because a plain Omit over a union keeps only

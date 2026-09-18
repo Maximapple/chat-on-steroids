@@ -38,7 +38,7 @@ import type {
   SessionSummary,
   StoredText
 } from '../../shared/session.js';
-import { CONTINUATION_MARKER, eventTokens, MAX_TOOL_RESULT_TOKENS, normalizedToolOutcome, storedTextTokens, workSequence } from '../../shared/session.js';
+import { continuationMarkerOf, eventTokens, MAX_TOOL_RESULT_TOKENS, normalizedToolOutcome, storedTextTokens, workSequence } from '../../shared/session.js';
 import { chronological, positionOf } from '../../shared/chronology.js';
 import { automaticTitle, firstTitleMessage, legacyContextTitle, refreshUserTitle } from './title.js';
 import { agentPlanSchema, agentPlanUpdateSchema, MAX_AGENT_PLAN_BYTES, type AgentPlan, type AgentPlanUpdate } from '../../shared/agent-plan.js';
@@ -1822,7 +1822,7 @@ export async function readActivityEvents(sessionId: string, since: number, limit
       if (event.kind !== 'user_message') continue;
       const position = event.origin ?? event.seq;
       if (!openingUserMessage || position < (openingUserMessage.origin ?? openingUserMessage.seq)) openingUserMessage = event;
-      if (CONTINUATION_MARKER.exec(event.message.text)?.[1] === 'RESUME' &&
+      if (continuationMarkerOf(event.message.text)?.kind === 'RESUME' &&
           (!resumeUserMessage || position > (resumeUserMessage.origin ?? resumeUserMessage.seq))) resumeUserMessage = event;
     }
     const resumeBoundary = resumeUserMessage ? resumeUserMessage.origin ?? resumeUserMessage.seq : 0;
