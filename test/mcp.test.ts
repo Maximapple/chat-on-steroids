@@ -3507,13 +3507,29 @@ describe('exec sessions belong to the chat that opened them', () => {
     expect(textOf(blocked)).toMatch(/Background session \d+ completed/);
     expect(textOf(blocked)).toContain('owed-');
 
-    const admitted = await asChat(blockedRequest, 'exec_command', {
-      cmd: IS_WINDOWS ? "Write-Output 'admitted-after-drain'" : "printf '%s\\n' admitted-after-drain",
-      workdir: '/workspace',
-      yield_time_ms: 5_000
-    });
-    expect(failed(admitted), textOf(admitted)).toBe(false);
-    expect(textOf(admitted)).toContain('admitted-after-drain');
+    // The receipt is carried by the *next* call, and only by one that genuinely started after
+    // the previous response was published: `acknowledgeCompletedOutput` skips an offer whose
+    // `publication.completedAt` is not strictly earlier than this call's `startedAt`. That is
+    // the right rule — a page is acknowledged once it demonstrably reached the caller — but it
+    // means a call issued in the same instant as the refusal retires nothing and is refused
+    // again on the unchanged count. Firing once and asserting admission made this test fail on
+    // 3 of 10 full-suite runs, where the publication tail lags behind the awaited tool result;
+    // it passed alone every time, which is what kept it looking like a product flake.
+    //
+    // So retry the way the refusal tells a caller to: read the delivered output, then ask
+    // again. Each refusal retires one more session, so the bound is crossed within a couple of
+    // attempts; the generous ceiling is for a loaded runner, not for a second mechanism.
+    let admitted = null as Awaited<ReturnType<typeof asChat>> | null;
+    for (let attempt = 0; attempt < 8 && (admitted === null || failed(admitted)); attempt++) {
+      admitted = await asChat(blockedRequest, 'exec_command', {
+        cmd: IS_WINDOWS ? "Write-Output 'admitted-after-drain'" : "printf '%s\\n' admitted-after-drain",
+        workdir: '/workspace',
+        yield_time_ms: 5_000
+      });
+      if (failed(admitted)) expect(textOf(admitted)).toContain('EXEC_RESULTS_UNREAD');
+    }
+    expect(failed(admitted!), textOf(admitted!)).toBe(false);
+    expect(textOf(admitted!)).toContain('admitted-after-drain');
 
     for (const sessionId of sessionIds.slice(1)) {
       await asChat(blockedRequest, 'write_stdin', { session_id: sessionId, chars: '' });
