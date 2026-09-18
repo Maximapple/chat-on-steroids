@@ -6037,7 +6037,15 @@ describe('unattributed activity recovery', () => {
         await vi.advanceTimersByTimeAsync(3 * 60_000);
         await attributed(PRIME);
       }
-      expect(getLog().some((entry) => entry.message.includes('did not report a turn after 3 reloads'))).toBe(true);
+      const exhausted = getLog().find((entry) => entry.message.includes('did not report a turn after 3 reloads'));
+      expect(exhausted).toBeTruthy();
+      // Observed on 2026-09-18: this fired on a chat whose extension was demonstrably healthy —
+      // reloaded hours earlier, reading the page model, acknowledging every repair. ChatGPT had
+      // ended the turn on its own side while the connector kept answering, so no fresh page
+      // could find a turn to report. Naming one cause sent the reader after the wrong remedy.
+      expect(exhausted!.message).toContain('the work is alive');
+      expect(exhausted!.message).toContain('ruling out first');
+      expect(exhausted!.message).toContain('a reload cannot repair');
       expect(getLog().filter((entry) =>
         entry.message.includes('is a page that stopped reporting'))).toHaveLength(3);
     } finally {

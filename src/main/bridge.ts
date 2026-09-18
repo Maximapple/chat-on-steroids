@@ -7334,7 +7334,10 @@ function noticeBlindWork(conversationId: string, sessionId: string, filed: Sessi
     if (spent + 1 === BLIND_WORK_RELOAD_ATTEMPTS) {
       logWarn(
         `bridge: ${conversationId} did not report a turn after ${BLIND_WORK_RELOAD_ATTEMPTS} reloads — ` +
-          'not reloading it again; its page needs the extension reloaded'
+          'not reloading it again. Its calls are still arriving, so the work is alive; what is missing is a ' +
+          'turn on the page to attribute them to. A stale extension does this and is worth ruling out first, ' +
+          'and so does ChatGPT ending the turn on its own side while the connector keeps answering — which a ' +
+          'reload cannot repair, because there is no turn left for a fresh page to find.'
       );
     }
     void queueStalledTabRecovery(conversationId, now, 'blind');
