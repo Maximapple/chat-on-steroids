@@ -18,7 +18,7 @@ export { setBrowserWorkArea } from './browser-window-layout.js';
 import { pendingBrowserPreferenceRequest, acknowledgeBrowserPreferences } from './browser-preferences.js';
 import { sessionFinishHeld, releaseSessionFinish, getSessionFinishDraft, sessionFinishWaiting } from './session/finish.js';
 import { observeUsage } from './session/usage.js';
-import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, listInputs, fileSilenceInput, fileRecoveryInput, advanceRecoveryInput, hasQueuedAfterTurnInput, inputBeforeGoal, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs } from './session/input.js';
+import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, listInputs, fileSilenceInput, fileRecoveryInput, advanceRecoveryInput, hasQueuedAfterTurnInput, inputBeforeGoal, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs, revokeInputsForLeftConversation } from './session/input.js';
 /**
  * The local bridge between the Chrome extension and this app.
  *
@@ -5925,6 +5925,18 @@ async function fileSilenceInputTicket(conversationId: string, now: number, liste
  */
 function armResumedChat(sessionId: string, conversationId: string): void {
   grantActivity(conversationId, sessionId);
+  // Anything still queued or handed out for the chat this session just left can never arrive —
+  // every delivery guard checks the conversation — and while it sits there non-terminal it
+  // blocks the next auto-continue for this session. See revokeInputsForLeftConversation.
+  void revokeInputsForLeftConversation(sessionId, conversationId)
+    .then(retired => {
+      if (retired > 0) {
+        logInfo(
+          `bridge: retired ${retired} undeliverable input(s) addressed at the chat ${sessionId} just left`
+        );
+      }
+    })
+    .catch(error => logWarn(`input: could not retire the inputs of the chat left behind: ${String(error)}`));
   logInfo(`bridge: resumed chat ${conversationId} armed — expecting its first attributed call`);
 }
 

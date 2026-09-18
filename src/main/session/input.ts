@@ -1111,6 +1111,39 @@ function withoutSilenceClaim(row: InputEntry, preserveBoundary = false): InputEn
     companionInputId: undefined, offeredAt: undefined, sendAuthorizedAt: undefined, requiresAuthorization: undefined, deliveryText: undefined, error: undefined };
 }
 /** New work revokes an unspent ticket. Authorized sends retain custody until their exact receipt/failure. */
+/**
+ * Retires input rows addressed at a chat this session has left.
+ *
+ * A row handed to the browser is not terminal, and `fileRecoveryInput` refuses to file while
+ * any non-terminal row for the session exists — deliberately, so nothing overtakes authored
+ * input. Compact & Resume moves the session to a new chat, and a row still naming the old one
+ * can never be delivered: every guard on the way down checks the conversation. It therefore
+ * sits there forever, and the refusal it causes is permanent and silent.
+ *
+ * Measured on 2026-09-18: a recovery ticket went to the browser at 09:52 for a chat the session
+ * left at 17:19, two handoffs later. It was still there at 19:00. In between, the app never
+ * filed another auto-continue for that session — including at 17:42, when ChatGPT ended the
+ * prime's turn mid-plan and the run stopped with two of five steps unfinished. The person had
+ * to notice and type into the chat by hand, which is exactly what this feature exists to avoid.
+ *
+ * `revokeSilenceInputs` does not reach these: it only strips claims from rows that were never
+ * authorized to send. This retires the row itself, and only when its address is provably stale.
+ */
+export function revokeInputsForLeftConversation(sessionId: string, currentConversationId: string): Promise<number> {
+  return serial(async () => {
+    const current = await load();
+    let retired = 0;
+    const next = current.map(row => {
+      if (row.sessionId !== sessionId || terminal(row) || row.conversationId === currentConversationId) return row;
+      retired += 1;
+      return { ...row, state: 'cancelled' as const,
+        error: 'the session moved to another chat before this could be delivered' };
+    });
+    if (retired > 0) await commit(next);
+    return retired;
+  });
+}
+
 export function revokeSilenceInputs(sessionId: string): Promise<void> {
   return serial(async () => {
     const current = await load();

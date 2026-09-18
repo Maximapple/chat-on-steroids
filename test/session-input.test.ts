@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { flushDurable, initDurableStore, readDurable, resetDurableForTests, writeDurableNow } from '../src/main/durable.js';
 import {
-  fileSilenceInput, deferSilenceInput, revokeSilenceInputs, pendingQueuedPickups, inputBeforeGoal, inputArgs, acknowledgeBrowserInput, cancelInput, claimBrowserInput, completeBrowserDecision, enqueueInput,
+  fileSilenceInput, deferSilenceInput, revokeSilenceInputs, revokeInputsForLeftConversation, pendingQueuedPickups, inputBeforeGoal, inputArgs, acknowledgeBrowserInput, cancelInput, claimBrowserInput, completeBrowserDecision, enqueueInput,
   failBrowserInput, listInputs, offerToolInput as offerToolInputBatch, acknowledgeToolInput, pendingBrowserInputs, requestBrowserDecision, resetInputForTests, configureInputDelivery,
   authorizeBrowserHelperRetry, pausedBrowserHelpers, hasEligibleToolInput, editQueuedInput, reorderQueuedInputs, setInputAutomation, authorizeBrowserInput, sessionInputPolicy
 } from '../src/main/session/input.js';
@@ -1659,6 +1659,38 @@ describe('one silence delivery for a correction and its next checkpoint', () => 
     for (const id of [head.id, correction.id]) expect(rows.find(row => row.id === id)).toMatchObject({ state: 'sent', messageId: 'native-id', historyRecorded: true });
     expect(rows.find(row => row.id === later.id)).toMatchObject({ state: 'queued' });
     expect(await enqueueInput(input({ ...correction }))).toMatchObject({ text: 'Use real 3D shapes' });
+  });
+
+  it('retires an authorized browser row once the session has moved to another chat', async () => {
+    // A row handed to the browser is not terminal, and nothing may be filed for a session while
+    // one of those exists. Compact & Resume moves the session to a new chat, and a row naming
+    // the old one can never be delivered — every guard on the way down checks the conversation.
+    //
+    // Measured 2026-09-18: such a row went to the browser at 09:52 for a chat the session left
+    // at 17:19, two handoffs later, and was still there at 19:00. In between the app filed no
+    // further auto-continue for that session at all — including when ChatGPT ended the prime's
+    // turn mid-plan and the run stopped with two of five steps unfinished. `revokeSilenceInputs`
+    // does not reach it: that only strips claims from rows never authorized to send.
+    const { head, correction } = await bundle();
+    await claimBrowserInput(correction.id, 'page', binding.conversationId, true);
+    expect(await authorizeBrowserInput(correction.id, 'page', binding.conversationId)).toBe(true);
+    expect((await listInputs()).find(row => row.id === correction.id))
+      .toMatchObject({ state: 'browser', sendAuthorizedAt: expect.any(Number) });
+
+    // Still addressed at the chat it was made for: nothing is retired.
+    expect(await revokeInputsForLeftConversation(sessionId, binding.conversationId)).toBe(0);
+
+    // The session moves on. Every row of this session now names a chat it has left.
+    const live = (await listInputs()).filter(row =>
+      row.sessionId === sessionId && !['sent', 'cancelled', 'failed'].includes(row.state));
+    expect(live.length).toBeGreaterThan(0);
+    expect(await revokeInputsForLeftConversation(sessionId, 'conversation-after-handoff')).toBe(live.length);
+    const rows = await listInputs();
+    for (const id of [head.id, correction.id, ...live.map(row => row.id)]) {
+      expect(rows.find(row => row.id === id)).toMatchObject({ state: 'cancelled' });
+    }
+    // And a second pass has nothing left to do.
+    expect(await revokeInputsForLeftConversation(sessionId, 'conversation-after-handoff')).toBe(0);
   });
 
   it('releases both unsubmitted claims when real work resumes and injects only the correction', async () => {
