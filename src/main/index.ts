@@ -12,6 +12,7 @@ import { connect, disconnect, getStatus, onStatusChange, shutdownConnection } fr
 import { registerIpc } from './ipc.js';
 import { getChatModels, restoreChatModels, startChatModelDiscovery } from './chat-models.js';
 import { flushLogBeforeExit, initLogFile, logError, logInfo, logWarn, snapshotLogOnCrash } from './logger.js';
+import { retireInputsForLeftConversations } from './session/input.js';
 import { unifiedExecManager } from './codex/manager.js';
 import { initSecretsPath } from './secrets.js';
 import { pluginManager } from './plugins/manager.js';
@@ -434,6 +435,16 @@ void app.whenReady().then(async () => {
   onStatusChange(refreshTray);
 
   logInfo('app started');
+
+  // An input row still addressed at a chat its session has left can never be delivered, and
+  // while it sits there non-terminal it stops that session filing another auto-continue. The
+  // resume path retires the ones it creates; this is the backstop for a session that never
+  // resumes again. Maintenance like the repair below — never block startup on it.
+  void retireInputsForLeftConversations()
+    .then(retired => {
+      if (retired > 0) logInfo(`input: retired ${retired} row(s) addressed at a chat their session had left`);
+    })
+    .catch(error => logWarn(`input: could not retire rows left behind: ${String(error)}`));
 
   // Historical Unattributed repair may legitimately scan and rewrite a large legacy bucket.
   // It is maintenance, not a prerequisite for showing the app or accepting new exact-id
