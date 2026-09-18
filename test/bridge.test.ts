@@ -5985,6 +5985,44 @@ describe('unattributed activity recovery', () => {
     }
   });
 
+  it('explains a refused stalled-tab reload once a minute, not once a pass', async () => {
+    // The refusal itself is right — an idle chat should not be revived overnight — but it was
+    // written on every `/status` pass, and a pass runs every thirty seconds. Measured 2026-09-18
+    // at 03:05: the same sentence about the same chat twice inside one minute, with nothing to
+    // act on either time, which is how the line that does matter gets buried.
+    vi.useFakeTimers();
+    try {
+      await pair();
+      // A chat this app actually knows: with no session the recovery returns before it can
+      // refuse anything, and there is nothing to throttle.
+      await attributed(PRIME);
+      // And idle: the refusal this is about is "no turn is running in it", which is every chat
+      // overnight. A chat still inside its activity grant is recovered rather than refused.
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      const stalled = () => request('POST', '/status', { body: { openConversations: [PRIME], stalledConversations: [PRIME] } });
+      const lines = () => getLog().filter((entry) => entry.message.includes('is a stalled browser tab — not reloaded'));
+
+      await stalled();
+      const first = lines().length;
+      expect(first).toBeGreaterThan(0);
+
+      // Four more passes inside the same minute say nothing further. Ten seconds apart, so the
+      // whole burst stays under the throttle rather than straddling it.
+      for (let pass = 0; pass < 4; pass += 1) {
+        await vi.advanceTimersByTimeAsync(10_000);
+        await stalled();
+      }
+      expect(lines()).toHaveLength(first);
+
+      // Past the minute it is worth saying again, because the state is still true.
+      await vi.advanceTimersByTimeAsync(61_000);
+      await stalled();
+      expect(lines().length).toBeGreaterThan(first);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('waits 15 seconds before handing a lone suspect to the browser once attribution has failed', async () => {
     vi.useFakeTimers();
     try {

@@ -6600,6 +6600,34 @@ function nonDiscardableAgentConversations(): string[] {
  * Two minutes gives follow-ups a warm page; five minutes releases an unused renderer.
  * The extension still proves the exact document has no draft or generation before closing.
  */
+/**
+ * A refusal explained once a minute rather than once a pass.
+ *
+ * Both recovery decisions below are correct to refuse — an idle chat should not be revived, and
+ * a chat that closed its last tab should not have one reopened — but each explained itself on
+ * every `/status` pass, and a pass runs every thirty seconds. Measured on 2026-09-18 at 03:05:
+ * the same sentence about the same chat, twice inside one minute, with nothing to act on either
+ * time. Left alone overnight that is a thousand lines saying nothing, and the line that does
+ * matter is somewhere inside them.
+ *
+ * Keyed on the chat and the refusal, so a different refusal about the same chat is still said at
+ * once. Re-stated each minute rather than suppressed, because the state stays true and a reader
+ * arriving later should find it.
+ */
+const REFUSAL_NOTICE_EVERY_MS = 60_000;
+const refusalNoticedAt = new Map<string, number>();
+
+function noticeRefusal(key: string, message: string): void {
+  const now = Date.now();
+  const last = refusalNoticedAt.get(key) ?? 0;
+  if (last && now >= last && now - last < REFUSAL_NOTICE_EVERY_MS) return;
+  refusalNoticedAt.set(key, now);
+  if (refusalNoticedAt.size > 500) {
+    for (const [old] of [...refusalNoticedAt].slice(0, 100)) refusalNoticedAt.delete(old);
+  }
+  logInfo(message);
+}
+
 async function browserTabPolicy(openConversations: Set<string>) {
   // Existing cached metadata is the ownership index; never scan transcripts per browser poll.
   const summaries = await listUsageSessions();
@@ -7152,7 +7180,7 @@ async function queueMissingTab(conversationId: string, working: boolean, now = D
   const session = await findSessionByConversation(conversationId);
   const name = agent?.id ?? conversationId;
   const declined = (why: string): void => {
-    logInfo(`bridge: ${name} closed its last tab — not reopened: ${why}`);
+    noticeRefusal(`no-tab:${conversationId}:${why}`, `bridge: ${name} closed its last tab — not reopened: ${why}`);
   };
   // A chat with no session is not this app's chat; its tab closing is nobody's business here.
   if (!session) return;
@@ -7188,7 +7216,7 @@ async function queueStalledTabRecovery(conversationId: string, now = Date.now())
   const session = await findSessionByConversation(conversationId, { requireUnique: true });
   const name = agent?.id ?? conversationId;
   const declined = (why: string): void => {
-    logInfo(`bridge: ${name} is a stalled browser tab — not reloaded: ${why}`);
+    noticeRefusal(`stalled:${conversationId}:${why}`, `bridge: ${name} is a stalled browser tab — not reloaded: ${why}`);
   };
   // A chat with no session is not this app's chat; its tab sleeping is nobody's business here.
   if (!session) return;
