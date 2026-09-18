@@ -9788,6 +9788,52 @@ describe('evidence from the page context', () => {
     ]);
   });
 
+  it('commits the continuation from a marker ChatGPT escaped as Markdown', async () => {
+    // Measured 2026-09-16: the composer began round-tripping inserted text through ChatGPT's own
+    // Markdown serializer before sending it, which escapes ASCII punctuation. The brief is typed
+    // as `[[CLF-RESUME:<token>]]` and arrives in the transcript as `[[CLF-RESUME\\:<token>]]`.
+    // Nothing on this side changed — `insertPrompt` is the same code since 2.0.0 — and yet both
+    // halves of the commit broke at once, because both compare exact text: the marker stopped
+    // matching, so the handoff was never reconciled, and the send receipt stopped matching, so
+    // the app never learned which chat the brief had landed in. Twelve continuations died that
+    // way in four days, every one with its brief in a chat that was working normally.
+    //
+    // These are the exact renderings read back out of one install's session store.
+    live = await harness();
+    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const token = 'iNHBs_C0p8fcQ9y7sG-I-A';
+    const typed = `[[CLF-RESUME:${token}]]\n\nContinue the previous ChatGPT session.`;
+    const asRendered = typed.replace('CLF-RESUME:', 'CLF-RESUME\\:').replace('iNHBs_C0', 'iNHBs\\_C0');
+    expect(asRendered).not.toBe(typed);
+    live.reply.set('compact', () => ({ ok: true, data: { committed: true, conversationId } }));
+
+    userTurn(live.document, 'escaped-marker', asRendered, { sent: false });
+    await replyFiber([], [
+      {
+        turnId: 'escaped-marker',
+        conversationId,
+        calls: [],
+        messages: [{
+          role: 'user',
+          stable: true,
+          rawText: asRendered,
+          rawMessageId: 'escaped-marker-message',
+          messageId: 'escaped-marker-message'
+        }]
+      },
+      { turnId: 'escaped-answer', conversationId, calls: [], messages: [] }
+    ]);
+    await settle();
+    await live.hook.flush();
+
+    // The token the app is waiting on is the one it minted, not the one the page rendered.
+    const commit = live.sent.find(
+      (message) => message.type === 'compact' && message.destinationMessageId === 'escaped-marker-message'
+    );
+    expect(commit).toBeTruthy();
+    expect(commit!.token).toBe(token);
+  });
+
   it('binds a resumed request from the continuation marker even when the local turn never opened', async () => {
     live = await harness();
     const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -15110,6 +15156,50 @@ describe('the goal loop', () => {
 
     expect(live.sent.filter((message) => message.type === 'compact' && message.destinationLost === true)).toEqual([]);
     expect(live.sent.some((message) => message.type === 'ack')).toBe(false);
+  });
+
+  it('acks the resume destination when ChatGPT escaped the brief it rendered', async () => {
+    // The second half of the same 2026-09-16 change. The brief is typed exactly and rendered
+    // back escaped, so the send receipt — which compares exact text — stopped recognising the
+    // message this page had just sent. Without the receipt there is no ack, so the app never
+    // learns the conversation the brief landed in, and the continuation waits out its lease in
+    // `dispatched-unresolved` even though the chat is sitting there working.
+    const commandId = 'cmd-resume-escaped-render';
+    const token = 'iNHBs_C0p8fcQ9y7sG-I-A';
+    const typed = `[[CLF-RESUME:${token}]]\n\nthe carried handoff`;
+    const asRendered = typed.replace('CLF-RESUME:', 'CLF-RESUME\\:').replace('iNHBs_C0', 'iNHBs\\_C0');
+    live = await harness(
+      `https://chatgpt.com/?clf=${commandId}`,
+      {
+        redeem: () => ({ ok: true, command: { id: commandId, type: 'resume', text: typed, agent: null } }),
+        compact: (message) => {
+          if (message.destinationAttempt) return { ok: true, data: { allowed: true } };
+          if (message.destinationDispatch) return { ok: true, data: { armed: true } };
+          if (message.destinationMessageId) return { ok: true, data: { committed: true, conversationId: CHAT, commandId } };
+          if (message.destinationLost) return { ok: true, data: { released: true } };
+          return { ok: false, error: 'unexpected_compact_shape' };
+        },
+        ack: () => ({ ok: true }),
+        activity: () => ({
+          ok: true,
+          data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null, bootstrap: 'resume' }
+        })
+      },
+      (document, dom) => {
+        document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+          document.querySelector('#prompt-textarea')!.textContent = '';
+          dom.reconfigure({ url: `https://chatgpt.com/c/${CHAT}` });
+          // Exactly what the composer sends back: the same message, escaped.
+          userTurn(document, 'resume-user', asRendered);
+        });
+      }
+    );
+
+    await settle(2000);
+
+    const acks = live.sent.filter((message) => message.type === 'ack' && message.id === commandId);
+    expect(acks.map((message) => message.conversationId)).toContain(CHAT);
+    expect(live.sent.filter((message) => message.type === 'compact' && message.destinationLost === true)).toEqual([]);
   });
 
   it('keeps the resume conversation when it gets an id despite a visible failure', async () => {
