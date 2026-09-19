@@ -218,6 +218,40 @@ let chain: Promise<unknown> = Promise.resolve();
 // available. Restart discards this evidence and repeats the stable message id.
 const offered = new Map<string, number>();
 const terminal = (row: InputEntry): boolean => ['sent', 'cancelled', 'failed'].includes(row.state);
+
+/**
+ * How long an authorized send may go without a receipt before it stops gating new tickets.
+ *
+ * An authorized browser row deliberately has no exit but its receipt: it may already be in the
+ * chat, so it is never resent and never cancelled on a clock. That is right about the *send*.
+ * It became wrong about everything else, because the same row also blocks the session from
+ * filing any further automatic Continue — and a receipt can simply be lost. Every recovery
+ * reload tears the page out from under a send in flight, and there were twenty of those on one
+ * machine in one day.
+ *
+ * Measured 2026-09-18: a row authorized at 09:52 never receipted, and its session filed no
+ * further auto-continue for the nine hours that followed — through a turn ChatGPT killed
+ * mid-plan, which is exactly what the feature exists for. Nothing in the log said why.
+ *
+ * So the row keeps its state and its record. What expires is only its veto over new tickets.
+ * Fifteen minutes is far past the bootstrap loop that assigns a conversation id (forty seconds)
+ * and past any receipt that is still coming; what survives it is a receipt that never will.
+ */
+const RECEIPT_VETO_MS = 15 * 60_000;
+
+/**
+ * Whether this row may still stop its session from filing another automatic Continue.
+ *
+ * Queued and unauthorized rows always may: those are pending work, and overtaking them is the
+ * thing the veto exists to prevent. An authorized send loses the veto once its receipt is long
+ * overdue — it is still never resent, and it stays in the store exactly as it is.
+ */
+const vetoesNewTickets = (row: InputEntry, now: number): boolean =>
+  !terminal(row) && (row.state !== 'browser' || row.sendAuthorizedAt === undefined ||
+    now - row.sendAuthorizedAt < RECEIPT_VETO_MS);
+
+/** Test seam: the rule above is a one-line predicate whose whole value is its boundary. */
+export const vetoesNewTicketsForTests = (row: InputEntry, now: number): boolean => vetoesNewTickets(row, now);
 const preparable = (row: InputEntry): boolean => row.state === 'queued' ||
   (row.state === 'browser' && row.requiresAuthorization === true && row.sendAuthorizedAt === undefined);
 const needsHistory = (row: InputEntry): boolean => row.purpose !== 'decision' && !row.historyRecorded &&
@@ -1003,7 +1037,9 @@ export function fileRecoveryInput(sessionId: string, conversationId: string, tur
   return serial(async () => {
     const current = await load();
     // Never overtake authored input, retry an ambiguous send, or reuse a spent source.
-    if (current.some(row => row.sessionId === sessionId && !terminal(row))) return false;
+    // See vetoesNewTickets for why an authorized send stops vetoing once its receipt is
+    // hopeless: it is still never resent, it just stops silencing the feature for good.
+    if (current.some(row => row.sessionId === sessionId && vetoesNewTickets(row, Date.now()))) return false;
     const question = await readLatestUserMessage(sessionId);
     const [work] = await readRecentEvents(sessionId, 1, { kinds: RECOVERY_WORK_KINDS });
     if (!question?.messageId || !work || !currentOwner()) return false;
