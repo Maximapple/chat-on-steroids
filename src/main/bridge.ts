@@ -7337,7 +7337,11 @@ async function queueMissingTab(conversationId: string, working: boolean, now = D
   const slot = liveAgentForOwnedConversation(conversationId);
   // Read after closeConversation() has ended the session, so `endedAt` is this exact close.
   const session = await findSessionByConversation(conversationId);
-  const name = agent?.id ?? conversationId;
+  // Both the slot's name and the chat. An agent id alone cannot be traced: every prime in every
+  // run is called `prime`, so 533 of these lines over two days named one word and no chat, and
+  // reading them could not even answer how many chats they were about. The id stays in front
+  // because it is what a reader recognises; the conversation follows it, never replaces it.
+  const name = agent ? `${agent.id} (${conversationId})` : conversationId;
   const declined = (why: string): void => {
     noticeRefusal(`no-tab:${conversationId}:${why}`, `bridge: ${name} closed its last tab — not reopened: ${why}`);
   };
@@ -7390,7 +7394,11 @@ async function queueMissingTab(conversationId: string, working: boolean, now = D
 async function queueStalledTabRecovery(conversationId: string, now = Date.now()): Promise<void> {
   const agent = agentInfoForOwnedConversation(conversationId);
   const session = await findSessionByConversation(conversationId, { requireUnique: true });
-  const name = agent?.id ?? conversationId;
+  // Both the slot's name and the chat. An agent id alone cannot be traced: every prime in every
+  // run is called `prime`, so 533 of these lines over two days named one word and no chat, and
+  // reading them could not even answer how many chats they were about. The id stays in front
+  // because it is what a reader recognises; the conversation follows it, never replaces it.
+  const name = agent ? `${agent.id} (${conversationId})` : conversationId;
   const declined = (why: string): void => {
     noticeRefusal(`stalled:${conversationId}:${why}`, `bridge: ${name} is a stalled browser tab — not reloaded: ${why}`);
   };
