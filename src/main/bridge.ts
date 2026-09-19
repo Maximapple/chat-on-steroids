@@ -7310,7 +7310,23 @@ async function queueMissingTab(conversationId: string, working: boolean, now = D
   if (!departureAllowsRepair(session)) return declined('the user closed its page');
   if (!session.activeTurnId && session.lastTurnOutcome === 'stopped') return declined('the user stopped its turn');
   if (!tabRecoveryWanted(conversationId)) return declined('tab recovery is off for this chat');
-  if (agent && agent.state !== 'detached') return declined(`its ${agent.role} slot is ${agent.state}, not working`);
+  // `waking` is the one non-detached state that still needs its tab back. A wake is text this
+  // app is trying to type into that exact chat, and it has nowhere to go if the page is gone:
+  // the command is never claimed and expires having typed nothing.
+  //
+  // Measured on 2026-09-19: worker-11 was woken at 07:16:37.914 and its tab closed 5.3 seconds
+  // later, declined here as "waking, not working". The wake then sat unclaimed for its full
+  // deadline and the worker's task waited for a person to notice. Three wakes failed that way
+  // on one machine that morning, while every wake whose tab survived was delivered — the
+  // fastest in 1.2 seconds.
+  //
+  // Only while a revival is actually pending for this conversation. A slot left `waking` by
+  // something already given up on has no text owed to it, and reopening for that would be the
+  // app helping itself to a tab for work nobody is waiting on.
+  const wakePending = agent?.state === 'waking' &&
+    pendingWorkerRevivals().some((revival) => revival.conversationId === conversationId);
+  if (agent && agent.state !== 'detached' && !wakePending)
+    return declined(`its ${agent.role} slot is ${agent.state}, not working`);
   if (!agent && !goalActiveFor(conversationId) && (session.toolCalls ?? 0) === 0) return declined('it has never called a tool');
   if (!working && agent?.role !== 'worker' && !(goalActiveFor(conversationId) && goalPendingReplyFor(conversationId))) return declined('no turn is running in it');
   const wentAt = agent?.detachedAt ?? session.endedAt ?? now;
