@@ -6606,7 +6606,7 @@ function nonDiscardableAgentConversations(): string[] {
  */
 const fiberHealthTold = new Map<string, string>();
 /** When each chat's current degraded state was first seen, so a self-healing one says nothing. */
-const fiberHealthSince = new Map<string, { state: string; at: number }>();
+const fiberHealthSince = new Map<string, { state: string; at: number; last: number }>();
 /**
  * How long a degraded helper may stay degraded before it is worth a line.
  *
@@ -6621,6 +6621,21 @@ const fiberHealthSince = new Map<string, { state: string; at: number }>();
  * the state this reports on: a helper that is not coming back by itself.
  */
 const FIBER_HEALTH_GRACE_MS = 15_000;
+/**
+ * The gap that means nobody was reporting, rather than a helper that stayed broken.
+ *
+ * Only a live page reports this at all, so a chat whose tab was closed, whose browser exited, or
+ * which was reopened elsewhere contributes no reports for that whole stretch — and the stretch
+ * then satisfied the grace above the instant the *new* page said its first word. Measured on
+ * 2026-09-19: the prime's tab went at 08:47:49, the app reopened the chat at 08:52:44, and the
+ * warning was written 0.4 seconds later about a page that was reading ChatGPT's model again 6.5
+ * seconds after that. Five minutes of no page counted as five minutes of being broken.
+ *
+ * Ninety seconds is three times the slowest cadence a live page has (30s hidden; 10s idle, 2s
+ * active, 0.75s generating), so an ordinary poll — or a missed one — is never mistaken for
+ * absence, and a page that really is gone is never credited with the silence it caused.
+ */
+const FIBER_HEALTH_REPORT_GAP_MS = 90_000;
 
 function noteFiberHealth(conversationId: string, raw: string | null, now = Date.now()): void {
   if (raw !== 'absent' && raw !== 'empty' && raw !== 'ok') return;
@@ -6637,11 +6652,14 @@ function noteFiberHealth(conversationId: string, raw: string | null, now = Date.
     return;
   }
   const seen = fiberHealthSince.get(conversationId);
-  // A clock that moved backwards restarts the stretch rather than satisfying it instantly.
-  if (!seen || seen.state !== raw || now < seen.at) {
-    fiberHealthSince.set(conversationId, { state: raw, at: now });
+  // A clock that moved backwards restarts the stretch rather than satisfying it instantly, and
+  // so does a gap: time in which no page reported is not time a helper spent broken.
+  const reporting = seen && now >= seen.last && now - seen.last < FIBER_HEALTH_REPORT_GAP_MS;
+  if (!seen || seen.state !== raw || now < seen.at || !reporting) {
+    fiberHealthSince.set(conversationId, { state: raw, at: now, last: now });
     return;
   }
+  seen.last = now;
   if (now - seen.at < FIBER_HEALTH_GRACE_MS) return;
   if (fiberHealthTold.get(conversationId) === raw) return;
   fiberHealthTold.set(conversationId, raw);
