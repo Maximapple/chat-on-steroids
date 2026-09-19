@@ -7389,6 +7389,42 @@ describe('unattributed activity recovery', () => {
     expect(handout!.reason).toBe('no-tab');
   });
 
+  it('reopens the chat of a sleeping worker at the moment it is woken', async () => {
+    // The other end of "sleeping, not working". A sleeping worker's closed tab is correctly left
+    // closed; the wake that arrives later is what makes that chat owed a page again, and nothing
+    // asked for one.
+    //
+    // Measured 2026-09-19: worker-11's tab closed at 07:11:34 and was declined as sleeping; it
+    // was woken at 07:16:37 and the command sat unclaimed for its full deadline, typed into
+    // nothing. worker-13's chat closed at 07:10 and its wake five minutes later died the same
+    // way. Both conversations still existed — only their tabs were gone.
+    await pair();
+    spawn({ workers: [{ task: 'audit' }], caller: { conversationId: PRIME } });
+    const bootstrap = await redeem();
+    await request('POST', '/commands/ack', {
+      body: { id: bootstrap.id, status: 'sent', conversationId: WORKER, agent: 'worker-1' }
+    });
+    await events(WORKER, [openTurn('turn-worker-slept'), endTurn('turn-worker-slept', 'completed')]);
+    finishAgent({ conversationId: WORKER }, 'reported, waiting for more');
+
+    // The close a sleeping worker is not reopened for. This is the state the wake starts from.
+    await request('POST', '/closed', { body: { conversationId: WORKER } });
+    expect(await maintenance(), 'a sleeping worker is not owed a tab').toBeNull();
+
+    const staged = stageMessages({ conversationId: PRIME }, [{ to: 'worker-1', text: 'pick this back up' }]);
+    staged.commit();
+    expect(staged.waking.length).toBeGreaterThan(0);
+    requestWorkerRevivals(staged.waking);
+
+    const handout = await vi.waitFor(async () => {
+      const row = await maintenance();
+      expect(row).not.toBeNull();
+      return row;
+    });
+    expect(chatOf(handout)).toBe(WORKER);
+    expect(handout!.reason).toBe('no-tab');
+  });
+
   it('reopens a prime whose page said done while its tools were still being called', async () => {
     await pair();
     spawn({ workers: [{ task: 'keep this run resumable' }], caller: { conversationId: PRIME } });
