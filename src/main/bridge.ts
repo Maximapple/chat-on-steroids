@@ -8281,7 +8281,14 @@ function tidyCommands(): void {
       ? now >= revivalDeadlineAt(command)
       : !automaticResume && now - command.createdAt > COMMAND_TTL_MS;
     if (stale) {
-      drop(command, 'it has been waiting too long to still be what the user expects');
+      // Same distinction the deadline handler makes, because this is the same expiry reached by
+      // the sweep instead of the timer — whichever notices first. Reported differently they
+      // looked like different faults: on 2026-09-19 two wakes from one message expired in the
+      // same millisecond, one saying the browser never picked it up and one saying it had
+      // waited too long, and only the first sentence was true of both.
+      drop(command, command.claimedAt === null && command.spec.type === 'revive'
+        ? 'the browser never picked this up — nothing was typed into any chat, so this is not a page that failed to report'
+        : 'it has been waiting too long to still be what the user expects');
     }
   }
 }
