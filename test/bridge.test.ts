@@ -6049,6 +6049,46 @@ describe('unattributed activity recovery', () => {
     }
   });
 
+  it('starts the helper grace over when no page was reporting at all', async () => {
+    // The grace measures how long a helper has been broken, and only a live page reports it. So
+    // a chat whose tab closed, whose browser exited, or which this app reopened elsewhere is
+    // contributing nothing for that whole stretch — and the stretch used to satisfy the grace
+    // the instant the *new* page said its first word.
+    //
+    // Measured 2026-09-19: the prime's tab went at 08:47:49, the app reopened the chat at
+    // 08:52:44, and the warning was written 0.4 seconds later about a page that was reading
+    // ChatGPT's model again 6.5 seconds after that. Five minutes with no page counted as five
+    // minutes of being broken.
+    await pair();
+    // Its own conversation: the reporter keeps one degraded-state record per chat, and the
+    // neighbouring helper test drives PRIME through both faults and out the other side.
+    const chat = 'fbfbfbfb-1111-2222-3333-000000000001';
+    const ask = (fiber: string) =>
+      request('GET', `/activity?conversationId=${chat}&since=0&fiber=${fiber}`);
+    const lines = () =>
+      getLog().filter((entry) => entry.message.includes('page-model helper as') && entry.message.includes(chat));
+
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      await ask('absent');
+      expect(lines()).toHaveLength(0);
+
+      // The tab goes. Nothing reports for five minutes — which is not five minutes of a broken
+      // helper, it is five minutes of no helper being asked.
+      clock.mockReturnValue(now + 5 * 60_000);
+      await ask('absent');
+      expect(lines(), 'a page 0 seconds old has not failed to come back').toHaveLength(0);
+
+      // It earns its line the ordinary way: by still being absent a grace period later.
+      clock.mockReturnValue(now + 5 * 60_000 + 16_000);
+      await ask('absent');
+      expect(lines()).toHaveLength(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('waits 15 seconds before handing a lone suspect to the browser once attribution has failed', async () => {
     vi.useFakeTimers();
     try {
