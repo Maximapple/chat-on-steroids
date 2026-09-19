@@ -264,8 +264,20 @@ export const WORKER_BOOTSTRAP_LIMIT_MS = 120_000;
  * thirty-second floor, then has to focus or reopen the tab and type — and several wakes
  * from one prime message go one at a time. At thirty seconds the third of three was being
  * dropped as "waiting too long" while the text was on its way into the chat.
+ *
+ * Ninety was still inside the tail. Measured on 2026-09-19, twelve wakes on one machine:
+ * ten delivered between 4.7 and 80.8 seconds, median 25.6 — and two expired, both of them
+ * single wakes, both at the ninety-second mark. The slowest *successful* delivery had nine
+ * seconds to spare. A deadline that close to the observed maximum is not a deadline, it is a
+ * coin toss on a slow poll, and it costs a worker's whole task each time it comes up tails.
+ *
+ * Three minutes clears the measured maximum twice over and covers a serialized batch of four
+ * at the thirty-second alarm floor. It buys nothing but patience: the wake is not retried
+ * either way — waiting longer only decides how long the app keeps believing one that is still
+ * on its way. This is the one number that separates "slow" from "never" here, so it belongs on
+ * the far side of everything that has ever been merely slow.
  */
-export const REVIVAL_DEADLINE_MS = COMMAND_DEADLINE_MS;
+export const REVIVAL_DEADLINE_MS = 3 * 60_000;
 /**
  * How long a delivered wake may go without the worker's first exact tool call.
  *

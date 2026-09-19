@@ -3713,6 +3713,19 @@ describe('delivering a bootstrap', () => {
     expect(opened).toHaveLength(1);
   });
 
+  it('gives a wake longer than the slowest delivery ever measured', async () => {
+    // Twelve wakes on one machine on 2026-09-19: ten delivered between 4.7 and 80.8 seconds,
+    // median 25.6, and two expired — both single wakes, both at the ninety-second mark the
+    // deadline then had. The slowest success had nine seconds to spare, so the deadline sat
+    // inside the tail of its own distribution and a slow poll cost a worker its whole task.
+    //
+    // Pinned as a relation, not a number: whatever the generic command deadline becomes, a
+    // wake has to outlast it, because a wake waits for a browser alarm before anything can
+    // even begin and several wakes from one message are delivered one at a time.
+    expect(REVIVAL_DEADLINE_MS).toBeGreaterThan(COMMAND_DEADLINE_MS);
+    expect(REVIVAL_DEADLINE_MS).toBeGreaterThanOrEqual(81_000 * 2);
+  });
+
   it('expires an owner-null revival at the revival deadline with the same worker and inbox intact', async () => {
     vi.useFakeTimers();
     try {
