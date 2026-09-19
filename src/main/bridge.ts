@@ -5313,7 +5313,36 @@ export function queueWorkerRevival(
   });
   // Start the waking clock at broker admission, not only after a browser accepts the command.
   armDeadline(command);
+  void askForTheTabToWakeIn(conversationId, command.id);
   return describe(command, null);
+}
+
+/**
+ * Asks for the page a wake is about to be typed into, when that chat has no tab.
+ *
+ * A sleeping worker whose tab closes is deliberately not reopened — nothing is owed to a chat
+ * nobody is waiting on. What was missing is the other end of that decision: when the prime does
+ * come back and wake it, the wake goes out to a conversation with no page in any browser, is
+ * never claimed, and expires having typed nothing.
+ *
+ * Measured on 2026-09-19: worker-11's tab closed at 07:11:34 and was declined as "sleeping, not
+ * working"; it was woken at 07:16:37 and the command sat unclaimed for its whole deadline.
+ * worker-13's chat closed at 07:10 and its wake five minutes later died the same way. Both
+ * conversations still existed — only their tabs were gone.
+ *
+ * Its own episode, keyed on the command, because this is not the close being reported again: it
+ * is a new thing being asked of that chat, and the recovery a previous close already carried out
+ * must not stand in for it. Everything else — a blocked chat, a stopped one, a chat this app has
+ * no session for, recovery the user turned off — is decided by the two functions below exactly
+ * as it is for any other reopen.
+ */
+async function askForTheTabToWakeIn(conversationId: string, commandId: string): Promise<void> {
+  if (liveConversations().some((entry) => entry.conversationId === conversationId)) return;
+  const session = await findSessionByConversation(conversationId);
+  if (!session || !tabRecoveryWanted(conversationId)) return;
+  if (queueBrowserRecovery(conversationId, session.id, `no-tab:wake:${commandId}`, 'no-tab')) {
+    logInfo(`bridge: the chat being woken (${conversationId}) has no tab — asking the browser to open it once`);
+  }
 }
 
 /**
