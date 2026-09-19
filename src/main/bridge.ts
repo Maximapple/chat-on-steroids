@@ -125,6 +125,7 @@ import {
   agentConversation,
   agentForConversation,
   agentInfoForOwnedConversation,
+  liveAgentForOwnedConversation,
   primeForOwnedConversation,
   agentForOwnedConversation,
   isWorkerConversation,
@@ -7328,6 +7329,12 @@ async function inspectOwedCompactions(now: number): Promise<boolean> {
  */
 async function queueMissingTab(conversationId: string, working: boolean, now = Date.now()): Promise<void> {
   const agent = agentInfoForOwnedConversation(conversationId);
+  // A parked record is history, not a slot. A run that ended keeps every agent in the state it
+  // had at the end — a prime stays `active` — and reading that as an occupied slot refused this
+  // chat a tab for the rest of its life: fifteen times over two days here, each on a chat that
+  // had once been a prime. It must neither bar the reopen below nor grant the worker exemption
+  // further down, so everything about a live slot reads from this and nothing else.
+  const slot = liveAgentForOwnedConversation(conversationId);
   // Read after closeConversation() has ended the session, so `endedAt` is this exact close.
   const session = await findSessionByConversation(conversationId);
   const name = agent?.id ?? conversationId;
@@ -7352,13 +7359,13 @@ async function queueMissingTab(conversationId: string, working: boolean, now = D
   // Only while a revival is actually pending for this conversation. A slot left `waking` by
   // something already given up on has no text owed to it, and reopening for that would be the
   // app helping itself to a tab for work nobody is waiting on.
-  const wakePending = agent?.state === 'waking' &&
+  const wakePending = slot?.state === 'waking' &&
     pendingWorkerRevivals().some((revival) => revival.conversationId === conversationId);
-  if (agent && agent.state !== 'detached' && !wakePending)
-    return declined(`its ${agent.role} slot is ${agent.state}, not working`);
-  if (!agent && !goalActiveFor(conversationId) && (session.toolCalls ?? 0) === 0) return declined('it has never called a tool');
-  if (!working && agent?.role !== 'worker' && !(goalActiveFor(conversationId) && goalPendingReplyFor(conversationId))) return declined('no turn is running in it');
-  const wentAt = agent?.detachedAt ?? session.endedAt ?? now;
+  if (slot && slot.state !== 'detached' && !wakePending)
+    return declined(`its ${slot.role} slot is ${slot.state}, not working`);
+  if (!slot && !goalActiveFor(conversationId) && (session.toolCalls ?? 0) === 0) return declined('it has never called a tool');
+  if (!working && slot?.role !== 'worker' && !(goalActiveFor(conversationId) && goalPendingReplyFor(conversationId))) return declined('no turn is running in it');
+  const wentAt = slot?.detachedAt ?? session.endedAt ?? now;
   if (queueBrowserRecovery(conversationId, session.id, `no-tab:${wentAt}`, 'no-tab', 0, now)) {
     logInfo(`bridge: ${name} has no tab — asking the browser to open the exact chat once`);
   } else {

@@ -3659,6 +3659,26 @@ export function primeForOwnedConversation(conversationId: string): string | null
 }
 
 /** Read-only exact owner metadata for recorder/origin reconstruction across parked histories. */
+/**
+ * The agent working in this conversation right now, out of a run that is still running.
+ *
+ * The difference from {@link agentInfoForOwnedConversation} is the parked record. A run that
+ * ended is kept as dormant history, and every agent in it keeps the state it had at the end —
+ * a prime stays `active` forever, a worker stays `sleeping`. That history is the right answer
+ * to "was this ever a worker chat", which is what the compaction and Goal fences ask. It is the
+ * wrong answer to "is a slot holding this chat now", because a parked slot holds nothing: its
+ * run is over, nobody is waiting on it, and the chat has gone back to being an ordinary chat.
+ *
+ * Measured on 2026-09-19: fifteen refused tab reopens across two days, every one on a chat that
+ * had been a prime, one of them an hour after the app logged "restored no active run" at
+ * startup. The user's chat lost its tab mid-answer and could never be given one back.
+ */
+export function liveAgentForOwnedConversation(conversationId: string): AgentInfo | null {
+  if (!runForConversation(conversationId)) return null;
+  const active = agentForConversationId(conversationId);
+  return active ? { ...active.info } : null;
+}
+
 export function agentInfoForOwnedConversation(conversationId: string): AgentInfo | null {
   const primes = allFamilies().filter(owner => !unpublishedRuns.has(owner as Run) && owner.primeConversationId === conversationId)
     .map(owner => owner.agents.get(PRIME_ID)!.info);

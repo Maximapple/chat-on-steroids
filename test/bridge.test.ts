@@ -139,6 +139,7 @@ const {
   spawn,
   stageMessages,
   pendingWorkerSpawns,
+  releaseQuiescentRun,
   onSwarmPersistNow,
   persistCriticalSwarmNow,
   retiredWorkerForConversation,
@@ -7354,6 +7355,40 @@ describe('unattributed activity recovery', () => {
     expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.state).toBe('detached');
     const handout = await maintenance();
     expect(chatOf(handout)).toBe(WORKER);
+    expect(handout!.reason).toBe('no-tab');
+  });
+
+  it('reopens the chat of a prime whose run ended long ago', async () => {
+    // A chat that once hosted a swarm goes on being an ordinary chat afterwards. The run's
+    // record does not: it is parked, and every agent in it keeps the state it had when the run
+    // ended — a prime stays `active` forever. `agentInfoForOwnedConversation` answers out of
+    // that parked record when no live run owns the chat, so the slot check below read "active,
+    // not working" about a swarm that had been over for hours and refused the reopen. Once, for
+    // the rest of that chat's life.
+    //
+    // Measured 2026-09-19: fifteen such refusals across two days, all on chats that had been
+    // primes. The app had logged "restored no active run" at startup an hour before the last
+    // one. The user's chat lost its tab mid-answer and its tool calls went on being filed under
+    // Unattributed activity, because nothing could tell the app where the work was.
+    await pair();
+    spawn({ workers: [{ task: 'audit' }], caller: { conversationId: PRIME } });
+    const bootstrap = await redeem();
+    await request('POST', '/commands/ack', {
+      body: { id: bootstrap.id, status: 'sent', conversationId: WORKER, agent: 'worker-1' }
+    });
+    await events(WORKER, [openTurn('turn-worker-over'), endTurn('turn-worker-over', 'completed')]);
+    finishAgent({ conversationId: WORKER }, 'the piece is done');
+    expect(releaseQuiescentRun({ reason: 'no worker is currently running' })).toBe(true);
+    expect(swarmState().agents, 'the run is parked, not running').toHaveLength(0);
+
+    // The chat carries on as itself: a tool call of its own, and a turn running. Both are what
+    // make it this app's chat at all — a chat that never called a tool is nobody's business here.
+    await attributed(PRIME);
+    await events(PRIME, [openTurn('turn-after-the-run')]);
+    await request('POST', '/closed', { body: { conversationId: PRIME } });
+
+    const handout = await maintenance();
+    expect(chatOf(handout)).toBe(PRIME);
     expect(handout!.reason).toBe('no-tab');
   });
 
