@@ -8011,7 +8011,19 @@ function expire(command: Command): void {
     retire(command, 'its worker is no longer waiting to be woken');
     return;
   }
-  drop(command, command.lastError ?? 'the chat this app opened did not report back in time');
+  // Two very different failures wore the same sentence. A command the browser claimed and then
+  // could not finish is a page problem — it opened something, typed something, and the report
+  // never came. A command the browser never claimed at all is not: the text never reached a
+  // page, and looking at that page for the cause is looking in the wrong place.
+  //
+  // Measured on 2026-09-19: a worker wake expired after ninety seconds having never been
+  // claimed, with the wake channel connected throughout and the worker's tab still open — and
+  // the same wake had succeeded in five seconds ten minutes earlier. The log said only "did not
+  // report back in time", which sent the reader to the page that had never been asked anything.
+  drop(command, command.lastError ??
+    (command.claimedAt === null
+      ? 'the browser never picked this up — nothing was typed into any chat, so this is not a page that failed to report'
+      : 'the chat this app opened did not report back in time'));
   deliver();
 }
 

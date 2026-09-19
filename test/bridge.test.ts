@@ -3733,6 +3733,14 @@ describe('delivering a bootstrap', () => {
       expect(worker).toMatchObject({ state: 'sleeping', revivable: true, pending: 1 });
       expect(pendingCommands().some((entry) => entry.id === id)).toBe(false);
 
+      // The browser never claimed this one, and the log has to say so. Both failures wore the
+      // same sentence before: measured 2026-09-19, a wake expired unclaimed after ninety seconds
+      // with the wake channel connected and the worker's tab still open, and "did not report
+      // back in time" sent the reader to a page that had never been asked anything.
+      const gaveUp = getLog().find((entry) => entry.message.includes('gave up on revive:'));
+      expect(gaveUp?.message).toContain('the browser never picked this up');
+      expect(gaveUp?.message).not.toContain('did not report back in time');
+
     } finally {
       vi.useRealTimers();
     }
