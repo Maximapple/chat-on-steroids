@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { flushDurable, initDurableStore, readDurable, resetDurableForTests, writeDurableNow } from '../src/main/durable.js';
 import {
-  fileSilenceInput, deferSilenceInput, revokeSilenceInputs, revokeInputsForLeftConversation, retireInputsForLeftConversations, pendingQueuedPickups, inputBeforeGoal, inputArgs, acknowledgeBrowserInput, cancelInput, claimBrowserInput, completeBrowserDecision, enqueueInput,
+  fileSilenceInput, deferSilenceInput, revokeSilenceInputs, revokeInputsForLeftConversation, retireInputsForLeftConversations, vetoesNewTicketsForTests, pendingQueuedPickups, inputBeforeGoal, inputArgs, acknowledgeBrowserInput, cancelInput, claimBrowserInput, completeBrowserDecision, enqueueInput,
   failBrowserInput, listInputs, offerToolInput as offerToolInputBatch, acknowledgeToolInput, pendingBrowserInputs, requestBrowserDecision, resetInputForTests, configureInputDelivery,
   authorizeBrowserHelperRetry, pausedBrowserHelpers, hasEligibleToolInput, editQueuedInput, reorderQueuedInputs, setInputAutomation, authorizeBrowserInput, sessionInputPolicy
 } from '../src/main/session/input.js';
@@ -1661,6 +1661,36 @@ describe('one silence delivery for a correction and its next checkpoint', () => 
     for (const id of [head.id, correction.id]) expect(rows.find(row => row.id === id)).toMatchObject({ state: 'sent', messageId: 'native-id', historyRecorded: true });
     expect(rows.find(row => row.id === later.id)).toMatchObject({ state: 'queued' });
     expect(await enqueueInput(input({ ...correction }))).toMatchObject({ text: 'Use real 3D shapes' });
+  });
+
+  it('lets an authorized send stop vetoing new tickets once its receipt is hopeless', async () => {
+    // An authorized browser row has no exit but its receipt: it may already be in the chat, so
+    // it is never resent and never cancelled on a clock. Right about the send — but the same
+    // row also stops the session filing any further automatic Continue, and a receipt can be
+    // lost. Every recovery reload tears the page out from under a send in flight.
+    //
+    // Measured 2026-09-18: a row authorized at 09:52 never receipted, and its session filed no
+    // auto-continue for the nine hours that followed, through a turn ChatGPT killed mid-plan.
+    const { correction } = await bundle();
+    await claimBrowserInput(correction.id, 'page', binding.conversationId, true);
+    expect(await authorizeBrowserInput(correction.id, 'page', binding.conversationId)).toBe(true);
+    const authorized = (await listInputs()).find(row => row.id === correction.id)!;
+    expect(authorized).toMatchObject({ state: 'browser', sendAuthorizedAt: expect.any(Number) });
+
+    // Fresh, it vetoes: a receipt may still be on its way, and nothing may overtake it.
+    expect(vetoesNewTicketsForTests(authorized, authorized.sendAuthorizedAt! + 60_000)).toBe(true);
+    // Sixteen minutes on, the receipt is not coming and the veto ends.
+    expect(vetoesNewTicketsForTests(authorized, authorized.sendAuthorizedAt! + 16 * 60_000)).toBe(false);
+
+    // What never changes: the row itself. It is not resent, not cancelled, not rewritten.
+    expect((await listInputs()).find(row => row.id === correction.id)).toMatchObject({
+      state: 'browser', sendAuthorizedAt: authorized.sendAuthorizedAt, text: authorized.text
+    });
+
+    // And a queued row keeps its veto for ever, because that is pending work, not an
+    // uncertain send — overtaking it is the thing the veto exists to prevent.
+    const queued = (await listInputs()).find(row => row.state === 'queued');
+    if (queued) expect(vetoesNewTicketsForTests(queued, Date.now() + 24 * 60 * 60_000)).toBe(true);
   });
 
   it('sweeps rows left behind at startup, for sessions that never resume again', async () => {
