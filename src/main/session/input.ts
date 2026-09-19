@@ -1136,8 +1136,13 @@ export function revokeInputsForLeftConversation(sessionId: string, currentConver
     const next = current.map(row => {
       if (row.sessionId !== sessionId || terminal(row) || row.conversationId === currentConversationId) return row;
       retired += 1;
-      return { ...row, state: 'cancelled' as const,
-        error: 'the session moved to another chat before this could be delivered' };
+      // Cancelled without an error on purpose. The renderer turns a cancelled row that carries
+      // one into a visible notice, and this is housekeeping: the person never wrote it, it was
+      // never delivered, and there is nothing for them to do about it. Shipping the error made
+      // every retirement show up in the chat as a failed "Carry on…" message with a sentence
+      // underneath about a session move — reported within hours of the retirement landing.
+      // The count is in the log line the caller writes; that is where this belongs.
+      return { ...row, state: 'cancelled' as const };
     });
     if (retired > 0) await commit(next);
     return retired;
@@ -1172,8 +1177,9 @@ export function retireInputsForLeftConversations(): Promise<number> {
       // evidence that this row is stale, and retiring on it would drop a deliverable message.
       if (now === null || now === undefined || now === row.conversationId) return row;
       retired += 1;
-      return { ...row, state: 'cancelled' as const,
-        error: 'the session had moved to another chat before this could be delivered' };
+      // Silent for the same reason as the pass above: a cancelled row with an error becomes a
+      // notice in the chat, and a swept-up row is not news to the person.
+      return { ...row, state: 'cancelled' as const };
     });
     if (retired > 0) await commit(next);
     return retired;
