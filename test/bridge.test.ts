@@ -7357,6 +7357,38 @@ describe('unattributed activity recovery', () => {
     expect(handout!.reason).toBe('no-tab');
   });
 
+  it('reopens the tab of a worker it is in the middle of waking', async () => {
+    // A wake is text this app is trying to type into that exact chat. With the page gone it has
+    // nowhere to go: the browser never claims the command and it expires having typed nothing.
+    //
+    // Measured 2026-09-19: worker-1's counterpart was woken at 07:16:37.914 and its tab closed
+    // 5.3 seconds later, declined as "waking, not working" — the one non-detached state that
+    // still owes its page something. The wake then sat unclaimed for its whole deadline. Three
+    // wakes failed that way on one machine that morning; every wake whose tab survived landed,
+    // the fastest in 1.2 seconds.
+    await pair();
+    spawn({ workers: [{ task: 'audit' }], caller: { conversationId: PRIME } });
+    const bootstrap = await redeem();
+    await request('POST', '/commands/ack', {
+      body: { id: bootstrap.id, status: 'sent', conversationId: WORKER, agent: 'worker-1' }
+    });
+    // The worker did its turn and reported; a wake is what comes after that, so the chat it is
+    // being woken in is a chat this app has a session for.
+    await events(WORKER, [openTurn('turn-worker-wake'), endTurn('turn-worker-wake', 'completed')]);
+    finishAgent({ conversationId: WORKER }, 'reported, waiting for more');
+    // The shared `wake` helper stages from PRIME_CHAT; this describe owns its own prime.
+    const staged = stageMessages({ conversationId: PRIME }, [{ to: 'worker-1', text: 'pick this back up' }]);
+    staged.commit();
+    expect(staged.waking.length).toBeGreaterThan(0);
+    requestWorkerRevivals(staged.waking);
+    expect(swarmState().agents.find((agent) => agent.id === 'worker-1')?.state).toBe('waking');
+
+    await request('POST', '/closed', { body: { conversationId: WORKER } });
+    const handout = await maintenance();
+    expect(chatOf(handout)).toBe(WORKER);
+    expect(handout!.reason).toBe('no-tab');
+  });
+
   it('reopens a prime whose page said done while its tools were still being called', async () => {
     await pair();
     spawn({ workers: [{ task: 'keep this run resumable' }], caller: { conversationId: PRIME } });
