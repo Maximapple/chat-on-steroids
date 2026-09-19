@@ -2929,7 +2929,20 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       // below; at most one line per replacement chat.
       const entry = continuationByToken(checkpointToken);
       if (!entry) {
-        logInfo(`bridge: marked replacement ${id} named token ${checkpointToken.slice(0, 8)} — no such continuation`);
+        // Once per chat and token, which is what the paragraph above promises and what the
+        // answer is worth. The marker stays in the replacement chat's transcript for good, so
+        // every later load of that page reads it again and names the same finished handoff:
+        // 62 of these lines across 8 chats in four days here, 17 for one chat, each one saying
+        // the same thing about a continuation that committed hours earlier. Nothing is wrong —
+        // the 409 below is the correct answer — but a log that repeats a settled fact is how a
+        // line that matters goes unread.
+        if (!markedReplacementTold.has(`${id}:${checkpointToken}`)) {
+          markedReplacementTold.add(`${id}:${checkpointToken}`);
+          if (markedReplacementTold.size > 500) {
+            for (const old of [...markedReplacementTold].slice(0, 100)) markedReplacementTold.delete(old);
+          }
+          logInfo(`bridge: marked replacement ${id} named token ${checkpointToken.slice(0, 8)} — no such continuation`);
+        }
         return json(res, 409, { error: 'no_such_continuation' }, origin);
       }
       const bound = await bindContinuationDestinationMessageNow(
@@ -6750,6 +6763,8 @@ function noticeRefusal(key: string, message: string): void {
  * Two minutes gives follow-ups a warm page; five minutes releases an unused renderer.
  * The extension still proves the exact document has no draft or generation before closing.
  */
+/** Replacement chats whose settled marker has already been reported, by chat and token. */
+const markedReplacementTold = new Set<string>();
 async function browserTabPolicy(openConversations: Set<string>) {
   // Existing cached metadata is the ownership index; never scan transcripts per browser poll.
   const summaries = await listUsageSessions();

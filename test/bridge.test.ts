@@ -2903,6 +2903,27 @@ describe('delivering a bootstrap', () => {
     ).toHaveLength(1);
   });
 
+  it('says once that a settled marker names no continuation, however often that page reloads', async () => {
+    // The marker stays in the replacement chat's transcript for good, so every later load of
+    // that page reads it again and names the same finished handoff. Measured 2026-09-19: 62 such
+    // lines across 8 chats in four days, 17 for a single chat, each saying the same thing about
+    // a continuation that had committed hours before. The 409 is the right answer every time;
+    // repeating the sentence is how a line that matters goes unread.
+    await pair();
+    const settled = 'd4d4d4d4-2222-4333-8444-555555555555';
+    const token = 'AtokenNothingHoldsAnyMore';
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const reply = await request('POST', '/compact', {
+        body: { conversationId: settled, token, destinationMessageId: `m-settled-${attempt}` }
+      });
+      expect(reply.status).toBe(409);
+      expect(reply.body.error).toBe('no_such_continuation');
+    }
+    expect(
+      getLog().filter((entry) => entry.message.includes(`marked replacement ${settled}`))
+    ).toHaveLength(1);
+  });
+
   /**
    * The name the fresh chat ends up with.
    *
