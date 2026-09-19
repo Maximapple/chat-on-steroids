@@ -7445,6 +7445,12 @@ describe('unattributed activity recovery', () => {
     // The close a sleeping worker is not reopened for. This is the state the wake starts from.
     await request('POST', '/closed', { body: { conversationId: WORKER } });
     expect(await maintenance(), 'a sleeping worker is not owed a tab').toBeNull();
+    // And the refusal names the chat, not only the slot. Every prime in every run is called
+    // `prime` and worker ids repeat across runs, so a line carrying the id alone cannot be
+    // traced back to a conversation at all — 533 such lines over two days here could not even
+    // be counted by chat.
+    expect(getLog().filter((entry) => entry.message.includes('closed its last tab')).at(-1)?.message)
+      .toContain(`worker-1 (${WORKER})`);
 
     const staged = stageMessages({ conversationId: PRIME }, [{ to: 'worker-1', text: 'pick this back up' }]);
     staged.commit();
