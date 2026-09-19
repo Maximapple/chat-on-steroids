@@ -1682,7 +1682,11 @@ describe('one silence delivery for a correction and its next checkpoint', () => 
       expect(open.length).toBeGreaterThan(0);
       expect(await retireInputsForLeftConversations()).toBe(open.length);
       const rows = await listInputs();
-      for (const row of open) expect(rows.find(other => other.id === row.id)).toMatchObject({ state: 'cancelled' });
+      for (const row of open) {
+        const after = rows.find(other => other.id === row.id);
+        expect(after).toMatchObject({ state: 'cancelled' });
+        expect(after?.error).toBeUndefined();
+      }
       // Idempotent, and nothing else was touched.
       expect(await retireInputsForLeftConversations()).toBe(0);
     } finally {
@@ -1716,7 +1720,12 @@ describe('one silence delivery for a correction and its next checkpoint', () => 
     expect(await revokeInputsForLeftConversation(sessionId, 'conversation-after-handoff')).toBe(live.length);
     const rows = await listInputs();
     for (const id of [head.id, correction.id, ...live.map(row => row.id)]) {
-      expect(rows.find(row => row.id === id)).toMatchObject({ state: 'cancelled' });
+      const row = rows.find(other => other.id === id);
+      expect(row).toMatchObject({ state: 'cancelled' });
+      // No error, deliberately: the renderer turns a cancelled row carrying one into a visible
+      // notice, and a retirement is housekeeping. Shipping it with an error put a failed
+      // "Carry on…" message into the chat with a sentence about a session move underneath.
+      expect(row?.error).toBeUndefined();
     }
     // And a second pass has nothing left to do.
     expect(await revokeInputsForLeftConversation(sessionId, 'conversation-after-handoff')).toBe(0);
