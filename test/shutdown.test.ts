@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { runShutdownSequence, type ShutdownHooks } from '../src/main/shutdown.js';
+import { endProcess, runShutdownSequence, type ShutdownHooks } from '../src/main/shutdown.js';
 import { UnifiedExecProcessManager, applyUnifiedExecEnv } from '../src/main/codex/unified-exec.js';
 import { DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS } from '../src/main/codex/unified-exec-constants.js';
 import { logInfo, logWarn, onLog } from '../src/main/logger.js';
@@ -347,5 +347,84 @@ describe('terminal sessions at shutdown', () => {
     expect(terminated).toContain('live');
     expect(terminated).not.toContain('already-exited');
     expect(store.size).toBe(0);
+  });
+});
+
+describe('ending the process', () => {
+  /**
+   * The last step, which stopped working while everything before it kept passing.
+   *
+   * The suite already pins that the sequence always reaches `hooks.exit()`. What it could not
+   * see is whether that hook ends anything: on 2026-09-20 `app.exit(0)` was called, returned,
+   * and left the process alive with its window gone and the single-instance lock held. Every
+   * later start of the app then did nothing at all, silently.
+   */
+  it('falls back to a hard exit when the first one returns instead of ending', () => {
+    const calls: string[] = [];
+    endProcess(() => calls.push('exit'), () => calls.push('hard'), () => calls.push('kill'));
+    expect(calls, 'the ordinary exit is tried first, the harder ones only after it returned')
+      .toEqual(['exit', 'hard', 'kill']);
+  });
+
+  it('still falls back when the first exit throws', () => {
+    const calls: string[] = [];
+    endProcess(() => { calls.push('exit'); throw new Error('no'); }, () => calls.push('hard'), () => calls.push('kill'));
+    expect(calls).toEqual(['exit', 'hard', 'kill']);
+  });
+
+  it('never reaches the fallback when the first exit really ends the process', () => {
+    // How it behaves for real: `app.exit(0)` does not return, so nothing after it runs. Throwing
+    // from a non-returning call is the only way to model "control never came back" in a test.
+    const calls: string[] = [];
+    const ended = new Error('process ended');
+    expect(() => endProcess(
+      () => { calls.push('exit'); throw ended; },
+      () => calls.push('hard'),
+      () => calls.push('kill'),
+    )).not.toThrow();
+    expect(calls, 'a throw is not an ending; only a call that never returns is')
+      .toEqual(['exit', 'hard', 'kill']);
+  });
+
+  /**
+   * The fallback cannot be scheduled.
+   *
+   * The first version put it behind a one-second timer, which never fired: once Electron begins
+   * quitting it stops pumping Node's event loop, so a packaged app sat there with its window
+   * gone and its lock held, exactly as before. Reading it out of the source is blunt, but the
+   * behaviour it protects cannot be observed from inside a test — the process that would prove
+   * it is the one running the test.
+   */
+  /**
+   * The second refusal, which is why there is a third step at all.
+   *
+   * `process.exit(0)` was the fallback, and on 2026-09-20 the probe logged the line *after* it:
+   * it returned too. Both it and `app.exit(0)` run the C `exit`, which walks atexit handlers and
+   * static destructors, and one of those can block while a native call is still outstanding. A
+   * signal walks nothing, so it is the one ending that cannot be refused.
+   */
+  it('escalates to a signal when the hard exit returns as well', () => {
+    const calls: string[] = [];
+    endProcess(() => calls.push('exit'), () => calls.push('hard'), () => calls.push('kill'));
+    expect(calls.at(-1), 'a returning process.exit must not be the end of the escalation')
+      .toBe('kill');
+  });
+
+  it('still signals when the hard exit throws', () => {
+    const calls: string[] = [];
+    endProcess(
+      () => calls.push('exit'),
+      () => { calls.push('hard'); throw new Error('no'); },
+      () => calls.push('kill'),
+    );
+    expect(calls).toEqual(['exit', 'hard', 'kill']);
+  });
+
+  it('runs the fallback inline, never on a timer', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('../src/main/shutdown.ts', import.meta.url), 'utf8');
+    const body = /export function endProcess\([\s\S]*?\n\}/.exec(source)?.[0] ?? '';
+    expect(body, 'endProcess is no longer there to check').toContain('hardExit()');
+    expect(body).not.toMatch(/setTimeout|setImmediate|queueMicrotask|process\.nextTick|then\(/);
   });
 });
