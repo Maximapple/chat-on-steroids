@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { desktopAutomationSupported } from '../src/main/platform.js';
 
 const mocks = vi.hoisted(() => {
   const caps = {
@@ -31,7 +32,10 @@ const mocks = vi.hoisted(() => {
     report: null as null | ((report: Record<string, unknown>) => void),
     starts: 0,
     prewarm: vi.fn(async () => undefined),
-    endpointStop: vi.fn(async (_options?: { forceAfterMs?: number }): Promise<void> => undefined),
+    endpointStopGate: null as Promise<void> | null,
+    endpointStop: vi.fn(async (_options?: { forceAfterMs?: number }): Promise<void> => {
+      if (mocks.endpointStopGate) await mocks.endpointStopGate;
+    }),
     publication: vi.fn((surface: string, observe: (name: string, version: string, instructions: string, tools: unknown[]) => void) => observe(`Chat On Steroids ${surface}`, '1', 'instructions', [])),
     endpointStartGate: null as Promise<void> | null,
     endpointStartReached: vi.fn(),
@@ -101,6 +105,7 @@ describe('connection surface state', () => {
     mocks.starts = 0;
     mocks.prewarm.mockClear();
     mocks.endpointStop.mockClear();
+    mocks.endpointStopGate = null;
     mocks.publication.mockClear();
     mocks.endpointStartReached.mockClear();
     mocks.endpointStartGate = null;
@@ -314,6 +319,73 @@ describe('connection surface state', () => {
     expect(connection.getStatus()).toMatchObject({ state: 'disconnected', publicUrl: null, localUrl: null });
   });
 
+  /**
+   * Quit while the drain is doing its job.
+   *
+   * The overtake below exists for a connect that never returns. It must not fire on a teardown
+   * that is working: `disconnectImpl` drains `endpoint`, and once it has taken custody the
+   * endpoint lives in `drainingEndpoint` — so a second call finds nothing to drain, and without
+   * this guarantee it would report itself done in milliseconds. The race would then end phase 1
+   * five seconds in, and the next phase kills exec processes and flushes writers while accepted
+   * MCP calls are still recording through them. The 40s budget exists to contain the 30s drain;
+   * a grace that short-circuits it defeats the thing it was added to protect.
+   */
+  it('waits for a drain already in flight instead of overtaking it', async () => {
+    let releaseStop!: () => void;
+    mocks.endpointStopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+    const connection = await import('../src/main/connection.js');
+    await connection.connect();
+
+    vi.useFakeTimers();
+    let settled = false;
+    try {
+      const shuttingDown = connection.shutdownConnection().then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(settled, 'phase 1 must not report done while accepted responses are still draining')
+        .toBe(false);
+      releaseStop();
+      await vi.advanceTimersByTimeAsync(0);
+      await shuttingDown;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(settled).toBe(true);
+    expect(connection.getStatus().state).toBe('disconnected');
+  });
+
+  /**
+   * Quit while connecting, when the connect never comes back.
+   *
+   * The test above releases the Keychain lookup; the packaged app on 2026-09-20 did not get that
+   * courtesy. A re-signed build put an OS prompt in front of `getSecret`, nobody answered it, and
+   * the connect owning the lifecycle queue never returned — so the disconnect queued behind it
+   * never ran, and every quit sat out its whole 40s phase budget before being abandoned. The app
+   * log showed the shape of it: `bridge stopped`, then nothing, no `server stopping` at all.
+   */
+  it('stops admitting without waiting for a Keychain lookup that never returns', async () => {
+    mocks.secretGate = new Promise<void>(() => {});
+    const connection = await import('../src/main/connection.js');
+
+    const connecting = connection.connect();
+    await vi.waitFor(() => expect(mocks.secretReached).toHaveBeenCalledTimes(1));
+
+    vi.useFakeTimers();
+    try {
+      const shuttingDown = connection.shutdownConnection();
+      // The endpoint closes at once; only the queued teardown behind the parked connect waits.
+      expect(mocks.endpointStop).toHaveBeenCalledWith({ forceAfterMs: 30_000 });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await shuttingDown;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(connection.getStatus().state, 'quit must not inherit an unbounded wait').toBe('disconnected');
+    expect(mocks.starts).toBe(0);
+    void connecting;
+  });
+
   it('tears down the local endpoint when Keychain lookup resumes after final shutdown', async () => {
     let releaseSecret!: () => void;
     mocks.secretGate = new Promise<void>((resolve) => {
@@ -390,6 +462,49 @@ describe('connection surface state', () => {
 
     expect(mocks.starts).toBe(2);
     expect(connection.getStatus().state).toBe('connected');
+  });
+
+  /**
+   * QA: disabling Desktop mid-session made the *next* connector call fail at the tunnel relay
+   * with a raw `tunnel_client_not_connected` instead of this app's own TOOL_DISABLED refusal.
+   * Root cause: the local endpoint's exposed tools are deliberately monotonic (server.ts), but
+   * the Desktop *tunnel* carrying requests to it was being torn down the moment every desktop
+   * capability went off, so a request never reached that TOOL_DISABLED handler at all.
+   *
+   * `surfaceIsUseful` gates Desktop on `desktopAutomationSupported()`, which reads the real host
+   * platform even though `caps` here is mocked — Linux CI never has a Desktop tunnel to publish
+   * in the first place, so `mocks.starts` would stay at 1 (Core only) and every assertion below
+   * would be about a tunnel that never existed. Runs only where Desktop can actually be published.
+   */
+  it.runIf(desktopAutomationSupported())('keeps a published Desktop tunnel up when every desktop permission goes off, instead of tearing down the transport', async () => {
+    mocks.config.tunnel.kind = 'openai';
+    mocks.config.tunnel.desktopTunnelId = 'desktop-tunnel-id';
+    mocks.caps.control = true;
+    const connection = await import('../src/main/connection.js');
+
+    await connection.connect();
+    // Core, then Desktop: both publish on the OpenAI path.
+    expect(mocks.starts).toBe(2);
+    expect(connection.getStatus().surfaces.find((s) => s.id === 'desktop')).toMatchObject({ available: true });
+
+    // The last desktop permission goes off mid-session — the same shape Read-only or a plain
+    // capability toggle produces. The card must say "off" (the live capability truth) without
+    // the tunnel itself stopping.
+    mocks.caps.control = false;
+    await connection.applySettings();
+
+    expect(mocks.tunnelStop).not.toHaveBeenCalled();
+    expect(connection.getStatus().surfaces.find((s) => s.id === 'desktop')).toMatchObject({
+      available: false,
+      state: 'off'
+    });
+
+    // Turning it back on reuses the still-live tunnel instead of paying to restart it — the
+    // "waiting for reconnection" QA had to do before the same operation worked again.
+    mocks.caps.control = true;
+    await connection.applySettings();
+    expect(mocks.starts).toBe(2);
+    expect(mocks.tunnelStop).not.toHaveBeenCalled();
   });
 
   it('prewarms the helper only when a native Desktop capability is published', async () => {

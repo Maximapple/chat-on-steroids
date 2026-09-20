@@ -150,8 +150,7 @@ function toolsFor(id: SurfaceId): string[] {
   const config = getConfig();
   const caps = effectiveCapabilities(config);
   if (id === 'desktop') {
-    return desktopToolNames(caps);
-  }
+    return desktopToolNames(caps);  }
   const tools: string[] = [];
   if (caps.read || caps.browse || caps.metadata) tools.push('read');
   if (caps.read) tools.push('view_image');
@@ -447,7 +446,13 @@ async function applySettingsImpl(): Promise<void> {
 
   for (const id of optionalSurfaces) {
     if (!surfaceIsUseful(id, caps)) {
-      await stopOptionalTunnel(id, 'Turn a desktop permission back on to publish this connector.');
+      // Deliberately not unpublished. The card already reads "off" — describeSurfaces set it
+      // above from the live capabilities — and the local handlers already answer TOOL_DISABLED
+      // while a capability is off. But that answer cannot travel over a transport that has been
+      // stopped: the request dies at the tunnel with the infrastructure's own
+      // tunnel_client_not_connected instead of this app's explanation. QA met exactly that, the
+      // Desktop connector returning a raw transport error mid-session. A surface that was never
+      // published stays unpublished; a live one keeps its transport.
       continue;
     }
     if (optionalTunnels.get(id)?.tunnelId === optionalTunnelId(config.tunnel, id)) continue;
@@ -472,17 +477,29 @@ async function disconnectImpl(endpointForceAfterMs?: number): Promise<void> {
   // command process or durable writer is retired by the app-wide shutdown sequence.
   // The public tunnel may briefly see the now-closed loopback endpoint, which is preferable
   // to accepting a mutation after shutdown has already begun.
+  const forceAfterMs = endpointForceAfterMs ?? (shutdownRequested ? 30_000 : undefined);
+  const stopEndpoint = async (target: McpEndpoint): Promise<void> => {
+    if (forceAfterMs === undefined) await target.stop().catch(() => {});
+    else await target.stop({ forceAfterMs }).catch(() => {});
+  };
   if (endpoint) {
     const stopping = endpoint;
     endpoint = null;
     drainingEndpoint = stopping;
     try {
-      const forceAfterMs = endpointForceAfterMs ?? (shutdownRequested ? 30_000 : undefined);
-      if (forceAfterMs === undefined) await stopping.stop().catch(() => {});
-      else await stopping.stop({ forceAfterMs }).catch(() => {});
+      await stopEndpoint(stopping);
     } finally {
       drainingEndpoint = null;
     }
+  } else if (drainingEndpoint) {
+    // Someone else has custody and is draining it. Joining that stop is what makes an
+    // overtaking disconnect honest: without this branch it finds no `endpoint`, skips the drain
+    // entirely, and reports itself finished in milliseconds — while accepted MCP calls are still
+    // recording. Final shutdown races this against the queued teardown, so that answer would end
+    // phase 1 early and let the next phase kill the very processes those calls are writing
+    // through. `stop()` hands every caller the same promise and may only shorten its force
+    // deadline, never extend it, so joining costs nothing and cannot prolong the drain.
+    await stopEndpoint(drainingEndpoint);
   }
   for (const { handle } of optionalTunnels.values()) await handle?.stop().catch(() => {});
   optionalTunnels.clear();
@@ -522,14 +539,36 @@ export function disconnect(): Promise<void> {
  * User disconnects and settings reconnects deliberately do not use this path: they keep
  * running afterward, so dropping a committed response there could make ChatGPT retry it.
  */
+/**
+ * How long final shutdown waits for the lifecycle queue before tearing the connection down
+ * itself. Short, because the wait is only ever useful when an ordinary operation is about to
+ * finish; a wedged one never will. It has to stay well inside the caller's own phase budget.
+ */
+const SHUTDOWN_QUEUE_GRACE_MS = 5_000;
+
 export function shutdownConnection(): Promise<void> {
   // Invalidate reports/publication immediately rather than after the lifecycle queue catches up.
   // Ordinary disconnect does not set this flag, so Settings can still disconnect/reconnect.
   shutdownRequested = true;
   connectionGeneration += 1;
-  // Do not enqueue the force deadline behind the ordinary drain it must bound.
-  void drainingEndpoint?.stop({ forceAfterMs: 30_000 }).catch(() => {});
-  return enqueueLifecycle(() => disconnectImpl(30_000));
+  // Do not enqueue the force deadline behind the ordinary drain it must bound. The endpoint a
+  // connect just started counts too, not only one already draining: admission closes now, and
+  // the queued disconnect below may be a long way from running.
+  void (drainingEndpoint ?? endpoint)?.stop({ forceAfterMs: 30_000 }).catch(() => {});
+  const queued = enqueueLifecycle(() => disconnectImpl(30_000));
+  // A connect still in flight owns the queue, and nothing bounds it: `getSecret` waits on the
+  // OS keychain, which can put a prompt in front of it, and `startTunnel` on a remote handshake.
+  // So the queued disconnect can wait forever. Observed on 2026-09-20: every quit taken while
+  // connecting sat out the whole 40s phase budget and logged neither `server stopping` nor
+  // `disconnected`, because disconnectImpl never ran at all. Quit does not inherit that wait —
+  // after a short grace the same teardown runs unqueued. Running it twice is safe: it only acts
+  // on what is still live, and `shutdownRequested` stops the connect it overtakes from starting
+  // anything new once its own await finally returns.
+  let grace: ReturnType<typeof setTimeout> | undefined;
+  const overtake = new Promise<void>((resolve) => {
+    grace = setTimeout(() => resolve(disconnectImpl(30_000).catch(() => {})), SHUTDOWN_QUEUE_GRACE_MS);
+  });
+  return Promise.race([queued.finally(() => clearTimeout(grace)), overtake]);
 }
 
 /** The running tunnel's own local health address, for the self-test. Null if none. */
