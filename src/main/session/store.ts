@@ -1028,10 +1028,27 @@ export function automaticCompactionAllowed(summary?: SessionSummary | null): boo
     !(selected?.conversationId === summary?.conversationId && isProModel(selected?.model, selected?.reasoningEffort));
 }
 
-export function autoCompactionReady(summary: SessionSummary | null | undefined): boolean {
+export function autoCompactionReady(
+  summary: SessionSummary | null | undefined,
+  /**
+   * The chat has just stopped working, so the stored refusal no longer describes it.
+   *
+   * A refusal is written when an automatic ticket is abandoned before its send: a verdict about
+   * the turn that would not take the handoff, held afterwards so a restart cannot refile that same
+   * turn. It is read as still standing while no turn runs, which is right for a restart and wrong
+   * for the one caller that exists because the run ended — measured on 2026-09-20, every ticket in
+   * a chain of three chats was abandoned because the page could never settle while tools were
+   * being called without pause, and settling is trivial the moment that stops. Keeping the refusal
+   * there makes the one workable moment the one moment ruled out.
+   *
+   * Bounded by its trigger, not a clock: the sweep offers this once per work episode, so a chat
+   * that refuses again refuses in seconds with a reason instead of five raised reloads.
+   */
+  workJustStopped = false
+): boolean {
   if (!summary) return false;
   const refusal = summary.autoCompactionRefusal;
-  if (refusal?.conversationId === summary.conversationId &&
+  if (!workJustStopped && refusal?.conversationId === summary.conversationId &&
       (!summary.activeTurnId || summary.activeTurnId === refusal.turnId)) return false;
   const config = getConfig().compaction;
   return automaticCompactionAllowed(summary) && config.autoTokens > 0 && summary.contextTokens >= config.autoTokens;

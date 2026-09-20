@@ -1813,6 +1813,61 @@ describe('automatic compaction', () => {
     expect((await request('POST', '/repairs/claim', { body: { token: errorRepair.token } })).body.allowed).toBe(false);
   });
 
+  /**
+   * The moment a run stops is the moment a handoff is easy, and nothing used to file one then.
+   *
+   * Every trigger required the chat to be busy now, which is exactly when a run that calls tools
+   * without pause cannot be compacted: the page must settle before it may ask for a brief, and a
+   * continuous run never offers the quiet moment that needs. Measured on 2026-09-20: three chats
+   * in one chain, tickets filed at the threshold, declined with `ChatGPT has not confirmed
+   * receiving the latest tool results`, abandoned after five reloads — and when each run finally
+   * stopped, already answering with `Message delivery timed out`, nothing could file another one
+   * because the chat was no longer working.
+   */
+  it('files a ticket when an over-the-line chat stops working, not only while it works', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    const base = getConfig();
+    await saveConfig({ ...base, compaction: { ...base.compaction, auto: true, autoTokens: 10_000 } });
+    vi.useFakeTimers();
+    try {
+      await request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'user_message', time: Date.now(), text: 'x'.repeat(44_000), messageId: 'over-the-line-stop' }
+      ] } });
+      const work = async (index: number): Promise<void> => {
+        const requestId = `wfr_stopped_work_${index}`;
+        await request('POST', '/events', { body: { conversationId, events: [{
+          kind: 'tool_evidence', time: Date.now(),
+          calls: [{ messageId: `m-stop-${index}`, tool: 'read', order: 0, answered: false, requestId }]
+        }] } });
+        await recordToolCall({ tool: 'read', args: { paths: ['/project/mine.ts'] },
+          content: [{ type: 'text', text: 'ok' }], outcome: 'ok', durationMs: 1,
+          startedAt: Date.now(), requestId });
+      };
+
+      await work(1);
+      await vi.waitFor(() => expect(getLog().some(entry =>
+        entry.message.includes('filed auto-compaction ticket'))).toBe(true));
+
+      const session = (await findSessionByConversation(conversationId))!;
+      const token = continuationForSession(session.id)!.token;
+      await request('POST', '/compact', { body: { conversationId, token, sourceLost: true } });
+      expect(continuationForSession(session.id), 'the ticket survived its own loss').toBeFalsy();
+
+      const filedBefore = getLog().filter(entry => entry.message.includes('filed auto-compaction ticket')).length;
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+
+      await vi.waitFor(() => expect(
+        getLog().filter(entry => entry.message.includes('filed auto-compaction ticket')).length
+      ).toBeGreaterThan(filedBefore));
+      expect(getLog().some(entry => entry.message.includes('stopped working')),
+        'the ticket was filed for some other reason than the run ending').toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await saveConfig(base);
+    }
+  });
+
   it.each(['cancelled', 'replaced', 'dispatched'] as const)('opens a manual source immediately and revokes a %s ticket before browser action', async scenario => {
     await pair();
     const conversationId = randomUUID();
@@ -6062,6 +6117,64 @@ describe('unattributed activity recovery', () => {
         expect((await sessionControlsFor(ids[1]!)).recovery).toEqual([]);
       }
     } finally { vi.useRealTimers(); }
+  });
+
+  /**
+   * The common way a run ends, which the first version of this trigger missed.
+   *
+   * A chat that goes quiet usually gets a silence repair in the same sweep, and every branch that
+   * queues or awaits one leaves the loop before `spent` is pushed — so hanging the compaction offer
+   * on `spent` alone meant the offer never came for the chats that need it most. Measured on
+   * 2026-09-20: the chat this was written for sat at 562k with repairs cycling every thirty seconds
+   * and never appeared in `spent` once.
+   *
+   * A reload in flight is no argument against filing: the fresh page reads a pending ticket back
+   * and finishes the handoff the dead page could not.
+   */
+  it('files a compaction ticket for a chat that goes quiet into a silence repair', async () => {
+    vi.useFakeTimers();
+    const base = getConfig();
+    try {
+      await pair();
+      // Recovery has to want this chat's tab, or its silence is spent without a repair and the
+      // narrower `spent` path — the one the first version of this trigger used — would carry it.
+      await saveConfig({
+        ...base,
+        compaction: { ...base.compaction, auto: true, autoTokens: 10_000 },
+        multiAgent: { ...base.multiAgent, recoverAgentTabs: true }
+      });
+      const chat = randomUUID();
+      await events(chat, [
+        { kind: 'user_message', time: Date.now(), text: 'x'.repeat(44_000), messageId: 'quiet-over-the-line' },
+        openTurn('quiet-turn')
+      ]);
+      await attributed(chat, false, Date.now());
+      await vi.waitFor(() => expect(getLog().some(entry =>
+        entry.message.includes('filed auto-compaction ticket'))).toBe(true));
+
+      // Lost the way the real ones were: nothing was ever sent.
+      const session = (await findSessionByConversation(chat))!;
+      await request('POST', '/compact', {
+        body: { conversationId: chat, token: continuationForSession(session.id)!.token, sourceLost: true }
+      });
+      const filedBefore = getLog().filter(entry => entry.message.includes('filed auto-compaction ticket')).length;
+
+      // The run goes quiet, and recovery takes the chat over in the same pass.
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 60_000);
+      await sweepStaleSwarm(Date.now());
+      // The state this test claims: the sweep took the recovery branch, which is the branch that
+      // never reaches `spent` and therefore never offered the chat before this change.
+      expect(getLog().some(entry => entry.message.includes('asking the browser to reload')),
+        'no silence repair was queued — the test is not in the state it claims').toBe(true);
+
+      await vi.waitFor(() => expect(
+        getLog().filter(entry => entry.message.includes('filed auto-compaction ticket')).length
+      ).toBeGreaterThan(filedBefore));
+      expect(getLog().some(entry => entry.message.includes('stopped working'))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await saveConfig(base);
+    }
   });
 
   it.each(['gpt-6-pro', 'GPT-5.6 Sol'])('projects the confirmed Thinking-failed wait and removes it on fresh work (%s)', async model => {

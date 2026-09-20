@@ -5800,7 +5800,25 @@ async function failedCompactionTurnCurrent(conversationId: string, sessionId: st
   return !!after && after.conversationId === conversationId && !after.activeTurnId && after.events === before.events;
 }
 
-async function considerAutomaticCompaction(conversationId: string, sessionId: string, failedTurn?: string): Promise<void> {
+/**
+ * `workJustStopped` is the trigger that makes this feature work on the load it was built for.
+ *
+ * The others require the chat to be busy *now*, and a run that calls tools without pause is
+ * exactly the run that cannot be compacted while it is: the page has to settle before it may ask
+ * for a brief, and settling needs a quiet moment the run never has. Measured on 2026-09-20, three
+ * chats in one chain died that way — tickets filed at the threshold, declined with `ChatGPT has
+ * not confirmed receiving the latest tool results`, abandoned after five raised reloads, and by
+ * the time each run stopped on its own ChatGPT was answering it with `Message delivery timed out`,
+ * which is also the end of any brief, because ChatGPT writes it.
+ *
+ * The moment a run stops is the moment a handoff is easy: no turn to interrupt, nothing to settle.
+ * It was the one moment nothing could file a ticket. Idle old history stays untouched — the caller
+ * is the silence sweep waking on a grant this app was holding as it expires, so the chat was
+ * working seconds ago and is over the line; opening a finished conversation to read it grants
+ * nothing and therefore still starts nothing.
+ */
+async function considerAutomaticCompaction(conversationId: string, sessionId: string, failedTurn?: string,
+                                           workJustStopped = false): Promise<void> {
   if (!getConfig().compaction.auto || compactionFilings.has(conversationId)) return;
   if (goalFencedChat(conversationId) || continuationForSession(sessionId) || stopRequestedFor(conversationId)) return;
   // Exact tool attribution already owns this grant and consumes it on final/Stop.
@@ -5812,24 +5830,24 @@ async function considerAutomaticCompaction(conversationId: string, sessionId: st
     return chatIsWorking(conversationId) || Boolean(grant?.sessionId === sessionId && grant.mcpBacked &&
       !grant.thinkingFailed && grant.evidenceAt <= now && grant.until > now);
   };
-  if (!failedTurn && !hasCurrentWork()) return;
+  if (!failedTurn && !workJustStopped && !hasCurrentWork()) return;
   compactionFilings.add(conversationId);
   try {
     const summary = await getSession(sessionId).catch(() => null);
-    if (!summary || summary.conversationId !== conversationId || summary.browserRecoveryDismissedAt !== undefined || !autoCompactionReady(summary)) return;
+    if (!summary || summary.conversationId !== conversationId || summary.browserRecoveryDismissedAt !== undefined || !autoCompactionReady(summary, workJustStopped)) return;
     if (await conversationWasSuperseded(conversationId)) return;
     if (failedTurn && !await failedCompactionTurnCurrent(conversationId, sessionId, failedTurn)) return;
     // Re-read after the awaits: the turn may have ended, or a page may have filed by hand.
     const current = await getSession(sessionId);
-    if (!current || current.conversationId !== conversationId || current.browserRecoveryDismissedAt !== undefined || !autoCompactionReady(current)) return;
+    if (!current || current.conversationId !== conversationId || current.browserRecoveryDismissedAt !== undefined || !autoCompactionReady(current, workJustStopped)) return;
     if (failedTurn && !await failedCompactionTurnCurrent(conversationId, sessionId, failedTurn)) return;
-    if ((!failedTurn && !hasCurrentWork()) || continuationForSession(sessionId) || goalFencedChat(conversationId) ||
+    if ((!failedTurn && !workJustStopped && !hasCurrentWork()) || continuationForSession(sessionId) || goalFencedChat(conversationId) ||
         stopRequestedFor(conversationId) || !getConfig().compaction.auto || !automaticCompactionAllowed(current)) return;
     const opened = await openContinuationNow(sessionId, conversationId, true);
     rememberToken(sessionId, opened.token);
     changed();
     logInfo(
-      `bridge: ${conversationId} ${failedTurn ? 'lost its current turn' : 'is working'} at ${current.contextTokens} context tokens — filed auto-compaction ticket ${opened.token.slice(0, 8)}`
+      `bridge: ${conversationId} ${failedTurn ? 'lost its current turn' : workJustStopped ? 'stopped working' : 'is working'} at ${current.contextTokens} context tokens — filed auto-compaction ticket ${opened.token.slice(0, 8)}`
     );
   } catch (err) {
     logWarn(`bridge: could not file the auto-compaction ticket for ${conversationId} — ${err instanceof Error ? err.message : String(err)}`);
@@ -6902,10 +6920,20 @@ function browserRecoveryMonitoring(): boolean {
  * asks whether a conversation is still alive, so nothing scoped to one of its turns may switch
  * it off — see the supersede rule in `queueBrowserRecovery`.
  */
-async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent: string[] }> {
+async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent: string[]; stopped: string[] }> {
   let queued = false;
   let deferred = false;
   const spent: string[] = [];
+  /**
+   * Every chat whose activity grant has elapsed, whether or not recovery took it over.
+   *
+   * `spent` is narrower by design — it means "this silence is finished with, nothing more is owed"
+   * — and a chat that goes quiet usually gets a silence repair in the same pass instead, on
+   * branches that leave the loop before any `spent.push`. Measured on 2026-09-20: the chat this
+   * was written for paused at 562k with repairs cycling every thirty seconds and never appeared in
+   * `spent` once. The compaction offer wants the plainer fact: the run stopped.
+   */
+  const stopped: string[] = [];
   const compacting = new Set(pendingContinuations().map((entry) => entry.from));
   for (const [conversationId, grant] of activeUntil) {
     if (compacting.has(conversationId)) continue;
@@ -6966,7 +6994,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
     // below rather than obeyed here; reading one as "a recovery is already running" is what left
     // a chat that had been dead for eighteen minutes unreloaded. Everything else in flight —
     // silence's own action, or a no-tab reopen under its floor — is this path already acting.
-    if (held && !TURN_SCOPED_REPAIRS.has(held.reason)) continue;
+    if (held && !TURN_SCOPED_REPAIRS.has(held.reason)) { stopped.push(conversationId); continue; }
     // A reload carried out moments ago, that the page has not yet come back from, is the reload
     // silence would ask for. A large chat takes minutes to come back — three, for the 300k-token
     // prime of 2026-09-03 — and a second reload landing on a page still loading starts that wait
@@ -6987,6 +7015,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
       continue;
     }
     if (activeUntil.get(conversationId) !== grant) continue;
+    stopped.push(conversationId);
     if (queueBrowserRecovery(conversationId, grant.sessionId, `silence:${grant.until}`, 'silence', 0, now)) {
       queued = true;
       logInfo(
@@ -6995,7 +7024,21 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
     }
   }
   if (deferred) armSilenceSweep(now);
-  return { queued, spent };
+  // An elapsed grant is a chat that has just stopped working, and this pass is the only punctual
+  // notice of it anything gets. For a chat over the threshold that is the one moment a handoff is
+  // easy — see considerAutomaticCompaction's `workJustStopped`. Everything deciding whether a
+  // ticket may be filed is rechecked in there, so this only offers the moment.
+  //
+  // Here rather than at a caller: this function has three of them, and wiring one leaves the
+  // others silent.
+  for (const conversationId of new Set([...spent, ...stopped])) {
+    void findSessionByConversation(conversationId)
+      .then((session) => session
+        ? considerAutomaticCompaction(conversationId, session.id, undefined, true)
+        : undefined)
+      .catch(() => undefined);
+  }
+  return { queued, spent, stopped };
 }
 
 /** Retires a confirmed one-shot silence recovery after the caller has handled any Worker slot. */
