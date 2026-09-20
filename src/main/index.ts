@@ -63,7 +63,7 @@ import {
   setContinuationRecoveryHooks,
   type ContinuationSnapshot
 } from './session/continuation.js';
-import { runShutdownSequence } from './shutdown.js';
+import { endProcess, runShutdownSequence } from './shutdown.js';
 import { applyStagedUpdate, startUpdateChecks } from './update.js';
 import { UI_BASE_ZOOM, windowLayoutForWorkArea, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
 import { openInPreferredBrowser } from './browser.js';
@@ -526,7 +526,8 @@ app.on('will-quit', (event) => {
         // The sequence has just logged its completion; a phase inside it would flush too early.
         void flushLogBeforeExit().finally(() => {
           shutdownComplete = true;
-          app.exit(0);
+          // Not `app.exit(0)` alone: see endProcess for what it did on 2026-09-20.
+          endProcess(() => app.exit(0), () => process.exit(0), () => process.kill(process.pid, 'SIGKILL'));
         });
       }
     }

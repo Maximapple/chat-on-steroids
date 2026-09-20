@@ -86,6 +86,46 @@ function raceDeadline(work: Promise<unknown>, budgetMs: number): Promise<boolean
  * Failures and overruns are reported through `hooks` and never propagate: what follows this
  * is the end of the process, and there is no outcome here that should stop it.
  */
+/**
+ * Ends the process, and means it.
+ *
+ * `app.exit(0)` is the intended ending and usually is one. On 2026-09-20 it stopped being one:
+ * the sequence completed, the hook ran, `app.exit(0)` was called and *returned*, and the process
+ * stayed alive with its window destroyed and its single-instance lock still held — the exact
+ * state the paragraph at the top of this file exists to prevent. Measured with a probe written
+ * straight to a file, because by that point the logger's own teardown has run:
+ *
+ *     exit-hook erreicht / flush aufgeloest / finally erreicht / app.exit kehrte zurueck
+ *
+ * So the ending is no longer trusted to one call. `exit` is asked first, because it is the one
+ * that lets Electron emit `quit` and tear down cleanly; `hardExit` follows if the process is
+ * still here, which it cannot be if `exit` worked. `kill` is last, and it exists because
+ * `hardExit` turned out to be refusable too: `process.exit(0)` also returned, and the same probe
+ * logged the line after it. Both run `exit(3)`, which walks atexit handlers and static
+ * destructors, and one of those can block — the process then sits in mach_msg with its servers
+ * already closed. A signal does not walk anything. Nothing is at risk by then: every phase has
+ * flushed, and a process that has decided to die and then lingers is worse than one that dies
+ * abruptly — it keeps the single-instance lock, so the next start of the app is a dead window.
+ */
+export function endProcess(exit: () => void, hardExit: () => void, kill: () => void): void {
+  try {
+    exit();
+  } catch {
+    // An exit that throws is an exit that did not happen; the lines below are the answer.
+  }
+  // Reached only when `exit` failed, because an exit that works never returns. That is the whole
+  // test, and it has to be this one: a first attempt deferred the fallback behind a timer, and
+  // the timer never fired — once Electron is quitting it stops pumping Node's event loop, so
+  // anything scheduled is never run. A fallback cannot be scheduled; it has to be the next
+  // statement. The same is true of the one after it.
+  try {
+    hardExit();
+  } catch {
+    // Same reasoning, one step down.
+  }
+  kill();
+}
+
 export async function runShutdownSequence(
   phases: readonly ShutdownPhase[],
   hooks: ShutdownHooks
