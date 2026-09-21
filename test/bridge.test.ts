@@ -1853,6 +1853,69 @@ describe('automatic compaction', () => {
     expect((await request('POST', '/repairs/claim', { body: { token: errorRepair.token } })).body.allowed).toBe(false);
   });
 
+  /**
+   * A repair nobody ever claims.
+   *
+   * Re-offering an unclaimed repair is right — a claim can be missed, and the page that missed it
+   * is the one that needs the reload — but it had no end. The give-up that existed reads what the
+   * page reports back, so a page that never returns reports nothing, no counter moves, and the
+   * ceiling cannot fire. Measured on 2026-09-20: one chat whose tab was gone took 388 offers in
+   * three and a half hours, one of them ever confirmed.
+   */
+  it('stops offering a repair the browser never claims, and says the chat has no page', async () => {
+    await pair();
+    const conversationId = randomUUID();
+    await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'user_message', time: Date.now(), text: 'Continue this task', messageId: 'never-claimed' },
+      { kind: 'turn_start', time: Date.now(), turnId: 'never-claimed-turn' },
+      { kind: 'chat_error', time: Date.now(), turnId: 'never-claimed-turn', recoverable: true,
+        text: 'Connection interrupted. Waiting for the complete answer' }
+    ] } });
+    await settled();
+
+    const offered = async (): Promise<boolean> => {
+      const status = await request('GET', '/status');
+      return (status.body.repairs as Array<{ conversationId: string }>)
+        .some(row => row.conversationId === conversationId);
+    };
+    expect(await offered(), 'no repair was offered at all').toBe(true);
+
+    // Never claimed, only re-read. Bounded well above the ceiling so the loop cannot be what
+    // passes: if the offers were still unbounded this would still be true on the last pass.
+    let seen = 1;
+    for (let pass = 0; pass < 40 && await offered(); pass++) seen += 1;
+
+    expect(seen, 'the repair was still being offered after forty reads').toBeLessThan(40);
+    expect(await offered(), 'it came back after being retired').toBe(false);
+
+    // The ceiling above bounds one repair, not the supply of them: the chat goes quiet, the sweep
+    // reads silence, and a fresh repair used to arrive with its own budget. Measured on 2026-09-21
+    // over seven hours after a tab was discarded — four `no page` verdicts, 106 reload attempts,
+    // 600 offers, all into an empty room. A new failure must not restart it.
+    await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'turn_start', time: Date.now(), turnId: 'never-claimed-again' },
+      { kind: 'chat_error', time: Date.now(), turnId: 'never-claimed-again', recoverable: true,
+        text: 'Connection interrupted. Waiting for the complete answer' }
+    ] } });
+    await settled();
+    expect(await offered(), 'a fresh failure handed the same page-less chat a new budget').toBe(false);
+
+    // Lifted by the one thing that can disprove it: the page itself, asking for its chat.
+    await request('GET', `/activity?conversationId=${conversationId}&since=0`);
+    await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'chat_error', time: Date.now(), turnId: 'never-claimed-again', recoverable: true,
+        text: 'Connection interrupted. Waiting for the complete answer' }
+    ] } });
+    await settled();
+    expect(await offered(), 'a page that came back was still refused recovery').toBe(true);
+
+    const session = (await findSessionByConversation(conversationId))!;
+    const notes = (await readEvents(session.id, { kinds: ['note'] }))
+      .map(event => (event as { message: { text: string } }).message.text);
+    expect(notes.some(text => text.includes('has no page to reload')),
+      'the chat was dropped without saying why').toBe(true);
+  });
+
   it.each(['cancelled', 'replaced', 'dispatched'] as const)('opens a manual source immediately and revokes a %s ticket before browser action', async scenario => {
     await pair();
     const conversationId = randomUUID();
