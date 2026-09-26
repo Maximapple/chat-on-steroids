@@ -87,6 +87,11 @@ vi.stubEnv('COS_MACOS_DESKTOP_HELPER', process.execPath);
 
 import { act } from '../src/main/computer/index.js';
 
+// Window-scoped input exists on Windows and macOS only; Linux refuses it with
+// WINDOW_TARGET_UNSUPPORTED before the helper runs. These cases are about the partial-batch
+// report, not the target, so they aim at a window only where a window can be aimed at.
+const target = process.platform === 'linux' ? undefined : { window: 42 };
+
 describe('desktop partial batch result', () => {
   beforeEach(() => fake.resetResponse());
 
@@ -95,7 +100,7 @@ describe('desktop partial batch result', () => {
       act([
         { type: 'type', text: 'first' },
         { type: 'type', text: 'second' }
-      ], { window: 42 })
+      ], target)
     ).rejects.toMatchObject({
       completedCount: 1,
       failedIndex: 1,
@@ -118,7 +123,7 @@ describe('desktop partial batch result', () => {
       act([
         { type: 'type', text: 'first' },
         { type: 'type', text: 'second' }
-      ], { window: 42 })
+      ], target)
     ).rejects.toMatchObject({
       completedCount: 1,
       failedIndex: 1,
