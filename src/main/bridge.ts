@@ -9562,6 +9562,21 @@ export async function restoreCommands(): Promise<void> {
 }
 
 /** Test seam. */
+/** Test diagnostics: why an unattributed incident has or lacks candidates. */
+export function unattributedStateForTests(): unknown {
+  return {
+    now: Date.now(),
+    incidents: [...unattributedIncidents].map(([key, incident]) => ({ key, pass: incident.pass, startedAt: incident.startedAt,
+      candidates: incident.candidates.map(entry => entry.conversationId) })),
+    activeUntil: [...activeUntil.keys()],
+    live: liveConversations().map(entry => ({ id: entry.conversationId, turn: entry.activeTurnId, ended: entry.endedTurns })),
+    candidates: repairCandidates().map(entry => ({ id: entry.conversationId, current: unattributedCandidateCurrent(entry),
+      workerAllowed: workerRecoveryAllowed(entry.conversationId), blocked: isChatBlocked(entry.conversationId),
+      stop: stopRequestedFor(entry.conversationId), superseded: supersededSourceConversations().includes(entry.conversationId) })),
+    inFlight: [...repairsInFlight.keys()]
+  };
+}
+
 export function resetBridgeForTests(): void {
   clearCompanionDiagnostics();
   for (const command of commands) if (command.timer) clearTimeout(command.timer);
