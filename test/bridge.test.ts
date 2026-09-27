@@ -61,6 +61,7 @@ const {
   pendingCommands,
   queueResume,
   resetBridgeForTests,
+  unattributedStateForTests,
   restoreCommands,
   resumeJobFor,
   setBrowserOpener,
@@ -7369,7 +7370,7 @@ describe('unattributed activity recovery', () => {
       // than failing on the first pass; what is asserted about the handed claim is unchanged.
       let first = await maintenance();
       for (let step = 0; !first && step < 8; step++) { await vi.advanceTimersByTimeAsync(5_000); first = await maintenance(); }
-      expect(first?.reason).toBe('unattributed');
+      expect(first?.reason, JSON.stringify(unattributedStateForTests())).toBe('unattributed');
       await vi.advanceTimersByTimeAsync(1);
       if (kind === 'mcp') await attributed(PRIME, false, Date.now());
       if (kind === 'completed' || kind === 'stopped') await events(PRIME, [endTurn(`claim-${kind}`, kind)]);
