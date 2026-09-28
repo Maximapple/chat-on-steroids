@@ -1,0 +1,51 @@
+name: Stress Windows flakes
+
+on:
+  push:
+    branches: [stress/windows-flakes]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: bridge file x25
+            cmd: npx vitest run test/bridge.test.ts
+            runs: 25
+          - name: input delivery x25
+            cmd: npx vitest run test/input-delivery-integration.test.ts
+            runs: 25
+          - name: windows input x15
+            cmd: npx vitest run test/computer-windows-input.test.ts
+            runs: 15
+          - name: full suite x4
+            cmd: npx vitest run
+            runs: 4
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Repeat
+        shell: bash
+        run: |
+          fails=0
+          for i in $(seq 1 ${{ matrix.runs }}); do
+            if ! ${{ matrix.cmd }} > "run-$i.log" 2>&1; then
+              fails=$((fails+1))
+              echo "::group::run $i failed"
+              grep -E "FAIL|×|AssertionError|Error:" "run-$i.log" | head -40
+              echo "::endgroup::"
+            fi
+          done
+          echo "FAILED $fails of ${{ matrix.runs }}"
