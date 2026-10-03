@@ -2388,9 +2388,9 @@ awaiting-summary -> awaiting-chat -> claimed -> committing -> committed
    newest final. The user may edit the **content instructions** used to
    write that brief; continuation markers, send/provenance framing, tool-detail policy and the
    requirement that the compaction reply contain only the brief remain code-owned invariants.
-   The shipped content prompt prefers a dense roughly 2k-6k-token operational handoff for a
-   substantial session, shorter when less state exists and longer only when correctness needs
-   it. Preparing a brief does not yet publish a rebind.
+   The shipped content prompt asks for a lossless, dense operational handoff: roughly
+   10k-30k tokens for a substantial session, shorter only when less state exists, never above
+   30k (`src/shared/handoff.ts`). Preparing a brief does not yet publish a rebind.
 4. **Elect B and commit.** Destination creation/claim has one opening owner. B opens in the
    browser that holds A: the capture reply places it beside the capturing page, and a resume
    queued with no page waiting is offered to a browser still reporting A open (§13). Only when
