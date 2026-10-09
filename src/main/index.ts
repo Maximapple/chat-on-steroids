@@ -1,4 +1,5 @@
 import { stopInputStartup } from './session/start-input.js';
+import { configureHandover } from './tunnel/handover.js';
 import { browserExtensionRequired } from '../shared/types.js';
 import { requestSessionFinishGoal, setFinishNotifier } from './session/finish.js';
 /**
@@ -398,6 +399,7 @@ void app.whenReady().then(async () => {
   });
   initConfigPath(userData);
   initConnectorProofPath(userData);
+  configureHandover(userData);
   initBrowserProofPath(userData);
   initSecretsPath(userData);
   initKeychainNotice(userData, {

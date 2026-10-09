@@ -12,6 +12,7 @@
  *    token in the URL is what keeps it private.
  */
 
+import { reapLater } from './handover.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -48,7 +49,11 @@ export interface TunnelStartOptions {
 }
 
 export interface TunnelHandle {
-  stop: () => Promise<void>;
+  /**
+   * Stops the tunnel. With `lingerMs` the client process keeps forwarding for that long and a
+   * detached reaper ends it (tunnel/handover.ts): only for a quit, never for a reconnect.
+   */
+  stop: (options?: { lingerMs?: number }) => Promise<void>;
   /** Loopback base URL of the client's own health/metrics server, when it has one. */
   healthBase?: () => string | null;
 }
@@ -662,12 +667,20 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
 
   return {
     healthBase: () => current?.healthBase ?? null,
-    stop: async () => {
+    stop: async (options?: { lingerMs?: number }) => {
       stopped = true;
       clearTimer();
       const active = current;
       current = null;
-      await Promise.all([retirement, stopTree(active?.proc ?? null)]);
+      const proc = active?.proc ?? null;
+      if (options?.lingerMs && proc?.pid !== undefined && !exited(proc)) {
+        // Left running on purpose: OpenAI still routes existing chats here for about two minutes.
+        reapLater(proc.pid, options.lingerMs);
+        proc.unref();
+        await retirement;
+        return;
+      }
+      await Promise.all([retirement, stopTree(proc)]);
       await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     }
   };

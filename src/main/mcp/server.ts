@@ -260,7 +260,15 @@ export function forgetExposedSurface(): void {
   surfaceExposure.clear();
 }
 
-export async function startMcpServer(getContext: () => ToolContext): Promise<McpEndpoint> {
+/**
+ * The previous run's port and paths after a restart (tunnel/handover.ts). The tunnel-client
+ * that run started keeps forwarding there for a short while, and OpenAI keeps routing existing
+ * chats to it for that while (#1220). Only a fresh handover is passed; a taken port falls back
+ * to fresh ones.
+ */
+export interface EndpointReuse { port: number; paths: Partial<Record<SurfaceId, string>> }
+
+export async function startMcpServer(getContext: () => ToolContext, reuse: EndpointReuse | null = null): Promise<McpEndpoint> {
   // A per-session token in the path is what authorises callers. It is regenerated on
   // every app start, so a URL that leaks stops working when the app restarts.
   requestSeenAt = null;
@@ -272,9 +280,10 @@ export async function startMcpServer(getContext: () => ToolContext): Promise<Mcp
   // secret because the two connectors are configured separately in ChatGPT and may be
   // shared, revoked or re-pasted at different times; a single token would make "give me
   // Desktop" and "give me everything" the same act.
+  const freshPath = (id: SurfaceId): string => `/mcp/${id}/${randomBytes(32).toString('base64url')}`;
   const surfacePaths = SURFACE_IDS.map((id) => ({
     id,
-    basePath: `/mcp/${id}/${randomBytes(32).toString('base64url')}`
+    basePath: reuse?.paths[id] ?? freshPath(id)
   }));
 
   // ChatGPT can keep a cached tools/list snapshot for the lifetime of a connector
@@ -473,13 +482,28 @@ export async function startMcpServer(getContext: () => ToolContext): Promise<Mcp
   server.requestTimeout = 300_000;
   server.maxRequestsPerSocket = 0;
 
-  await new Promise<void>((resolve, reject) => {
+  const listen = (port: number): Promise<void> => new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(port, '127.0.0.1', () => {
       server.removeListener('error', reject);
       resolve();
     });
   });
+  if (reuse) {
+    try {
+      await listen(reuse.port);
+    } catch (error) {
+      // Someone else has the port now: the handover is void, and its paths with it.
+      logWarn(`server could not take back port ${reuse.port} after the restart (${(error as Error).message}); using a fresh one`);
+      for (const surface of routes) {
+        surface.basePath = freshPath(surface.id);
+        surface.prmPath = `${PRM_PREFIX}${surface.basePath}`;
+      }
+      await listen(0);
+    }
+  } else {
+    await listen(0);
+  }
 
   const address = server.address();
   if (address === null || typeof address === 'string') {

@@ -18,6 +18,7 @@ import { SURFACE_LIST, surfaceDefinition, surfaceIsUseful, desktopToolNames, typ
 import { getSecret } from './secrets.js';
 import { setupApiKeySlot } from '../shared/setup-profile.js';
 import { startTunnel, TunnelError, type TunnelHandle } from './tunnel/index.js';
+import { saveHandover, takeHandover, TUNNEL_LINGER_MS } from './tunnel/handover.js';
 import { desktopAutomationSupported } from './platform.js';
 import { publishPluginSurface, unpublishPluginSurface, pluginRefreshPublications } from './plugin-refresh.js';
 import { pluginManager } from './plugins/manager.js';
@@ -398,6 +399,9 @@ async function connectImpl(): Promise<void> {
 
   try {
     setStatus({ state: 'starting-server', detail: 'Starting the local server…', publicUrl: null });
+    // After a restart the previous tunnel-client still forwards here for a short while (#1220).
+    const handover = await takeHandover();
+    if (handover) logInfo(`server takes over port ${handover.port} from the run that quit ${Math.round((Date.now() - handover.savedAt) / 1000)} s ago`);
     const startedEndpoint = await startMcpServer(() => {
       const live = getConfig();
       return {
@@ -407,7 +411,7 @@ async function connectImpl(): Promise<void> {
         readOnly: live.readOnly,
         privacyScreenshots: live.ui.privacyScreenshots
       };
-    });
+    }, handover);
     if (shutdownRequested) {
       await startedEndpoint.stop({ forceAfterMs: 30_000 }).catch(() => {});
       return;
@@ -625,6 +629,9 @@ export function applySettings(): Promise<void> {
   return enqueueLifecycle(async () => { await applySettingsImpl(); for (const surface of SURFACE_LIST) refreshPluginPublication(surface.id); });
 }
 
+/** Prototype: Windows only until tunnel-client logs to a file (a POSIX child dies on a broken stdout pipe). */
+function lingeringTunnelsSupported(): boolean { return process.platform === 'win32'; }
+
 function disconnectImpl(endpointForceAfterMs?: number): Promise<void> {
   return pendingTeardown ??= disconnectResources(endpointForceAfterMs).finally(() => { pendingTeardown = null; });
 }
@@ -641,6 +648,13 @@ async function disconnectResources(endpointForceAfterMs?: number): Promise<void>
   // command process or durable writer is retired by the app-wide shutdown sequence.
   // The public tunnel may briefly see the now-closed loopback endpoint, which is preferable
   // to accepting a mutation after shutdown has already begun.
+  // A quit, not a disconnect: the tunnel-clients keep forwarding for the window in which OpenAI
+  // still routes existing chats to them, and the next start serves the same port and paths (#1220).
+  const lingerMs = shutdownRequested && lingeringTunnelsSupported() && (tunnel || optionalTunnels.size) ? TUNNEL_LINGER_MS : undefined;
+  if (lingerMs && endpoint) {
+    const paths = Object.fromEntries(Object.entries(endpoint.urls).map(([surface, url]) => [surface, new URL(url).pathname]));
+    await saveHandover({ port: endpoint.port, paths }).catch((error: Error) => logWarn(`could not save the tunnel handover: ${error.message}`));
+  }
   if (endpoint) {
     const stopping = endpoint;
     endpoint = null;
@@ -653,12 +667,13 @@ async function disconnectResources(endpointForceAfterMs?: number): Promise<void>
       drainingEndpoint = null;
     }
   }
-  for (const { handle } of optionalTunnels.values()) await handle?.stop().catch(() => {});
+  for (const { handle } of optionalTunnels.values()) await handle?.stop(lingerMs ? { lingerMs } : undefined).catch(() => {});
   optionalTunnels.clear();
   if (tunnel) {
-    await tunnel.stop().catch(() => {});
+    await tunnel.stop(lingerMs ? { lingerMs } : undefined).catch(() => {});
     tunnel = null;
   }
+  if (lingerMs) logInfo(`tunnel clients keep forwarding for ${lingerMs / 1000} s after quit; a detached reaper ends them`);
   activeCoreTransport = null;
   if (status.state !== 'disconnected') logInfo('disconnected');
   setStatus({
