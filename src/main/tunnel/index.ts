@@ -543,9 +543,10 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
         ...(discoveryHeaders ? { MCP_DISCOVERY_EXTRA_HEADERS: discoveryHeaders } : {})
       }),
       windowsHide: true,
-      // Own a POSIX process group so stopTree terminates any helpers the client starts.
-      // Windows uses taskkill /T and keeps its existing launch semantics.
-      detached: process.platform !== 'win32',
+      // Own a POSIX process group so stopTree terminates any helpers the client starts. On
+      // Windows detached also keeps it out of the job object libuv kills with this app, so it
+      // can linger for the restart handover (#1220); stopTree still ends it with taskkill /T.
+      detached: true,
       stdio: log.stdio
     });
     const run: ClientRun = {
