@@ -3957,6 +3957,17 @@ tunnel keeps it across restarts because ChatGPT's plugin names the tunnel id, no
 run hands tunnel-client its own local URL, per-start token included. ChatGPT's complete plugins
 list (`mode=plugins`) without this install's Core takes the proof back (POST `/core-plugin`
 `{ missing: true }`); other lists without Core say nothing.
+Restart handover (#1220, `tunnel/handover.ts`): after a restart OpenAI keeps routing calls from
+existing chats to the previous tunnel-client process for about two minutes; tunnel-client holds
+that routing in memory and sends no goodbye. So a quit (never a disconnect) leaves each
+tunnel-client running for `TUNNEL_LINGER_MS` (150 s), and a detached reaper ends it and removes
+its folder whether or not a new app starts. The quitting app writes the local port and the
+per-surface secret paths to `tunnel-handover.json` (owner-only, replaced atomically); the next
+start takes it once, only within five minutes, and serves the same port and paths, falling back
+to fresh ones when the port is taken. tunnel-client logs into a file in its run folder, followed
+like a pipe (`tunnel/client-log.ts`): a Go program exits on its next write to a broken stdout
+pipe. On Windows it runs from a per-version copy in `tunnel-bin`, so the installer can replace
+the bundled executable while the previous one still runs.
 An explicit successful Plugin Restart may rearm matching unclaimed, non-manual, unfinished
 refresh debt with a fresh request ID. The existing serialized ledger publishes that ID before
 waking browser work; ordinary status polling and a closed helper do not grant another attempt.

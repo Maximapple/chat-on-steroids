@@ -64,6 +64,17 @@ vi.mock('../src/main/exec.js', () => ({
   terminateProcessTree: fixture.terminate
 }));
 vi.mock('../src/main/tunnel/locate.js', () => ({ locateBinary: () => 'tunnel-client-test' }));
+// The client logs into a file in production (client-log.ts); these tests feed its lines as a pipe.
+vi.mock('../src/main/tunnel/client-log.js', () => ({
+  openClientLog: () => ({
+    stdio: ['ignore', 'pipe', 'pipe'],
+    attach: (proc: any, onChunk: (chunk: Buffer) => void) => {
+      proc.stdout.on('data', onChunk);
+      proc.stderr.on('data', onChunk);
+      return () => {};
+    }
+  })
+}));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {

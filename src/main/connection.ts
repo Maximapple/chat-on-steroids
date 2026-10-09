@@ -629,9 +629,6 @@ export function applySettings(): Promise<void> {
   return enqueueLifecycle(async () => { await applySettingsImpl(); for (const surface of SURFACE_LIST) refreshPluginPublication(surface.id); });
 }
 
-/** Prototype: Windows only until tunnel-client logs to a file (a POSIX child dies on a broken stdout pipe). */
-function lingeringTunnelsSupported(): boolean { return process.platform === 'win32'; }
-
 function disconnectImpl(endpointForceAfterMs?: number): Promise<void> {
   return pendingTeardown ??= disconnectResources(endpointForceAfterMs).finally(() => { pendingTeardown = null; });
 }
@@ -650,7 +647,7 @@ async function disconnectResources(endpointForceAfterMs?: number): Promise<void>
   // to accepting a mutation after shutdown has already begun.
   // A quit, not a disconnect: the tunnel-clients keep forwarding for the window in which OpenAI
   // still routes existing chats to them, and the next start serves the same port and paths (#1220).
-  const lingerMs = shutdownRequested && lingeringTunnelsSupported() && (tunnel || optionalTunnels.size) ? TUNNEL_LINGER_MS : undefined;
+  const lingerMs = shutdownRequested && (tunnel || optionalTunnels.size) ? TUNNEL_LINGER_MS : undefined;
   if (lingerMs && endpoint) {
     const paths = Object.fromEntries(Object.entries(endpoint.urls).map(([surface, url]) => [surface, new URL(url).pathname]));
     await saveHandover({ port: endpoint.port, paths }).catch((error: Error) => logWarn(`could not save the tunnel handover: ${error.message}`));

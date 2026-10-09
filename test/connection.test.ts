@@ -86,6 +86,15 @@ vi.mock('../src/main/secrets.js', () => ({
     return null;
   })
 }));
+const handover = vi.hoisted(() => ({
+  saved: [] as unknown[],
+  next: null as null | { port: number; paths: Record<string, string>; savedAt: number }
+}));
+vi.mock('../src/main/tunnel/handover.js', () => ({
+  TUNNEL_LINGER_MS: 150_000,
+  saveHandover: vi.fn(async (value: unknown) => { handover.saved.push(value); }),
+  takeHandover: vi.fn(async () => { const value = handover.next; handover.next = null; return value; })
+}));
 vi.mock('../src/main/tunnel/index.js', () => ({
   startTunnel: vi.fn(async (options: { label?: string; report: (report: Record<string, unknown>) => void }) => {
     mocks.starts += 1;
@@ -536,6 +545,29 @@ describe('connection surface state', () => {
       publicUrl: null,
       detail: ''
     });
+  });
+
+  // #1220: after a restart OpenAI routes existing chats to the previous tunnel-client for about
+  // two minutes. A quit lets it keep forwarding and hands the local port and paths to the next run.
+  it('lets the tunnel linger and hands its endpoint over only on quit, never on a disconnect', async () => {
+    const connection = await import('../src/main/connection.js');
+    const { startMcpServer } = await import('../src/main/mcp/server.js');
+    handover.saved.length = 0;
+
+    await connection.connect();
+    await connection.disconnect();
+    expect(mocks.tunnelStop).toHaveBeenLastCalledWith(undefined);
+    expect(handover.saved).toEqual([]);
+
+    const previous = { port: 45678, paths: { core: '/mcp/core/core-token' }, savedAt: Date.now() };
+    handover.next = previous;
+    await connection.connect();
+    expect(vi.mocked(startMcpServer).mock.calls.at(-1)?.[1]).toEqual(previous);
+    await connection.shutdownConnection();
+    expect(handover.saved).toEqual([{ port: 45678, paths: {
+      core: '/mcp/core/core-token', desktop: '/mcp/desktop/desktop-token', plugins: '/mcp/plugins/plugins-token'
+    } }]);
+    expect(mocks.tunnelStop).toHaveBeenLastCalledWith({ lingerMs: 150_000 });
   });
 
   it('keeps ordinary disconnect graceful and reserves forced MCP drain for final shutdown', async () => {

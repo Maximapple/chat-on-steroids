@@ -12,7 +12,8 @@
  *    token in the URL is what keeps it private.
  */
 
-import { reapLater } from './handover.js';
+import { reapLater, runnableBinary } from './handover.js';
+import { openClientLog } from './client-log.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -257,7 +258,8 @@ export function routeObservation(
  * unready is restarted with backoff instead of being abandoned.
  */
 async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle> {
-  const binary = locateBinary('tunnel-client', opts.settings.binaryPath);
+  const located = locateBinary('tunnel-client', opts.settings.binaryPath);
+  const binary = located ? await runnableBinary(located) : null;
   if (!binary) {
     throw new TunnelError(
       'tunnel-client was not found. Install it from github.com/openai/tunnel-client, or point at it in Connection settings.'
@@ -295,6 +297,8 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
     lastHandshake: number | null;
     /** When /readyz first failed in the current run of failures; 0 when it is answering. */
     unreadySince: number;
+    /** Stops reading this run's log file. */
+    unfollow?: () => void;
     pollErrors: number;
     healthBase: string | null;
     health: TunnelHealth | null;
@@ -307,6 +311,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
   let retirement: Promise<void> = Promise.resolve();
   /** Consecutive failed attempts, which is what the backoff grows on. */
   let attempts = 0;
+  let launches = 0;
   /** Names this connector in the log, since core and desktop both run one of these. */
   const tag = opts.label ? `${opts.label} tunnel` : 'tunnel';
 
@@ -417,6 +422,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
   const restart = (run: ClientRun, detail: string, terminate: boolean): void => {
     if (stopped || current !== run) return;
     current = null;
+    run.unfollow?.();
     clearTimer();
     attempts += 1;
     const wait = Math.min(MAX_BACKOFF_MS, 2000 * 2 ** (attempts - 1));
@@ -526,6 +532,8 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
     const discoveryHeaders = Object.entries(opts.discoveryHeaders ?? {})
       .map(([name, value]) => `${name}: ${value}`)
       .join(', ');
+    // A file, not a pipe: the client may outlive this app for the restart handover (#1220).
+    const log = openClientLog(workDir, ++launches);
     const proc = spawn(binary, args, {
       // Keep both credentials and the secret local MCP path out of argv/process listings.
       // tunnel-client officially supports these environment-backed configuration fields.
@@ -538,7 +546,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
       // Own a POSIX process group so stopTree terminates any helpers the client starts.
       // Windows uses taskkill /T and keeps its existing launch semantics.
       detached: process.platform !== 'win32',
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: log.stdio
     });
     const run: ClientRun = {
       proc,
@@ -557,6 +565,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
     const rejectAuthentication = (): void => {
       stopped = true;
       current = null;
+      run.unfollow?.();
       clearTimer();
       retirement = stopTree(proc).then(() => undefined);
       opts.report({
@@ -613,8 +622,7 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
       }
     };
 
-    proc.stdout.on('data', lineReader(handleLine));
-    proc.stderr.on('data', lineReader(handleLine));
+    run.unfollow = log.attach(proc, lineReader(handleLine));
 
     proc.on('exit', (code) => {
       if (stopped || current !== run) return;
@@ -673,9 +681,11 @@ async function startOpenAiTunnel(opts: TunnelStartOptions): Promise<TunnelHandle
       const active = current;
       current = null;
       const proc = active?.proc ?? null;
+      active?.unfollow?.();
       if (options?.lingerMs && proc?.pid !== undefined && !exited(proc)) {
         // Left running on purpose: OpenAI still routes existing chats here for about two minutes.
-        reapLater(proc.pid, options.lingerMs);
+        // The reaper also removes its folder, which holds the log file the client still writes.
+        reapLater(proc.pid, options.lingerMs, process.platform, workDir);
         proc.unref();
         await retirement;
         return;

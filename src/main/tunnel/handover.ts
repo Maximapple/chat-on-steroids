@@ -29,10 +29,41 @@ export interface EndpointHandover {
 
 const PATH = /^\/mcp\/[a-z]+\/[A-Za-z0-9_-]{43}$/;
 let file: string | null = null;
+let dataDir: string | null = null;
 
 /** Where the handover lives: the app's private data directory, set once at startup. */
 export function configureHandover(directory: string): void {
+  dataDir = directory;
   file = path.join(directory, 'tunnel-handover.json');
+}
+
+/**
+ * The tunnel-client to start. On Windows a running executable cannot be replaced, and the
+ * previous one keeps running through an update, so the installer would fail on the bundled
+ * copy: run a copy kept in the app's data folder instead, one per binary version.
+ */
+export async function runnableBinary(binary: string, platform: NodeJS.Platform = process.platform): Promise<string> {
+  if (platform !== 'win32' || !dataDir) return binary;
+  try {
+    const stat = await fs.stat(binary);
+    const root = path.join(dataDir, 'tunnel-bin');
+    const version = `${stat.size}-${Math.floor(stat.mtimeMs)}`;
+    const target = path.join(root, version, path.basename(binary));
+    const existing = await fs.stat(target).catch(() => null);
+    if (existing?.size !== stat.size) {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      const temporary = `${target}.${process.pid}.tmp`;
+      await fs.copyFile(binary, temporary);
+      await fs.rename(temporary, target);
+    }
+    // Older versions go once nothing runs them; a copy still in use simply stays until next time.
+    for (const entry of await fs.readdir(root).catch(() => [] as string[])) {
+      if (entry !== version) await fs.rm(path.join(root, entry), { recursive: true, force: true }).catch(() => {});
+    }
+    return target;
+  } catch {
+    return binary;
+  }
 }
 
 export async function saveHandover(handover: Omit<EndpointHandover, 'savedAt'>, now = Date.now()): Promise<void> {
@@ -67,13 +98,17 @@ export async function takeHandover(now = Date.now()): Promise<EndpointHandover |
  * this app. The lingering tunnel-client is never this app's to forget: if no new app starts, it
  * still goes.
  */
-export function reapLater(pid: number, ms: number, platform: NodeJS.Platform = process.platform): void {
+export function reapLater(pid: number, ms: number, platform: NodeJS.Platform = process.platform, folder?: string): void {
   const seconds = Math.max(1, Math.ceil(ms / 1000));
+  // The folder is the client's own temporary one (its log file); removed once the client is gone.
+  const quoted = folder && /^[^"'$`\\\r\n]+$/.test(folder) ? folder : null;
   const child = platform === 'win32'
     // `timeout` needs a console; ping waits about one second per echo request without one.
-    ? spawn('cmd.exe', ['/d', '/c', `ping -n ${seconds + 1} 127.0.0.1 >nul & taskkill /PID ${pid} /T /F >nul 2>&1`],
+    ? spawn('cmd.exe', ['/d', '/c', `ping -n ${seconds + 1} 127.0.0.1 >nul & taskkill /PID ${pid} /T /F >nul 2>&1` +
+      (quoted ? ` & ping -n 3 127.0.0.1 >nul & rmdir /s /q "${quoted}"` : '')],
       { detached: true, stdio: 'ignore', windowsHide: true })
-    : spawn('/bin/sh', ['-c', `sleep ${seconds}; kill -9 -${pid} 2>/dev/null || kill -9 ${pid} 2>/dev/null`],
+    : spawn('/bin/sh', ['-c', `sleep ${seconds}; kill -9 -${pid} 2>/dev/null || kill -9 ${pid} 2>/dev/null` +
+      (quoted ? `; rm -rf '${quoted}'` : '')],
       { detached: true, stdio: 'ignore' });
   child.on('error', () => {});
   child.unref();
