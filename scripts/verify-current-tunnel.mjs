@@ -6,6 +6,7 @@ const UPSTREAM_REPOSITORY = 'openai/tunnel-client';
 
 export async function assertCurrentTunnelRelease({
   pinnedVersion = TUNNEL_CLIENT.version,
+  heldBack = TUNNEL_CLIENT.heldBack ?? null,
   token,
   fetchImpl = fetch,
   apiBase = DEFAULT_API
@@ -37,6 +38,8 @@ export async function assertCurrentTunnelRelease({
   if (!/^v\d+\.\d+\.\d+$/.test(latestVersion) || release.draft || release.prerelease) {
     throw new Error('OpenAI tunnel-client latest-release response was not a stable semantic-version release.');
   }
+  // A documented hold (packaging-versions.mjs) passes only against the exact release it names.
+  if (heldBack && latestVersion === heldBack.latest && latestVersion !== pinnedVersion) return release;
   if (latestVersion !== pinnedVersion) {
     throw new Error(
       `Pinned tunnel-client ${pinnedVersion} is stale; OpenAI's current release is ${latestVersion}. Update packaging-versions.mjs and its six checksums before publishing.`
@@ -50,7 +53,9 @@ async function main() {
   const release = await assertCurrentTunnelRelease({
     token: process.env.GH_TOKEN || process.env.GITHUB_TOKEN
   });
-  process.stdout.write(`Pinned tunnel-client ${TUNNEL_CLIENT.version} matches OpenAI's current release (${release.html_url ?? UPSTREAM_REPOSITORY}).\n`);
+  process.stdout.write(release.tag_name === TUNNEL_CLIENT.version
+    ? `Pinned tunnel-client ${TUNNEL_CLIENT.version} matches OpenAI's current release (${release.html_url ?? UPSTREAM_REPOSITORY}).\n`
+    : `Pinned tunnel-client ${TUNNEL_CLIENT.version} is held back from ${release.tag_name} (${TUNNEL_CLIENT.heldBack.issue}).\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

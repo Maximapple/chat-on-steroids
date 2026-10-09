@@ -93,6 +93,20 @@ describe('cross-platform packaging targets', () => {
       pinnedVersion: 'v0.0.14',
       fetchImpl: response({ message: 'rate limited' }, 403)
     })).rejects.toThrow(/refusing to publish without proving the pin is current/);
+    // A documented hold passes only against the exact newer release it names (#1220).
+    const held = { latest: 'v0.0.16', issue: '#1220' };
+    await expect(assertCurrentTunnelRelease({
+      pinnedVersion: 'v0.0.15', heldBack: held,
+      fetchImpl: response({ tag_name: 'v0.0.16', draft: false, prerelease: false })
+    })).resolves.toMatchObject({ tag_name: 'v0.0.16' });
+    await expect(assertCurrentTunnelRelease({
+      pinnedVersion: 'v0.0.15', heldBack: held,
+      fetchImpl: response({ tag_name: 'v0.0.17', draft: false, prerelease: false })
+    })).rejects.toThrow(/v0\.0\.15 is stale.*v0\.0\.17/);
+    await expect(assertCurrentTunnelRelease({
+      pinnedVersion: 'v0.0.15', heldBack: null,
+      fetchImpl: response({ tag_name: 'v0.0.16', draft: false, prerelease: false })
+    })).rejects.toThrow(/v0\.0\.15 is stale/);
   });
 
   it('selects only target Sharp packages and unpacked directory families', () => {

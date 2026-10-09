@@ -4392,7 +4392,7 @@ upstream binaries while retaining that distribution's checksum or notices.
 | Build owner | Contract |
 | --- | --- |
 | `scripts/package.mjs` | Icons → bundle → explicit target resources/native staging → builder with publishing disabled. |
-| `packaging-targets.mjs`, `packaging-versions.mjs` | Supported OS/arch vocabulary and pinned target checksums; fetchers share these authorities. |
+| `packaging-targets.mjs`, `packaging-versions.mjs` | Supported OS/arch vocabulary and pinned target checksums; fetchers share these authorities. tunnel-client normally pins OpenAI's latest release (`verify-current-tunnel.mjs` refuses a stale pin); a documented `heldBack` names the one newer release it may stay behind, with its issue (v0.0.15 over v0.0.16 for #1220). |
 | `prepare-packaging-native.mjs` | Exact target node-pty/Sharp/tree-sitter from verified package material; host leftovers cannot win. |
 | `prepare-macos-desktop-helper.mjs` | Thin target Swift dylib + matching N-API addon; packaged in-process permission identity. |
 | `smoke-packaged-runtime.mjs`, `smoke-macos-{bundle,gui}.mjs` | In-place resource/native-stack checks, Mac bundle/seal and real GUI startup evidence. |
