@@ -237,9 +237,9 @@ export async function findInSession(id: string, query: string): Promise<SessionS
   const events = await readEvents(id, { kinds: ['user_message', 'assistant_message'] });
   const found: SessionSearchLocation[] = [];
   for (const entry of transcriptEntries(events)) {
-    const text = entry.stored.truncated && entry.stored.assetId
+    const text = providerEntitiesAsMarkdown(entry.stored.truncated && entry.stored.assetId
       ? (await readOverflowText(id, entry.stored.assetId)) ?? entry.stored.text
-      : entry.stored.text;
+      : entry.stored.text);
     if (!foldCase(text.replace(/\s+/g, ' ')).includes(phrase)) continue;
     const event = events.find(candidate => candidate.seq === entry.seq);
     if (!event || (event.kind !== 'user_message' && event.kind !== 'assistant_message')) continue;
