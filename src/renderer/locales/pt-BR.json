@@ -2715,5 +2715,6 @@
   "Start a branch with one plain message": "Comece uma ramificação com uma mensagem simples",
   "ChatGPT did not offer Branch in new chat for that reply. Open the original chat, then try again.": "O ChatGPT não ofereceu “Ramificar em um novo chat” para essa resposta. Abra o chat original e tente de novo.",
   "That reply is no longer in the original ChatGPT chat, so it cannot be branched.": "Essa resposta não está mais no chat original do ChatGPT, então não pode ser ramificada.",
-  "Unblock this conversation before sending": "Desbloqueie esta conversa antes de enviar"
+  "Unblock this conversation before sending": "Desbloqueie esta conversa antes de enviar",
+  "Wait until the chat you branch from finishes its turn, then send again": "Aguarde o chat de origem terminar o turno e envie de novo"
 }
